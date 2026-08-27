@@ -208,7 +208,10 @@ impl Page {
             ));
         }
         let cell_len = u16::try_from(cell.len()).map_err(|_| {
-            BtreeError::InvalidInput(format!("cell has {} bytes; length does not fit u16", cell.len()))
+            BtreeError::InvalidInput(format!(
+                "cell has {} bytes; length does not fit u16",
+                cell.len()
+            ))
         })?;
         let needed = SLOT_LEN
             .checked_add(cell.len())
@@ -352,9 +355,7 @@ impl Pager {
         if physical_bytes < minimum {
             return Err(corruption(
                 0,
-                format!(
-                    "page file has {physical_bytes} bytes; two superblocks require {minimum}"
-                ),
+                format!("page file has {physical_bytes} bytes; two superblocks require {minimum}"),
             ));
         }
 
@@ -470,7 +471,10 @@ impl Pager {
             corruption(0, "superblock generation exhausted before page allocation")
         })?;
         let next_page_count = self.active.page_count.checked_add(1).ok_or_else(|| {
-            corruption(0, "superblock page counter exhausted before page allocation")
+            corruption(
+                0,
+                "superblock page counter exhausted before page allocation",
+            )
         })?;
         let next = Superblock {
             slot: alternate_slot(self.active.slot),
@@ -575,8 +579,7 @@ impl Pager {
         if page_id < SUPERBLOCK_COUNT || page_id >= self.active.page_count {
             return Err(BtreeError::InvalidInput(format!(
                 "page id {page_id} is outside committed data range {}..{}",
-                SUPERBLOCK_COUNT,
-                self.active.page_count
+                SUPERBLOCK_COUNT, self.active.page_count
             )));
         }
         Ok(())
@@ -662,10 +665,7 @@ impl Superblock {
                 format!("unsupported superblock flags {flags:#010x}"),
             ));
         }
-        if bytes[44..CHECKSUM_OFFSET]
-            .iter()
-            .any(|byte| *byte != 0)
-        {
+        if bytes[44..CHECKSUM_OFFSET].iter().any(|byte| *byte != 0) {
             return Err(corruption(base + 44, "nonzero reserved superblock payload"));
         }
 
@@ -742,7 +742,11 @@ impl PageCache {
     }
 
     fn touch(&mut self, page_id: u64) {
-        if let Some(position) = self.order.iter().position(|candidate| *candidate == page_id) {
+        if let Some(position) = self
+            .order
+            .iter()
+            .position(|candidate| *candidate == page_id)
+        {
             self.order.remove(position);
         }
         self.order.push_back(page_id);
@@ -773,9 +777,7 @@ fn validate_page_bytes(bytes: &[u8; PAGE_SIZE], expected_page_id: u64) -> Result
     if encoded_page_id != expected_page_id {
         return Err(corruption(
             base + 8,
-            format!(
-                "page header id is {encoded_page_id}; physical page id is {expected_page_id}"
-            ),
+            format!("page header id is {encoded_page_id}; physical page id is {expected_page_id}"),
         ));
     }
     let page_generation = read_u64(&bytes[16..24]);
@@ -793,9 +795,11 @@ fn validate_page_bytes(bytes: &[u8; PAGE_SIZE], expected_page_id: u64) -> Result
         return Err(corruption(base + 30, "nonzero reserved page-header bytes"));
     }
     let expected_lower = DATA_HEADER_LEN
-        .checked_add(cell_count.checked_mul(SLOT_LEN).ok_or_else(|| {
-            corruption(base + 28, "slot-array length overflowed usize")
-        })?)
+        .checked_add(
+            cell_count
+                .checked_mul(SLOT_LEN)
+                .ok_or_else(|| corruption(base + 28, "slot-array length overflowed usize"))?,
+        )
         .ok_or_else(|| corruption(base + 28, "slot-array end overflowed usize"))?;
     if lower != expected_lower {
         return Err(corruption(
@@ -849,7 +853,10 @@ fn validate_page_bytes(bytes: &[u8; PAGE_SIZE], expected_page_id: u64) -> Result
             ));
         }
         let end = start.checked_add(length).ok_or_else(|| {
-            corruption(base + u64::try_from(slot).unwrap_or(0), "cell extent overflowed usize")
+            corruption(
+                base + u64::try_from(slot).unwrap_or(0),
+                "cell extent overflowed usize",
+            )
         })?;
         if start < upper || end > CHECKSUM_OFFSET {
             return Err(corruption(
@@ -877,9 +884,7 @@ fn validate_page_bytes(bytes: &[u8; PAGE_SIZE], expected_page_id: u64) -> Result
     if expected_start != CHECKSUM_OFFSET {
         return Err(corruption(
             base + u64::try_from(expected_start.min(CHECKSUM_OFFSET)).unwrap_or(0),
-            format!(
-                "packed cell payload ends at {expected_start}; expected {CHECKSUM_OFFSET}"
-            ),
+            format!("packed cell payload ends at {expected_start}; expected {CHECKSUM_OFFSET}"),
         ));
     }
 
@@ -945,7 +950,11 @@ fn write_superblock(file: &mut File, superblock: Superblock) -> Result<()> {
 }
 
 fn alternate_slot(slot: u8) -> u8 {
-    if slot == 0 { 1 } else { 0 }
+    if slot == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 fn validate_cache_capacity(cache_capacity: usize) -> Result<()> {
@@ -981,9 +990,7 @@ fn validate_checksum(bytes: &[u8; PAGE_SIZE], base: u64) -> Result<()> {
     if expected != actual {
         return Err(corruption(
             base + CHECKSUM_OFFSET as u64,
-            format!(
-                "page checksum mismatch: expected {expected:08x}, computed {actual:08x}"
-            ),
+            format!("page checksum mismatch: expected {expected:08x}, computed {actual:08x}"),
         ));
     }
     Ok(())
@@ -1017,9 +1024,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{
-        BtreeError, PageKind, Pager, PAGE_SIZE, PAGE_SIZE_U64, SUPERBLOCK_COUNT,
-    };
+    use super::{BtreeError, PageKind, Pager, PAGE_SIZE, PAGE_SIZE_U64, SUPERBLOCK_COUNT};
 
     #[test]
     fn slotted_cells_round_trip_through_reopen() {
@@ -1035,7 +1040,8 @@ mod tests {
         assert_eq!(leaf.page_id(), SUPERBLOCK_COUNT);
         assert_eq!(leaf.insert_cell(b"\x00first").expect("insert first"), 0);
         assert_eq!(
-            leaf.insert_cell(&[0xff, 0x00, 0x7f]).expect("insert binary"),
+            leaf.insert_cell(&[0xff, 0x00, 0x7f])
+                .expect("insert binary"),
             1
         );
         let page_id = pager.commit_new_page(leaf).expect("commit leaf");
@@ -1147,7 +1153,10 @@ mod tests {
             .expect("recovery must be reported");
         assert_eq!(recovery.page_id, SUPERBLOCK_COUNT);
         assert_eq!(recovery.available_bytes, 16);
-        assert_eq!(fs::metadata(&path).expect("metadata").len(), committed_bytes);
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").len(),
+            committed_bytes
+        );
     }
 
     #[test]
