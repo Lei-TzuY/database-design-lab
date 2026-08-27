@@ -9,9 +9,11 @@ repository.workspace = true
 
 [dependencies]
 crc32fast.workspace = true
+db-core = { path = "../db-core" }
 thiserror.workspace = true
 
 [dev-dependencies]
+db-storage-memory = { path = "../db-storage-memory" }
 tempfile.workspace = true
 
 [lints]

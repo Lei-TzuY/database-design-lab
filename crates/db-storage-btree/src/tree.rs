@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 
+mod common;
 mod delete;
 mod overflow;
 mod reuse;
@@ -40,6 +41,7 @@ const MAX_INLINE_KEY_BYTES: usize =
 pub struct BPlusTree {
     pager: Pager,
     reusable_pages: VecDeque<u64>,
+    cache_capacity: usize,
 }
 
 impl BPlusTree {
@@ -48,6 +50,7 @@ impl BPlusTree {
         Ok(Self {
             pager: Pager::create_new(path, cache_capacity)?,
             reusable_pages: VecDeque::new(),
+            cache_capacity,
         })
     }
 
@@ -56,6 +59,7 @@ impl BPlusTree {
         let mut tree = Self {
             pager: Pager::open(path, cache_capacity)?,
             reusable_pages: VecDeque::new(),
+            cache_capacity,
         };
         tree.validate_reachable_tree()?;
         tree.refresh_reusable_pages()?;
