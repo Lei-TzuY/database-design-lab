@@ -142,6 +142,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "db-storage-btree"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "db-storage-log"
 version = "0.1.0"
 dependencies = [
