@@ -17,4 +17,19 @@ text = text.replace(
     "            value: super::StoredValue::Inline(b\"new-but-unpublished\".to_vec()),",
     1,
 )
+text = text.replace(
+    "use super::{encode_leaf_cell, BPlusTree, LeafEntry, MAX_TREE_KEY_BYTES};",
+    "use super::{\n        encode_leaf_cell, BPlusTree, LeafEntry, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES,\n    };",
+    1,
+)
+text = text.replace(
+    "fn oversized_key_or_single_entry_is_rejected_before_writing()",
+    "fn oversized_key_or_value_is_rejected_before_writing()",
+    1,
+)
+text = text.replace(
+    "            .put(b\"key\", &vec![0_u8; 5000])\n            .expect_err(\"oversized inline entry must fail\");",
+    "            .put(b\"key\", &vec![0_u8; MAX_TREE_VALUE_BYTES + 1])\n            .expect_err(\"oversized value must fail\");",
+    1,
+)
 tree.write_text(text)
