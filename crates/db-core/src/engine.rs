@@ -1,0 +1,165 @@
+use serde::Serialize;
+
+use crate::{ByteString, DbError, Outcome, Result, Workload, WorkloadStep};
+
+/// Maximum key size in the first common KV semantics.
+pub const MAX_KEY_BYTES: usize = 4 * 1024;
+/// Maximum value size in the first common KV semantics.
+pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
+
+/// Logical contract exposed by an engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalModel {
+    /// Opaque binary key to opaque binary value.
+    KeyValue,
+}
+
+/// Physical architecture actually implemented by an engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageArchitecture {
+    /// Deterministic volatile oracle, not a persistent storage candidate.
+    InMemoryReference,
+    /// Versioned checksummed mutation log plus replay index.
+    AppendLog,
+}
+
+/// Concurrency contract actually enforced by the current engine boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyMode {
+    /// The caller serializes access; no cross-process exclusion is provided.
+    CallerSerialized,
+}
+
+/// Whether acknowledged state survives process restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Persistence {
+    /// State exists only in memory.
+    Volatile,
+    /// State is represented in a versioned on-disk format.
+    Persistent,
+}
+
+/// Crash-recovery behavior currently exposed by an engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrashRecovery {
+    /// No persistent crash recovery is applicable.
+    None,
+    /// Valid records replay and a structurally valid incomplete final append is discarded.
+    TruncatedFinalAppend,
+}
+
+/// Distribution behavior currently exposed by an engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DistributionMode {
+    /// One local process owns the engine; no replication protocol exists.
+    Standalone,
+}
+
+/// Explicit capabilities used to prevent accidental incomparable experiments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EngineCapabilities {
+    /// Stable engine identifier.
+    pub name: &'static str,
+    /// Logical model implemented by the trait contract.
+    pub logical_model: LogicalModel,
+    /// Physical storage architecture.
+    pub storage_architecture: StorageArchitecture,
+    /// Concurrency contract.
+    pub concurrency: ConcurrencyMode,
+    /// Persistence behavior.
+    pub persistence: Persistence,
+    /// Crash-recovery behavior.
+    pub crash_recovery: CrashRecovery,
+    /// Distribution behavior.
+    pub distribution: DistributionMode,
+    /// Whether the public common semantics currently include ordered range scans.
+    pub ordered_range_scan: bool,
+    /// Maximum accepted key bytes.
+    pub max_key_bytes: usize,
+    /// Maximum accepted value bytes.
+    pub max_value_bytes: usize,
+}
+
+/// Minimal engine contract proven by the reference and append-log implementations.
+pub trait KvEngine {
+    /// Returns explicit capabilities for experiment validation.
+    fn capabilities(&self) -> EngineCapabilities;
+
+    /// Sets a key and returns the previous value, if any.
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Reads a key.
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Deletes a key and returns the previous value, if any.
+    fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Closes and reopens engine state, replaying persistent state where applicable.
+    fn reopen(&mut self) -> Result<()>;
+}
+
+/// Validates a key against the common semantics.
+pub fn validate_key(key: &[u8]) -> Result<()> {
+    if key.len() > MAX_KEY_BYTES {
+        return Err(DbError::InvalidInput(format!(
+            "key has {} bytes; maximum is {MAX_KEY_BYTES}",
+            key.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Validates a key/value pair against the common semantics.
+pub fn validate_key_value(key: &[u8], value: &[u8]) -> Result<()> {
+    validate_key(key)?;
+    if value.len() > MAX_VALUE_BYTES {
+        return Err(DbError::InvalidInput(format!(
+            "value has {} bytes; maximum is {MAX_VALUE_BYTES}",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Executes one step using the common observable semantics.
+pub fn execute_step<E: KvEngine>(engine: &mut E, step: &WorkloadStep) -> Result<Outcome> {
+    match step {
+        WorkloadStep::Put { key, value } => {
+            engine
+                .put(key.as_slice(), value.as_slice())
+                .map(|previous| Outcome::Put {
+                    previous: previous.map(ByteString::from),
+                })
+        }
+        WorkloadStep::Get { key } => engine.get(key.as_slice()).map(|value| Outcome::Get {
+            value: value.map(ByteString::from),
+        }),
+        WorkloadStep::Delete { key } => {
+            engine
+                .delete(key.as_slice())
+                .map(|previous| Outcome::Delete {
+                    previous: previous.map(ByteString::from),
+                })
+        }
+        WorkloadStep::Reopen => {
+            engine.reopen()?;
+            Ok(Outcome::Reopened)
+        }
+    }
+}
+
+/// Executes a validated workload and returns every observable result.
+pub fn execute_workload<E: KvEngine>(engine: &mut E, workload: &Workload) -> Result<Vec<Outcome>> {
+    workload.validate()?;
+    workload
+        .steps
+        .iter()
+        .map(|step| execute_step(engine, step))
+        .collect()
+}
