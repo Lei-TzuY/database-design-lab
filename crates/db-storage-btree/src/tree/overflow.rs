@@ -21,7 +21,9 @@ impl BPlusTree {
             .checked_add(LEAF_CELL_HEADER_LEN)
             .and_then(|length| length.checked_add(key.len()))
             .and_then(|length| length.checked_add(value.len()))
-            .ok_or_else(|| BtreeError::InvalidInput("inline leaf value extent overflowed usize".to_owned()))?;
+            .ok_or_else(|| {
+                BtreeError::InvalidInput("inline leaf value extent overflowed usize".to_owned())
+            })?;
         if inline_occupied <= PAGE_BODY_CAPACITY {
             return Ok(StoredValue::Inline(value.to_vec()));
         }
@@ -128,7 +130,10 @@ impl BPlusTree {
             if page.cell_count() != 1 {
                 return Err(corruption(
                     0,
-                    format!("overflow page {page_id} has {} cells; expected exactly one", page.cell_count()),
+                    format!(
+                        "overflow page {page_id} has {} cells; expected exactly one",
+                        page.cell_count()
+                    ),
                 ));
             }
             let chunk = page.cell(0)?;
@@ -184,15 +189,27 @@ mod tests {
             .map(|index| ((index * 131 + 17) & 0xff) as u8)
             .collect::<Vec<_>>();
 
-        assert_eq!(tree.put(b"large", &value).expect("insert large value"), None);
-        assert_eq!(tree.get(b"large").expect("read large value"), Some(value.clone()));
+        assert_eq!(
+            tree.put(b"large", &value).expect("insert large value"),
+            None
+        );
+        assert_eq!(
+            tree.get(b"large").expect("read large value"),
+            Some(value.clone())
+        );
         let pages_after_insert = tree.data_page_count();
         assert!(pages_after_insert > 200);
         drop(tree);
 
         let mut reopened = BPlusTree::open(&path, 8).expect("reopen tree");
-        assert_eq!(reopened.get(b"large").expect("reopened read"), Some(value.clone()));
-        assert_eq!(reopened.delete(b"large").expect("delete large value"), Some(value));
+        assert_eq!(
+            reopened.get(b"large").expect("reopened read"),
+            Some(value.clone())
+        );
+        assert_eq!(
+            reopened.delete(b"large").expect("delete large value"),
+            Some(value)
+        );
         assert_eq!(reopened.root_page_id(), None);
     }
 
@@ -219,10 +236,8 @@ mod tests {
         let path = directory.path().join("inline-boundary.db");
         let mut tree = BPlusTree::create_new(&path, 4).expect("create tree");
         let key = b"key";
-        let inline_len = super::PAGE_BODY_CAPACITY
-            - super::SLOT_LEN
-            - super::LEAF_CELL_HEADER_LEN
-            - key.len();
+        let inline_len =
+            super::PAGE_BODY_CAPACITY - super::SLOT_LEN - super::LEAF_CELL_HEADER_LEN - key.len();
         let value = vec![0x5a; inline_len];
 
         tree.put(key, &value).expect("insert maximum inline value");
