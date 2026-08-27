@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Wire overflow value representation
-        run: python .github/scripts/integrate_overflow_values.py
+        run: |
+          python .github/scripts/integrate_overflow_values.py
+          python .github/scripts/fix_overflow_integration.py
       - name: Validate implementation
         run: |
           cargo fmt --all
