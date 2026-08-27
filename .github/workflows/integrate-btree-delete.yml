@@ -20,31 +20,84 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Wire deletion module and apply lint fix
+      - name: Align deletion source and documentation
         shell: python
         run: |
           from pathlib import Path
-          path = Path("crates/db-storage-btree/src/tree.rs")
-          text = path.read_text()
-          marker = "use super::{\n"
-          if "mod delete;\n" not in text:
-              pos = text.index(marker)
-              text = text[:pos] + "mod delete;\n\n" + text[pos:]
-              path.write_text(text)
 
-          delete = Path("crates/db-storage-btree/src/tree/delete.rs")
-          text = delete.read_text().replace(
-              "BPlusTree, ChildRef, LeafEntry, Page, PageKind,",
-              "BPlusTree, ChildRef, Page, PageKind,",
+          tree = Path("crates/db-storage-btree/src/tree.rs")
+          text = tree.read_text()
+          text = text.replace(
+              "/// Persistent copy-on-write B+ tree supporting binary point lookup and insertion/update.\n///\n/// Mutations never overwrite a reachable data page. A `put` rewrites the changed leaf and every\n/// ancestor as newly appended immutable pages, synchronizes those pages through [`Pager`], then\n/// publishes exactly one new root pointer through the mirrored superblock. A crash before that final\n/// root publication leaves the previous tree authoritative; already committed shadow pages are\n/// unreachable space that later reclamation work may recover.",
+              "/// Persistent copy-on-write B+ tree supporting binary point lookup, insertion/update, and deletion.\n///\n/// Mutations never overwrite a reachable data page. `put` and `delete` append replacement leaves and\n/// ancestors through [`Pager`] before publishing exactly one new root pointer through the mirrored\n/// superblock. Deletion byte-balances or merges an underfull child with an adjacent sibling and\n/// contracts one-child roots. A crash before root publication leaves the previous tree authoritative;\n/// already committed shadow pages are unreachable space that later reclamation work may recover.",
           )
-          delete.write_text(text)
+          tree.write_text(text)
+
+          readme = Path("README.md")
+          text = readme.read_text()
+          text = text.replace(
+              "an executable persistent point-lookup/insertion slice, but is not yet a complete common `KvEngine`:",
+              "an executable persistent point-operation slice, but is not yet a complete common `KvEngine`:",
+          )
+          text = text.replace(
+              "| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`, leaf/internal encodings, root and non-root splits, reachable-tree validation, and bounded validated-page caching |",
+              "| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`/`DELETE`, root/non-root splits, byte-aware delete redistribution/merge, root contraction, reachable-tree validation, and bounded validated-page caching |",
+          )
+          text = text.replace(
+              "extent and published root. A `PUT` never overwrites a reachable page: it appends a replacement leaf,\ncopy-on-write ancestors, and any split pages, synchronizing every immutable allocation before finally\npublishing one new root pointer. A crash before that final root publication therefore leaves the old\nroot authoritative; already committed shadow pages are unreachable history. Deletion, reclamation,\nordered scans, large overflow values, and a common `KvEngine` implementation are not claimed yet.",
+              "extent and published root. `PUT` and `DELETE` never overwrite a reachable page: they append replacement\nleaves and ancestors, with insertion splitting overflowing pages and deletion merging or byte-balancing\nan underfull child with an adjacent sibling before one final root publication. Deletion also contracts\na one-child root and can publish an empty tree after the last key. A crash before that root publication\ntherefore leaves the old root authoritative; committed shadow pages are unreachable history. Space\nreclamation/reuse, ordered scans, large overflow values, and a common `KvEngine` implementation remain deferred.",
+          )
+          text = text.replace(
+              "ancestor are appended as immutable pages, root/non-root overflows are split into new pages, and only\nafter all replacement pages are durable is the new root id published through another superblock\ntransition. Reopen selects the newest valid superblock and validates the complete reachable tree,",
+              "ancestor are appended as immutable pages. Root/non-root overflows split into new pages; deletion\nremoves the target entry, merges sibling pages when their combined encoded cells fit, otherwise\nredistributes them by encoded byte size, and contracts a one-child root. Only after all replacement\npages are durable is the new root id published through another superblock transition. Reopen selects\nthe newest valid superblock and validates the complete reachable tree,",
+          )
+          text = text.replace(
+              "[B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, copy-on-write\n  insertion/split publication, validation, and current crash-state limits.",
+              "[B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, copy-on-write\n  insert/delete publication, split/rebalance behavior, validation, and current crash-state limits.",
+          )
+          readme.write_text(text)
+
+          roadmap = Path("docs/roadmap.md")
+          text = roadmap.read_text()
+          text = text.replace(
+              "- [ ] Implement deletion, redistribution/merge, root contraction, and space reuse/reclamation of\n  unreachable copy-on-write history.",
+              "- [x] Implement copy-on-write deletion with missing-key no-op semantics, byte-aware adjacent-sibling\n  redistribution/merge, empty-tree publication, and root contraction; deterministic multi-level tests\n  delete a height-3+ tree down to one leaf and validate reopen.\n- [ ] Implement crash-safe space reuse/reclamation for unreachable copy-on-write history without\n  weakening root-publication atomicity or corruption detection.",
+          )
+          roadmap.write_text(text)
+
+          design = Path("docs/design-space.md")
+          text = design.read_text().replace(
+              "| Binary KV + B+ tree + standalone | Point slice implemented, common capability deferred | `db-storage-btree` has mirrored checksummed pages plus copy-on-write binary lookup/insertion, root/non-root splits, root publication, reopen validation, and deterministic split/shadow-page tests; delete, reclamation, ordered scan, overflow values, and common `KvEngine` admission remain deferred |",
+              "| Binary KV + B+ tree + standalone | Point mutation slice implemented, common capability deferred | `db-storage-btree` has mirrored checksummed pages plus copy-on-write binary lookup/insert/delete, root/non-root splits, delete redistribution/merge, root contraction, root publication, reopen validation, and deterministic split/delete/shadow-page tests; reclamation, ordered scan, overflow values, and common `KvEngine` admission remain deferred |",
+          )
+          design.write_text(text)
+
+          page = Path("docs/btree-page-format.md")
+          text = page.read_text()
+          text = text.replace(
+              "layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update, and\nroot/non-root split publication. It is intentionally not yet a common `KvEngine`: deletion, space\nreclamation, ordered scans, overflow values, and common-contract size limits remain deferred.",
+              "layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update/deletion,\nroot/non-root split propagation, deletion redistribution/merge, and root contraction. It is intentionally\nnot yet a common `KvEngine`: space reclamation, ordered scans, overflow values, and common-contract size\nlimits remain deferred.",
+          )
+          text = text.replace(
+              "A successful tree `PUT` does not modify any page reachable from the currently published root. It:",
+              "A successful tree mutation does not modify any page reachable from the currently published root.\n`PUT` performs:",
+          )
+          marker = "A crash before step 7 leaves the old root authoritative."
+          delete_section = "`DELETE` follows the same publication boundary. It first confirms the key exists, so deleting a\nmissing key is a true no-op with no page allocation or metadata generation. The changed leaf is copied\nwithout the target entry. If that child becomes underfull, the parent combines it with an adjacent\nsibling: when all encoded cells fit on one page the pair merges; otherwise cells are redistributed by\nencoded byte size. Internal redistribution requires at least two children on each resulting sibling.\nAn empty child disappears from its parent, a one-child top-level internal page contracts to its only\nchild, and deleting the final leaf entry publishes `root = 0`. Replacement pages are synchronized\nbefore the final root-pointer transition exactly as for `PUT`.\n\n"
+          if delete_section not in text:
+              text = text.replace(marker, delete_section + marker, 1)
+          text = text.replace(
+              "Format/tree work still does not define deletion, redistribution/merge, root contraction, free-list or\ncopy-on-write history reclamation, overflow values, a copy-on-write-compatible ordered leaf scan,",
+              "Format/tree work still does not define a free-list or copy-on-write history reclamation, overflow\nvalues, a copy-on-write-compatible ordered leaf scan,",
+          )
+          page.write_text(text)
       - name: Validate implementation
         run: |
           cargo fmt --all
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-      - name: Commit integration when needed
+      - name: Commit documentation when needed
         shell: bash
         run: |
           if git diff --quiet; then
@@ -52,6 +105,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/delete.rs
-          git commit -m "feat(btree): wire deletion and rebalance path"
+          git add README.md crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/delete.rs docs/btree-page-format.md docs/design-space.md docs/roadmap.md
+          git commit -m "docs(btree): record deletion and rebalance semantics"
           git push origin HEAD:feat/btree-delete-rebalance
