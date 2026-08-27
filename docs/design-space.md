@@ -67,7 +67,7 @@ Status is explicit and intentionally sparse:
 | Binary KV + in-memory map + caller serialization + standalone | Implemented oracle | `db-storage-memory`; deterministic semantic tests |
 | Binary KV + append log + caller serialization + standalone | Implemented candidate | `db-storage-log`; replay, checksum, corruption, prefix-interruption, and differential tests |
 | Ordered KV range scan on append log | Not exposed | the replay `BTreeMap` is recovery state, not a measured on-disk ordered access path |
-| Binary KV + B+ tree + standalone | Point slice implemented, common capability deferred | `db-storage-btree` has mirrored checksummed pages plus copy-on-write binary lookup/insertion, root/non-root splits, root publication, reopen validation, and deterministic split/shadow-page tests; delete, reclamation, ordered scan, overflow values, and common `KvEngine` admission remain deferred |
+| Binary KV + B+ tree + standalone | Point mutation slice implemented, common capability deferred | `db-storage-btree` has mirrored checksummed pages plus copy-on-write binary lookup/insert/delete, root/non-root splits, delete redistribution/merge, root contraction, root publication, reopen validation, and deterministic split/delete/shadow-page tests; reclamation, ordered scan, overflow values, and common `KvEngine` admission remain deferred |
 | Binary KV + LSM + standalone | Planned after B+ tree | requires WAL/MemTable/SSTable/compaction evidence; no crate exists yet |
 | Relational/document/wide-column/graph/time-series models | Deferred | storage comparison must first be trustworthy |
 | 2PL/MVCC/OCC/serializable concurrency | Deferred | transactions and anomaly suites do not yet exist |

@@ -47,8 +47,11 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
   copy-on-write path replacement and atomic root publication. Reopen validates the complete reachable
   tree and tests cover binary/empty keys, overwrite, multi-level splits, reopen, input bounds, and
   unpublished shadow-page behavior.
-- [ ] Implement deletion, redistribution/merge, root contraction, and space reuse/reclamation of
-  unreachable copy-on-write history.
+- [x] Implement copy-on-write deletion with missing-key no-op semantics, byte-aware adjacent-sibling
+  redistribution/merge, empty-tree publication, and root contraction; deterministic multi-level tests
+  delete a height-3+ tree down to one leaf and validate reopen.
+- [ ] Implement crash-safe space reuse/reclamation for unreachable copy-on-write history without
+  weakening root-publication atomicity or corruption detection.
 - [ ] Expose true ordered scans through the common capability contract, including a sibling/link or
   traversal design compatible with copy-on-write mutation.
 - [ ] Admit B+ tree to the common `KvEngine` differential harness by reconciling page-local key/value

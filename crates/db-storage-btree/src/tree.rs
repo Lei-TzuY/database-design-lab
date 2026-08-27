@@ -19,13 +19,13 @@ const INTERNAL_CELL_HEADER_LEN: usize = 10;
 const MAX_TREE_HEIGHT: usize = 64;
 const PAGE_BODY_CAPACITY: usize = CHECKSUM_OFFSET - DATA_HEADER_LEN;
 
-/// Persistent copy-on-write B+ tree supporting binary point lookup and insertion/update.
+/// Persistent copy-on-write B+ tree supporting binary point lookup, insertion/update, and deletion.
 ///
-/// Mutations never overwrite a reachable data page. A `put` rewrites the changed leaf and every
-/// ancestor as newly appended immutable pages, synchronizes those pages through [`Pager`], then
-/// publishes exactly one new root pointer through the mirrored superblock. A crash before that final
-/// root publication leaves the previous tree authoritative; already committed shadow pages are
-/// unreachable space that later reclamation work may recover.
+/// Mutations never overwrite a reachable data page. `put` and `delete` append replacement leaves and
+/// ancestors through [`Pager`] before publishing exactly one new root pointer through the mirrored
+/// superblock. Deletion byte-balances or merges an underfull child with an adjacent sibling and
+/// contracts one-child roots. A crash before root publication leaves the previous tree authoritative;
+/// already committed shadow pages are unreachable space that later reclamation work may recover.
 #[derive(Debug)]
 pub struct BPlusTree {
     pager: Pager,
