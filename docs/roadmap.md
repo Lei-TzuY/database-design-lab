@@ -43,11 +43,18 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
   superblocks, synchronized immutable page allocation, slotted-page packing, root metadata commits,
   checksum/reference validation, bounded cache eviction, interrupted-allocation recovery, and torn
   superblock/truncation/corruption tests.
-- [ ] Implement lookup/insert and root/non-root split properties.
-- [ ] Implement deletion, redistribution/merge, root contraction, and space reuse.
-- [ ] Expose true ordered scans through the common capability contract.
-- [ ] Add reopen, torn-page/update fault injection, differential state machines, and deterministic
-  regressions before performance work.
+- [x] Implement binary point lookup/insertion plus root and non-root split propagation using immutable
+  copy-on-write path replacement and atomic root publication. Reopen validates the complete reachable
+  tree and tests cover binary/empty keys, overwrite, multi-level splits, reopen, input bounds, and
+  unpublished shadow-page behavior.
+- [ ] Implement deletion, redistribution/merge, root contraction, and space reuse/reclamation of
+  unreachable copy-on-write history.
+- [ ] Expose true ordered scans through the common capability contract, including a sibling/link or
+  traversal design compatible with copy-on-write mutation.
+- [ ] Admit B+ tree to the common `KvEngine` differential harness by reconciling page-local key/value
+  limits, implementing delete/reopen semantics, and declaring explicit capabilities.
+- [ ] Add torn-page/update fault injection and deterministic crash-state regressions beyond the
+  unpublished-shadow-page protocol before performance work.
 
 ## Phase 3 — LSM engine
 

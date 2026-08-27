@@ -1,8 +1,10 @@
 # B+ tree page-file format v1
 
-This phase establishes the physical page and pager contract before implementing tree search or mutation.
-It is intentionally not yet a `KvEngine`. All integers are unsigned little-endian and every physical
-page is exactly 4,096 bytes.
+Format v1 uses immutable checksummed 4,096-byte pages plus mirrored metadata. The executable tree
+layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update, and
+root/non-root split publication. It is intentionally not yet a common `KvEngine`: deletion, space
+reclamation, ordered scans, overflow values, and common-contract size limits remain deferred. All
+integers are unsigned little-endian unless stated otherwise.
 
 ## Commit model
 
@@ -25,10 +27,28 @@ committed extent. Up to one physical page beyond that extent is an interrupted a
 truncated; those bytes were never committed by metadata. More than one trailing page fails closed.
 If the selected superblock commits bytes that are physically missing, open fails closed.
 
-This protects page *allocation* and root-pointer metadata from a torn newer superblock. It does not yet
-make arbitrary in-place tree-page replacement crash-safe. Therefore format v1 deliberately exposes no
-in-place pager write API. A later insertion/split phase must choose and test a tree mutation protocol
-before page replacement can be acknowledged as durable.
+## Copy-on-write tree mutation
+
+A successful tree `PUT` does not modify any page reachable from the currently published root. It:
+
+1. Searches from the current root to the target leaf.
+2. Builds a replacement leaf in memory with the key inserted or value replaced.
+3. If a page overflows, divides its sorted cells into two independently valid pages.
+4. Commits replacement leaf/split pages as immutable allocations.
+5. Rebuilds the parent with replacement child references; parent overflow recursively produces two
+   replacement internal pages, propagating toward the root.
+6. If propagation returns two top-level pages, commits a new two-child internal root.
+7. Only after every new page has been synchronized and committed to `page_count`, publishes the final
+   root page id with one more mirrored-superblock generation.
+
+A crash before step 7 leaves the old root authoritative. Pages already committed during steps 4–6 are
+valid but unreachable copy-on-write history. A torn new-root superblock falls back to the prior valid
+metadata generation, which still names the old root. A crash after the new root metadata is durable
+finds every referenced replacement page already synchronized. This protocol therefore avoids an
+in-place torn-page update problem; it does **not** reclaim unreachable historical pages yet.
+
+The deterministic test suite also constructs a committed-but-unpublished shadow page and verifies that
+reopen continues to return the value reachable through the older root.
 
 ## Superblocks: pages 0 and 1
 
@@ -68,31 +88,69 @@ Data page ids begin at 2. A page checksum again covers bytes 0–4091.
 | 26 | 2 | upper free-space boundary | at most byte 4092 |
 | 28 | 2 | cell count | defines exactly that many slots |
 | 30 | 2 | reserved | zero |
-| 32 | 8 | right sibling | leaf-only; `0` means none |
+| 32 | 8 | right sibling | leaf-only physical field; tree point slice currently leaves it zero |
 | 40 | variable | four-byte slots | `(u16 offset, u16 length)` |
 | ... | variable | zeroed free space | `lower..upper` |
-| ... | variable | packed opaque cell payloads | contiguous through byte 4091 |
+| ... | variable | packed cell payloads | contiguous through byte 4091 |
 | 4092 | 4 | page CRC-32 | exact match |
 
 The pager verifies checksum, magic, version, flags, physical page id, reserved fields, free-space
 boundaries, slot count, nonzero cell lengths, payload extents, and exact non-overlapping packed payload
-coverage before returning a page. Internal pages cannot carry a leaf sibling pointer. A leaf sibling
-read through the pager must refer to an already committed data page.
+coverage before returning a page. Internal pages cannot carry a leaf sibling pointer. A nonzero leaf
+sibling read through the pager must refer to an already committed data page.
 
-## Slotted-page behavior implemented now
+## Leaf cells
 
-`Page::insert_cell` stores one opaque non-empty byte string without interpreting B+ tree keys. Slots
-grow upward from byte 40 while payloads grow downward from byte 4092. An insertion is rejected before
-mutation when the slot plus payload cannot fit. The page checksum is refreshed after each successful
-in-memory edit.
+Reachable leaf cells are sorted in strictly increasing bytewise key order. Empty keys and empty values
+are legal. Duplicate keys are not: `PUT` replaces the value while rebuilding the copy-on-write path.
+
+| Cell offset | Bytes | Meaning |
+| ---: | ---: | --- |
+| 0 | 2 | key length |
+| 2 | 4 | value length |
+| 6 | `key length` | opaque binary key |
+| ... | `value length` | opaque binary value |
+
+The current tree layer caps keys at 1,024 bytes so internal separator pages retain a useful minimum
+fanout. A complete encoded key/value cell plus its four-byte slot must fit on one empty page; overflow
+value pages are not implemented. These bounds are intentionally narrower than `db-core`'s common
+4 KiB-key/1 MiB-value contract, which is why this slice is not yet exposed as a common `KvEngine`.
+
+## Internal cells
+
+Every internal cell describes one child and the exact minimum key reachable in that child. Cells are
+sorted by that minimum key. This representation deliberately stores the first child's minimum too,
+which keeps routing and structural validation uniform.
+
+| Cell offset | Bytes | Meaning |
+| ---: | ---: | --- |
+| 0 | 2 | separator/minimum-key length |
+| 2 | 8 | committed child page id |
+| 10 | `key length` | exact minimum key reachable from the child |
+
+Lookup chooses the child whose minimum key is the greatest key not greater than the search key; a
+search smaller than the first separator descends into the first child and naturally returns missing at
+the leaf. Reachable internal pages have at least two children. Reopen recursively verifies that each
+stored separator equals the referenced child's actual minimum key, child ranges do not overlap, all
+children have equal height, and no page is reached twice or through a cycle. Traversal depth is bounded
+to fail closed on malicious/corrupt structures.
+
+## Slotted-page behavior
+
+`Page::insert_cell` stores one non-empty encoded cell. Slots grow upward from byte 40 while payloads
+grow downward from byte 4092. An insertion is rejected before mutation when the slot plus payload cannot
+fit. The page checksum is refreshed after each successful in-memory edit.
 
 `Pager::prepare_new_page` assigns the next candidate physical id. `Pager::commit_new_page` persists that
-page with the commit ordering above. `Pager::read_page` validates before caching. The cache is bounded
-and stores only immutable validated page images, so eviction has no dirty-page writeback semantics.
+page with the allocation ordering above. `Pager::read_page` validates before caching. The cache is
+bounded and stores only immutable validated page images, so eviction has no dirty-page writeback
+semantics.
 
 ## Explicitly deferred
 
-This page layer does not yet define leaf key/value encoding, internal separator/child encoding, binary
-search, root/non-root splits, deletion/merge, free-list reuse, copy-on-write tree generations, WAL,
-in-place page replacement, ordered scans, or a `KvEngine` implementation. Those features must preserve
-this fail-closed validation discipline and add deterministic crash-state tests before performance work.
+Format/tree work still does not define deletion, redistribution/merge, root contraction, free-list or
+copy-on-write history reclamation, overflow values, a copy-on-write-compatible ordered leaf scan,
+common `KvEngine` capability admission, multi-operation transactions, WAL-based in-place replacement,
+or concurrent writers. Fault injection for every intermediate mutation write is also still required
+before performance experiments; current evidence covers pager torn/truncated states plus the semantic
+unpublished-shadow-root case.

@@ -1,13 +1,10 @@
-//! Checksummed fixed-size pages and a bounded read cache for the B+ tree experiment.
+//! Checksummed copy-on-write B+ tree storage for the database laboratory.
 //!
-//! This crate intentionally stops below the `KvEngine` boundary. It establishes the physical page
-//! contract first: two mirrored superblocks define the committed file extent, data pages are fixed
-//! 4 KiB slotted pages with whole-page CRC-32 checksums, new pages become committed only after their
-//! bytes are synchronized and a newer superblock is synchronized, and the read cache contains only
-//! validated immutable page images.
-//!
-//! There is deliberately no in-place page update API yet. Lookup, insertion, split propagation, and
-//! a crash-safe tree mutation protocol belong to the next evidence increment.
+//! Fixed 4 KiB slotted pages, mirrored superblocks, synchronized immutable allocation, and a bounded
+//! validated-page cache form the physical layer. The tree layer adds binary point lookup, insertion/
+//! update, and root/non-root split propagation. Mutations append replacement pages before atomically
+//! publishing a new root; deletion, reclamation, ordered scans, overflow values, and common `KvEngine`
+//! admission remain deferred.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -15,6 +12,10 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+
+mod tree;
+
+pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES};
 
 /// Fixed physical page size for B+ tree format v1.
 pub const PAGE_SIZE: usize = 4096;

@@ -15,28 +15,31 @@ constraints—not a list of products we pretend to have built.
 
 ## Implemented baseline
 
-The workspace currently contains five crates with executable behavior. The B+ tree crate is a physical
-page/pager foundation, not yet a complete KV engine:
+The workspace currently contains five crates with executable behavior. The B+ tree crate now includes
+an executable persistent point-lookup/insertion slice, but is not yet a complete common `KvEngine`:
 
 | Crate | Implemented role |
 | --- | --- |
 | `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution and differential harness |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
-| `db-storage-btree` | Fixed 4 KiB checksummed slotted pages, mirrored superblocks, crash-recoverable immutable page allocation, root metadata commits, and a bounded validated-page cache |
+| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`, leaf/internal encodings, root and non-root splits, reachable-tree validation, and bounded validated-page caching |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
-The B+ tree work now builds on a separate page file whose two mirrored superblocks define the committed
-physical extent. New immutable pages are synchronized before a newer metadata generation commits them;
-a torn newer superblock therefore falls back to the prior committed generation and any one-page orphan
-allocation can be discarded safely. No B+ tree lookup, split, deletion, ordered scan, or `KvEngine`
-implementation is claimed yet.
+The B+ tree uses a separate page file whose two mirrored superblocks define the committed physical
+extent and published root. A `PUT` never overwrites a reachable page: it appends a replacement leaf,
+copy-on-write ancestors, and any split pages, synchronizing every immutable allocation before finally
+publishing one new root pointer. A crash before that final root publication therefore leaves the old
+root authoritative; already committed shadow pages are unreachable history. Deletion, reclamation,
+ordered scans, large overflow values, and a common `KvEngine` implementation are not claimed yet.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, and an
-explicit `REOPEN` workload boundary. Range scans, transactions, multi-process writers, compaction,
-replication, SQL, MVCC, Raft, graph, time-series, and columnar execution are not implemented.
+explicit `REOPEN` workload boundary. The current B+ tree point slice intentionally has a narrower
+page-local key/value bound and therefore is not yet admitted to common differential experiments.
+Range scans, transactions, multi-process writers, compaction, replication, SQL, MVCC, Raft, graph,
+time-series, and columnar execution are not implemented.
 
 ## Run the laboratory
 
@@ -78,9 +81,13 @@ unrecognized tail fails closed. `verify` reports a recoverable partial tail with
 
 The B+ tree pager uses a different commit unit. Two checksummed 4 KiB superblocks alternate metadata
 generations. A newly allocated immutable page is synchronized before `page_count + 1` is written to
-the inactive superblock and synchronized. Reopen selects the newest valid superblock, fails if committed
-bytes are missing, and discards at most one trailing page that metadata never committed. There is no
-in-place page-write API yet because crash-safe tree mutation has not been specified or proven.
+the inactive superblock and synchronized. Tree mutation is copy-on-write: the changed leaf and every
+ancestor are appended as immutable pages, root/non-root overflows are split into new pages, and only
+after all replacement pages are durable is the new root id published through another superblock
+transition. Reopen selects the newest valid superblock and validates the complete reachable tree,
+including sorted leaf keys, ordered separators, separator/child-minimum agreement, equal child heights,
+non-overlapping ranges, and cycle/duplicate-reference rejection. Unreachable historical pages are not
+reclaimed yet.
 
 These guarantees do not include multi-operation transactions, concurrent-process exclusion,
 directory-entry durability for initial file creation, protection against lying storage hardware, or
@@ -96,8 +103,8 @@ handle is poisoned and must be reopened. See [the append-log format](docs/on-dis
 - [Design space](docs/design-space.md): definitions, capability/compatibility caveats, and coupling
   between dimensions.
 - [Append-log format](docs/on-disk-format.md): exact append record bytes and recovery decisions.
-- [B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, allocation
-  commit ordering, validation, and current crash-state limits.
+- [B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, copy-on-write
+  insertion/split publication, validation, and current crash-state limits.
 - [Roadmap](docs/roadmap.md): evidence-linked completed items and deliberately deferred phases.
 
 GitHub Actions runs formatting, Clippy with warnings denied, tests, and rustdoc on stable Rust, checks
