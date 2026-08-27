@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 
 mod delete;
+mod overflow;
 mod reuse;
 
 use super::{
@@ -14,8 +15,13 @@ use super::{
 /// The common KV contract permits larger keys, but this initial page-local representation keeps
 /// separators bounded so a two-child internal root is always representable on one 4 KiB page.
 pub const MAX_TREE_KEY_BYTES: usize = 1024;
+/// Maximum value size accepted by the tree; matches the common KV value contract.
+pub const MAX_TREE_VALUE_BYTES: usize = 1024 * 1024;
 
 const LEAF_CELL_HEADER_LEN: usize = 6;
+const VALUE_OVERFLOW_FLAG: u32 = 1 << 31;
+const VALUE_LENGTH_MASK: u32 = VALUE_OVERFLOW_FLAG - 1;
+const OVERFLOW_VALUE_REF_LEN: usize = 8;
 const INTERNAL_CELL_HEADER_LEN: usize = 10;
 const MAX_TREE_HEIGHT: usize = 64;
 const PAGE_BODY_CAPACITY: usize = CHECKSUM_OFFSET - DATA_HEADER_LEN;
@@ -100,13 +106,22 @@ impl BPlusTree {
                 PageKind::Leaf => {
                     let entries = decode_leaf(&page)?;
                     return match entries.binary_search_by(|entry| entry.key.as_slice().cmp(key)) {
-                        Ok(index) => Ok(Some(entries[index].value.clone())),
+                        Ok(index) => {
+                            let stored = entries[index].value.clone();
+                            self.load_value(&stored).map(Some)
+                        }
                         Err(_) => Ok(None),
                     };
                 }
                 PageKind::Internal => {
                     let children = decode_internal(&page)?;
                     page_id = children[route_child(&children, key)?].page_id;
+                }
+                PageKind::Overflow => {
+                    return Err(corruption(
+                        0,
+                        format!("lookup reached overflow page {page_id} as a tree node"),
+                    ));
                 }
             }
         }
@@ -119,20 +134,22 @@ impl BPlusTree {
 
     /// Inserts or replaces one binary key/value pair and returns the previous value.
     ///
-    /// One encoded entry must fit on an otherwise empty leaf. Before writing, the tree derives a
+    /// Values through 1 MiB are accepted. Values that do not fit inline are stored in checksummed
+    /// overflow pages before the replacement leaf is committed. Before writing, the tree derives a
     /// reusable-page pool from committed pages not reachable from the current root; only those orphan
     /// pages may be overwritten before the final copy-on-write root publication.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
         validate_key_value(key, value)?;
         let previous = self.get(key)?;
         self.refresh_reusable_pages()?;
+        let stored_value = self.store_value(key, value)?;
 
         let replacements = match self.pager.root_page_id() {
-            Some(root) => self.rewrite_insert(root, key, value, 0)?,
+            Some(root) => self.rewrite_insert(root, key, &stored_value, 0)?,
             None => {
                 let entry = LeafEntry {
                     key: key.to_vec(),
-                    value: value.to_vec(),
+                    value: stored_value.clone(),
                 };
                 vec![self.commit_leaf(&[entry])?]
             }
@@ -156,7 +173,7 @@ impl BPlusTree {
         &mut self,
         page_id: u64,
         key: &[u8],
-        value: &[u8],
+        value: &StoredValue,
         depth: usize,
     ) -> Result<Vec<ChildRef>> {
         if depth >= MAX_TREE_HEIGHT {
@@ -171,12 +188,12 @@ impl BPlusTree {
             PageKind::Leaf => {
                 let mut entries = decode_leaf(&page)?;
                 match entries.binary_search_by(|entry| entry.key.as_slice().cmp(key)) {
-                    Ok(index) => entries[index].value = value.to_vec(),
+                    Ok(index) => entries[index].value = value.clone(),
                     Err(index) => entries.insert(
                         index,
                         LeafEntry {
                             key: key.to_vec(),
-                            value: value.to_vec(),
+                            value: value.clone(),
                         },
                     ),
                 }
@@ -190,6 +207,10 @@ impl BPlusTree {
                 children.splice(child_index..=child_index, replacements);
                 self.commit_internal_level(&children)
             }
+            PageKind::Overflow => Err(corruption(
+                0,
+                format!("insert traversal reached overflow page {page_id} as a tree node"),
+            )),
         }
     }
 
@@ -343,6 +364,9 @@ impl BPlusTree {
                     ));
                 }
                 let entries = decode_leaf(&page)?;
+                for entry in &entries {
+                    self.validate_value_reachability(&entry.value, seen)?;
+                }
                 let first = entries.first().ok_or_else(|| {
                     corruption(0, format!("reachable leaf page {page_id} is empty"))
                 })?;
@@ -405,6 +429,10 @@ impl BPlusTree {
                     height: height + 1,
                 })
             }
+            PageKind::Overflow => Err(corruption(
+                0,
+                format!("tree edge references overflow page {page_id} as a B+ tree node"),
+            )),
         }
     }
 }
@@ -412,7 +440,13 @@ impl BPlusTree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LeafEntry {
     key: Vec<u8>,
-    value: Vec<u8>,
+    value: StoredValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StoredValue {
+    Inline(Vec<u8>),
+    Overflow { len: u32, first_page_id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,43 +474,69 @@ fn validate_key(key: &[u8]) -> Result<()> {
 
 fn validate_key_value(key: &[u8], value: &[u8]) -> Result<()> {
     validate_key(key)?;
-    let cell_len = LEAF_CELL_HEADER_LEN
-        .checked_add(key.len())
-        .and_then(|length| length.checked_add(value.len()))
-        .ok_or_else(|| BtreeError::InvalidInput("leaf entry length overflowed usize".to_owned()))?;
-    let occupied = SLOT_LEN
-        .checked_add(cell_len)
-        .ok_or_else(|| BtreeError::InvalidInput("leaf entry extent overflowed usize".to_owned()))?;
-    if occupied > PAGE_BODY_CAPACITY {
+    if value.len() > MAX_TREE_VALUE_BYTES {
         return Err(BtreeError::InvalidInput(format!(
-            "encoded key/value occupies {occupied} bytes; one entry must fit within the {PAGE_BODY_CAPACITY}-byte slotted-page body"
+            "B+ tree value has {} bytes; maximum is {MAX_TREE_VALUE_BYTES}",
+            value.len()
         )));
     }
-    let _ = u32::try_from(value.len()).map_err(|_| {
+    let value_len = u32::try_from(value.len()).map_err(|_| {
         BtreeError::InvalidInput("value length does not fit the on-page u32 field".to_owned())
     })?;
+    if value_len > VALUE_LENGTH_MASK {
+        return Err(BtreeError::InvalidInput(
+            "value length collides with the overflow marker bit".to_owned(),
+        ));
+    }
     Ok(())
 }
-
 fn encode_leaf_cell(entry: &LeafEntry) -> Result<Vec<u8>> {
-    validate_key_value(&entry.key, &entry.value)?;
+    validate_key(&entry.key)?;
     let key_len = u16::try_from(entry.key.len()).map_err(|_| {
         BtreeError::InvalidInput("key length does not fit the on-page u16 field".to_owned())
     })?;
-    let value_len = u32::try_from(entry.value.len()).map_err(|_| {
-        BtreeError::InvalidInput("value length does not fit the on-page u32 field".to_owned())
-    })?;
-    let mut cell = Vec::with_capacity(LEAF_CELL_HEADER_LEN + entry.key.len() + entry.value.len());
+    let (value_field, payload_len) = match &entry.value {
+        StoredValue::Inline(value) => {
+            if value.len() > MAX_TREE_VALUE_BYTES {
+                return Err(BtreeError::InvalidInput(format!(
+                    "B+ tree value has {} bytes; maximum is {MAX_TREE_VALUE_BYTES}",
+                    value.len()
+                )));
+            }
+            let len = u32::try_from(value.len()).map_err(|_| {
+                BtreeError::InvalidInput("inline value length does not fit u32".to_owned())
+            })?;
+            (len, value.len())
+        }
+        StoredValue::Overflow { len, first_page_id } => {
+            if *len == 0 || usize::try_from(*len).unwrap_or(usize::MAX) > MAX_TREE_VALUE_BYTES {
+                return Err(BtreeError::InvalidInput(
+                    "overflow value length is outside supported bounds".to_owned(),
+                ));
+            }
+            if *first_page_id < SUPERBLOCK_COUNT {
+                return Err(BtreeError::InvalidInput(format!(
+                    "overflow value page {first_page_id} overlaps mirrored superblocks"
+                )));
+            }
+            (VALUE_OVERFLOW_FLAG | *len, OVERFLOW_VALUE_REF_LEN)
+        }
+    };
+    let mut cell = Vec::with_capacity(LEAF_CELL_HEADER_LEN + entry.key.len() + payload_len);
     cell.extend_from_slice(&key_len.to_le_bytes());
-    cell.extend_from_slice(&value_len.to_le_bytes());
+    cell.extend_from_slice(&value_field.to_le_bytes());
     cell.extend_from_slice(&entry.key);
-    cell.extend_from_slice(&entry.value);
+    match &entry.value {
+        StoredValue::Inline(value) => cell.extend_from_slice(value),
+        StoredValue::Overflow { first_page_id, .. } => {
+            cell.extend_from_slice(&first_page_id.to_le_bytes());
+        }
+    }
     Ok(cell)
 }
-
 fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {
     if page.kind() != PageKind::Leaf {
-        return Err(corruption(0, "attempted leaf decoding on an internal page"));
+        return Err(corruption(0, "attempted leaf decoding on a non-leaf page"));
     }
     let mut entries = Vec::with_capacity(usize::from(page.cell_count()));
     for index in 0..page.cell_count() {
@@ -491,11 +551,31 @@ fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {
             ));
         }
         let key_len = usize::from(u16::from_le_bytes([cell[0], cell[1]]));
-        let value_len = usize::try_from(u32::from_le_bytes([cell[2], cell[3], cell[4], cell[5]]))
+        let value_field = u32::from_le_bytes([cell[2], cell[3], cell[4], cell[5]]);
+        let is_overflow = value_field & VALUE_OVERFLOW_FLAG != 0;
+        let value_len_u32 = value_field & VALUE_LENGTH_MASK;
+        let value_len = usize::try_from(value_len_u32)
             .map_err(|_| corruption(0, "leaf value length does not fit usize"))?;
+        if value_len > MAX_TREE_VALUE_BYTES {
+            return Err(corruption(
+                0,
+                format!(
+                    "leaf page {} contains oversized value length {value_len}",
+                    page.page_id()
+                ),
+            ));
+        }
+        if is_overflow && value_len == 0 {
+            return Err(corruption(0, "overflow leaf value encodes zero length"));
+        }
+        let value_payload_len = if is_overflow {
+            OVERFLOW_VALUE_REF_LEN
+        } else {
+            value_len
+        };
         let expected = LEAF_CELL_HEADER_LEN
             .checked_add(key_len)
-            .and_then(|length| length.checked_add(value_len))
+            .and_then(|length| length.checked_add(value_payload_len))
             .ok_or_else(|| corruption(0, "leaf cell decoded length overflowed usize"))?;
         if expected != cell.len() {
             return Err(corruption(
@@ -517,15 +597,35 @@ fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {
             ));
         }
         let key_end = LEAF_CELL_HEADER_LEN + key_len;
+        let value = if is_overflow {
+            let bytes = &cell[key_end..key_end + OVERFLOW_VALUE_REF_LEN];
+            let first_page_id = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            if first_page_id < SUPERBLOCK_COUNT {
+                return Err(corruption(
+                    0,
+                    format!(
+                        "leaf page {} references invalid overflow page {first_page_id}",
+                        page.page_id()
+                    ),
+                ));
+            }
+            StoredValue::Overflow {
+                len: value_len_u32,
+                first_page_id,
+            }
+        } else {
+            StoredValue::Inline(cell[key_end..].to_vec())
+        };
         entries.push(LeafEntry {
             key: cell[LEAF_CELL_HEADER_LEN..key_end].to_vec(),
-            value: cell[key_end..].to_vec(),
+            value,
         });
     }
     validate_leaf_order(&entries, page.page_id())?;
     Ok(entries)
 }
-
 fn encode_internal_cell(child: &ChildRef) -> Result<Vec<u8>> {
     validate_key(&child.min_key)?;
     if child.page_id < SUPERBLOCK_COUNT {
@@ -690,7 +790,7 @@ fn choose_split(cells: &[Vec<u8>]) -> Option<usize> {
 mod tests {
     use tempfile::tempdir;
 
-    use super::{encode_leaf_cell, BPlusTree, LeafEntry, MAX_TREE_KEY_BYTES};
+    use super::{encode_leaf_cell, BPlusTree, LeafEntry, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
     use crate::PageKind;
 
     #[test]
@@ -775,7 +875,7 @@ mod tests {
 
         let entry = LeafEntry {
             key: b"key".to_vec(),
-            value: b"new-but-unpublished".to_vec(),
+            value: super::StoredValue::Inline(b"new-but-unpublished".to_vec()),
         };
         let cell = encode_leaf_cell(&entry).expect("encode shadow entry");
         let mut shadow = tree
@@ -798,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_key_or_single_entry_is_rejected_before_writing() {
+    fn oversized_key_or_value_is_rejected_before_writing() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("bounds.db");
         let mut tree = BPlusTree::create_new(&path, 1).expect("create tree");
@@ -811,8 +911,8 @@ mod tests {
         assert_eq!(tree.data_page_count(), initial_pages);
 
         let error = tree
-            .put(b"key", &vec![0_u8; 5000])
-            .expect_err("oversized inline entry must fail");
+            .put(b"key", &vec![0_u8; MAX_TREE_VALUE_BYTES + 1])
+            .expect_err("oversized value must fail");
         assert!(matches!(error, crate::BtreeError::InvalidInput(_)));
         assert_eq!(tree.data_page_count(), initial_pages);
     }

@@ -2,9 +2,10 @@
 //!
 //! Fixed 4 KiB slotted pages, mirrored superblocks, synchronized immutable allocation, and a bounded
 //! validated-page cache form the physical layer. The tree layer adds binary point lookup, insertion/
-//! update, and root/non-root split propagation. Mutations append replacement pages before atomically
-//! publishing a new root; deletion, reclamation, ordered scans, overflow values, and common `KvEngine`
-//! admission remain deferred.
+//! update/deletion, split/rebalance/root contraction, reachability-derived page reuse, and checksummed
+//! overflow chains for values through the common 1 MiB limit. Mutations synchronize replacement and
+//! overflow pages before atomically publishing a new root. Ordered scans, 4 KiB keys, physical file
+//! compaction, and common `KvEngine` admission remain deferred.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -15,7 +16,7 @@ use thiserror::Error;
 
 mod tree;
 
-pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES};
+pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
 
 /// Fixed physical page size for B+ tree format v1.
 pub const PAGE_SIZE: usize = 4096;
@@ -32,6 +33,7 @@ const SLOT_LEN: usize = 4;
 const ROOT_NONE: u64 = 0;
 const KIND_LEAF: u8 = 1;
 const KIND_INTERNAL: u8 = 2;
+const KIND_OVERFLOW: u8 = 3;
 
 /// Result type returned by the B+ tree page/pager foundation.
 pub type Result<T> = std::result::Result<T, BtreeError>;
@@ -69,10 +71,12 @@ pub enum BtreeError {
 /// Physical role of a data page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageKind {
-    /// Leaf page; later phases will encode key/value cells here.
+    /// Leaf page containing sorted key/value cells or overflow-value references.
     Leaf,
-    /// Internal page; later phases will encode separator/child cells here.
+    /// Internal page containing separator/child cells.
     Internal,
+    /// Overflow page containing one chunk of a large value and an optional next-page link.
+    Overflow,
 }
 
 impl PageKind {
@@ -80,6 +84,7 @@ impl PageKind {
         match self {
             Self::Leaf => KIND_LEAF,
             Self::Internal => KIND_INTERNAL,
+            Self::Overflow => KIND_OVERFLOW,
         }
     }
 
@@ -87,6 +92,7 @@ impl PageKind {
         match encoded {
             KIND_LEAF => Ok(Self::Leaf),
             KIND_INTERNAL => Ok(Self::Internal),
+            KIND_OVERFLOW => Ok(Self::Overflow),
             _ => Err(corruption(offset, format!("unknown page kind {encoded}"))),
         }
     }
@@ -164,12 +170,30 @@ impl Page {
         upper.saturating_sub(lower)
     }
 
-    /// Optional right sibling used only by leaf pages.
-    #[must_use]
-    pub fn right_sibling(&self) -> Option<u64> {
+    fn page_link(&self) -> Option<u64> {
         match read_u64(&self.bytes[32..40]) {
             ROOT_NONE => None,
             page_id => Some(page_id),
+        }
+    }
+
+    /// Optional right sibling used only by tree leaf pages.
+    #[must_use]
+    pub fn right_sibling(&self) -> Option<u64> {
+        if self.kind == PageKind::Leaf {
+            self.page_link()
+        } else {
+            None
+        }
+    }
+
+    /// Optional next page used only by overflow-value pages.
+    #[must_use]
+    pub fn overflow_next(&self) -> Option<u64> {
+        if self.kind == PageKind::Overflow {
+            self.page_link()
+        } else {
+            None
         }
     }
 
@@ -190,6 +214,30 @@ impl Page {
         if encoded == self.page_id {
             return Err(BtreeError::InvalidInput(
                 "leaf cannot point to itself as right sibling".to_owned(),
+            ));
+        }
+        self.bytes[32..40].copy_from_slice(&encoded.to_le_bytes());
+        refresh_checksum(&mut self.bytes);
+        Ok(())
+    }
+
+    /// Sets an overflow page's next-page link before the page is committed.
+    pub fn set_overflow_next(&mut self, next: Option<u64>) -> Result<()> {
+        self.validate()?;
+        if self.kind != PageKind::Overflow {
+            return Err(BtreeError::InvalidInput(
+                "overflow next-page link is only defined for overflow pages".to_owned(),
+            ));
+        }
+        let encoded = next.unwrap_or(ROOT_NONE);
+        if encoded != ROOT_NONE && encoded < SUPERBLOCK_COUNT {
+            return Err(BtreeError::InvalidInput(format!(
+                "overflow next page {encoded} overlaps mirrored superblocks"
+            )));
+        }
+        if encoded == self.page_id {
+            return Err(BtreeError::InvalidInput(
+                "overflow page cannot point to itself".to_owned(),
             ));
         }
         self.bytes[32..40].copy_from_slice(&encoded.to_le_bytes());
@@ -528,12 +576,12 @@ impl Pager {
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.read_exact(&mut bytes)?;
         let page = Page::decode(bytes, page_id)?;
-        if let Some(sibling) = page.right_sibling() {
-            if sibling >= self.active.page_count {
+        if let Some(link) = page.page_link() {
+            if link >= self.active.page_count {
                 return Err(corruption(
                     offset + 32,
                     format!(
-                        "leaf page {page_id} points to uncommitted right sibling {sibling}; committed page_count is {}",
+                        "page {page_id} points to uncommitted linked page {link}; committed page_count is {}",
                         self.active.page_count
                     ),
                 ));

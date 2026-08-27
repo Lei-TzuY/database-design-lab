@@ -102,6 +102,10 @@ impl BPlusTree {
                     self.commit_internal(&children).map(Some)
                 }
             }
+            PageKind::Overflow => Err(corruption(
+                0,
+                format!("delete traversal reached overflow page {page_id} as a tree node"),
+            )),
         }
     }
 
@@ -141,6 +145,9 @@ impl BPlusTree {
         let replacements = match left_page.kind() {
             PageKind::Leaf => self.rebalance_leaf_pair(&left_page, &right_page)?,
             PageKind::Internal => self.rebalance_internal_pair(&left_page, &right_page)?,
+            PageKind::Overflow => {
+                return Err(corruption(0, "overflow page appeared as a B+ tree sibling"));
+            }
         };
         children.splice(left_index..=right_index, replacements);
         validate_child_refs(children)?;
@@ -204,6 +211,9 @@ impl BPlusTree {
 }
 
 fn page_is_underfull(page: &Page) -> Result<bool> {
+    if page.kind() == PageKind::Overflow {
+        return Err(corruption(0, "overflow page appeared as a B+ tree child"));
+    }
     if page.kind() == PageKind::Internal && page.cell_count() < 2 {
         return Ok(true);
     }
