@@ -30,7 +30,7 @@ impl KvEngine for BPlusTree {
             persistence: Persistence::Persistent,
             crash_recovery: CrashRecovery::MirroredCopyOnWritePages,
             distribution: DistributionMode::Standalone,
-            ordered_range_scan: false,
+            ordered_range_scan: true,
             max_key_bytes: MAX_TREE_KEY_BYTES,
             max_value_bytes: MAX_TREE_VALUE_BYTES,
         }
@@ -46,6 +46,15 @@ impl KvEngine for BPlusTree {
 
     fn delete(&mut self, key: &[u8]) -> db_core::Result<Option<Vec<u8>>> {
         BPlusTree::delete(self, key).map_err(common_error)
+    }
+
+    fn range_scan(
+        &mut self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        limit: usize,
+    ) -> db_core::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        BPlusTree::range_scan(self, start, end, limit).map_err(common_error)
     }
 
     fn reopen(&mut self) -> db_core::Result<()> {
@@ -85,7 +94,56 @@ mod tests {
         assert_eq!(MAX_TREE_VALUE_BYTES, MAX_VALUE_BYTES);
         assert_eq!(capabilities.max_key_bytes, MAX_KEY_BYTES);
         assert_eq!(capabilities.max_value_bytes, MAX_VALUE_BYTES);
-        assert!(!capabilities.ordered_range_scan);
+        assert!(capabilities.ordered_range_scan);
+    }
+
+    #[test]
+    fn common_ordered_ranges_match_memory_after_splits_reopen_and_delete() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("range-differential.db");
+        let mut reference = MemoryEngine::new();
+        let mut candidate = BPlusTree::create_new(&path, 8).expect("create tree");
+
+        for index in 0..96_u16 {
+            let key = index.to_be_bytes().to_vec();
+            let value = if index == 48 {
+                vec![0x7c; 64 * 1024]
+            } else {
+                vec![(index & 0xff) as u8; 160]
+            };
+            reference.put(&key, &value).expect("reference insert");
+            candidate.put(&key, &value).expect("candidate insert");
+        }
+        candidate.reopen().expect("candidate reopen");
+        reference.reopen().expect("reference reopen");
+        for index in [0_u16, 17, 47, 49, 95] {
+            let key = index.to_be_bytes();
+            assert_eq!(
+                reference.delete(&key).expect("reference delete"),
+                candidate.delete(&key).expect("candidate delete")
+            );
+        }
+
+        let cases = [
+            (0_u16, Some(96_u16), 200_usize),
+            (16, Some(52), 11),
+            (48, Some(49), 8),
+            (80, None, 7),
+            (30, Some(30), 10),
+        ];
+        for (start, end, limit) in cases {
+            let start = start.to_be_bytes();
+            let end_bytes = end.map(u16::to_be_bytes);
+            let end = end_bytes.as_ref().map(<[u8; 2]>::as_slice);
+            assert_eq!(
+                reference
+                    .range_scan(&start, end, limit)
+                    .expect("reference range"),
+                candidate
+                    .range_scan(&start, end, limit)
+                    .expect("candidate range")
+            );
+        }
     }
 
     #[test]

@@ -17,31 +17,35 @@ facades do not count as implementations.
 
 ## 2. Current normalized semantics
 
-All comparable engines implement the following single-operation semantics:
+All comparable engines implement the baseline point/lifecycle semantics below. `RANGE` is a common
+optional capability and is comparable only when every participant advertises `ordered_range_scan = true`:
 
 | Step | State transition | Observable result |
 | --- | --- | --- |
 | `PUT(k, v)` | `map[k] = v` | the previous value or missing |
 | `GET(k)` | none | the current value or missing |
 | `DELETE(k)` | remove `k`; the log engine appends a tombstone even for a miss | the removed value or missing |
+| `RANGE(start, end, limit)` | none | up to `limit` live pairs in bytewise key order from `[start, end)`; `end` may be unbounded |
 | `REOPEN` | close/reconstruct engine state | successful lifecycle boundary |
 
 Keys and values are arbitrary bytes. Empty keys and values are valid, while missing and empty remain
-distinct. Keys are at most 4,096 bytes and values at most 1,048,576 bytes. There is no implicit text
-encoding, ordering API, transaction group, snapshot, TTL, compare-and-swap, or concurrency guarantee
-in the current common semantics. JSON workload bytes use even-length hexadecimal strings.
+distinct. Keys are at most 4,096 bytes and values at most 1,048,576 bytes. Ordered range bounds use
+the same bytewise ordering as B+ tree routing: the lower bound is inclusive, the upper bound exclusive,
+`end = None` is unbounded, equal bounds are empty, and `end < start` is invalid. There is no implicit
+text encoding, transaction group, snapshot, TTL, compare-and-swap, or concurrency guarantee.
 
-Workload schema version 1 records an optional seed and ordered steps. The built-in generator uses a
-specified SplitMix64 implementation, not an unspecified thread RNG. It chooses 50% puts, 30% gets,
-and 20% deletes; these weights are generator defaults, not a claim that they model production. A
-configuration and generated trace are experiment inputs and must be archived together.
+Workload schema version 1 records an optional seed and ordered point/lifecycle steps; it does not yet
+serialize range scans. The built-in generator uses a specified SplitMix64 implementation, not an
+unspecified thread RNG. It chooses 50% puts, 30% gets, and 20% deletes; these weights are generator
+defaults, not a claim that they model production. A configuration and generated trace are experiment
+inputs and must be archived together.
 
 ## 3. Capability before comparison
 
 Every engine exposes capabilities for persistence, recovery, distribution, range scans, and common
-size bounds. A harness must reject a requested comparison if required capabilities differ. A future
-range-scan benchmark, for example, cannot compare the current append log through an internal map and
-call that an on-disk ordered scan.
+size bounds. A harness must reject a requested comparison if required capabilities differ. A range-scan
+comparison, for example, cannot route the append log through its internal replay map and call that an
+on-disk ordered scan; the append log deliberately advertises ordered range support as false.
 
 Only one named independent variable should change in a causal comparison. If a B+ tree uses synced
 single-operation writes while an LSM batches unsynced writes, “storage engine” is not the only changed
@@ -88,8 +92,9 @@ directory is not; a system crash immediately after first creation may lose the d
 append I/O error is an ambiguous outcome and poisons the handle until reopen.
 
 Crash consistency is demonstrated through fault injection or prefix/corruption fixtures, never by the
-mere presence of a log or checksum. Future page and LSM engines must define their own legal crash
-states and test each state transition.
+mere presence of a log or checksum. The B+ tree defines its legal COW/root-publication crash states in
+its page-format specification; exhaustive mutation-write fault injection remains required. Future LSM
+engines must likewise define and test each state transition.
 
 ## 6. Metrics definitions
 
@@ -140,8 +145,8 @@ claim.
 
 ## 9. Current non-goals
 
-The current baseline does not implement SQL, relational schemas, range scans, transactions, MVCC,
-2PL, OCC, multi-process concurrency, file locking, B+ trees, LSM trees, compaction, Bloom filters,
-replication, sharding, consensus, graph traversal, time-series retention, columnar execution, online
-format migration, encryption, or production operations. These are intentionally deferred rather than
-represented by placeholders.
+The current baseline does not implement SQL, relational schemas, transactions, MVCC, 2PL, OCC,
+multi-process concurrency, file locking, an ordered append-log access path, LSM trees, physical B+ tree
+file compaction, Bloom filters, replication, sharding, consensus, graph traversal, time-series retention,
+columnar execution, online format migration, encryption, or production operations. These are
+intentionally deferred rather than represented by placeholders.

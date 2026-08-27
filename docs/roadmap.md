@@ -58,8 +58,10 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
   references preserve logical length, overflow pages are committed tail-to-head before leaf/root
   publication, reopen validates canonical chains, and deterministic tests cover 1 MiB round-trip,
   delete, and orphan-page reuse without unbounded page-count growth.
-- [ ] Expose true ordered scans through the common capability contract, including a sibling/link or
-  traversal design compatible with copy-on-write mutation.
+- [x] Expose true ordered scans through the common capability contract using bounded half-open
+  `[start, end)` traversal over internal child order rather than leaf sibling links. Exact child minima
+  prune pre-start subtrees and stop at the upper bound; tests prove sorted/limited/read-only behavior,
+  reopen/delete/overflow-value correctness, and equality with the in-memory oracle.
 - [x] Admit B+ tree to the common `KvEngine` differential harness. Keys through 4 KiB use inline
   descriptors or checksummed overflow blobs in leaves and internal exact-minimum separators; trait-level
   capabilities/reopen match the common contract, and deterministic differential tests cover empty/binary

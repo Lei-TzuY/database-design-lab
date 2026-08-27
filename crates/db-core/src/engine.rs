@@ -104,6 +104,23 @@ pub trait KvEngine {
     /// Deletes a key and returns the previous value, if any.
     fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
+    /// Returns up to `limit` key/value pairs in ascending bytewise key order from `[start, end)`.
+    ///
+    /// `end = None` means no upper bound. Engines whose capability advertises
+    /// `ordered_range_scan = false` may reject this operation.
+    fn range_scan(
+        &mut self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = (start, end, limit);
+        Err(DbError::InvalidInput(format!(
+            "engine {} does not expose ordered range scans",
+            self.capabilities().name
+        )))
+    }
+
     /// Closes and reopens engine state, replaying persistent state where applicable.
     fn reopen(&mut self) -> Result<()>;
 }
@@ -115,6 +132,20 @@ pub fn validate_key(key: &[u8]) -> Result<()> {
             "key has {} bytes; maximum is {MAX_KEY_BYTES}",
             key.len()
         )));
+    }
+    Ok(())
+}
+
+/// Validates half-open ordered range bounds against the common key semantics.
+pub fn validate_range_scan(start: &[u8], end: Option<&[u8]>) -> Result<()> {
+    validate_key(start)?;
+    if let Some(end) = end {
+        validate_key(end)?;
+        if end < start {
+            return Err(DbError::InvalidInput(
+                "ordered range end must not sort before start".to_owned(),
+            ));
+        }
     }
     Ok(())
 }

@@ -3,9 +3,10 @@
 Format v1 uses immutable checksummed 4,096-byte pages plus mirrored metadata. The executable tree
 layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update/deletion,
 root/non-root split propagation, deletion redistribution/merge, root contraction, reachability-derived
-page reuse, checksummed overflow chains for keys through 4 KiB and values through 1 MiB, and the
-common point-operation `KvEngine` contract. Physical file compaction, ordered scans, and exhaustive
-mutation-write fault injection remain deferred. All integers are unsigned little-endian unless stated otherwise.
+page reuse, checksummed overflow chains for keys through 4 KiB and values through 1 MiB, the
+common point-operation `KvEngine` contract, and bounded half-open ordered range scans. Physical file
+compaction and exhaustive mutation-write fault injection remain deferred. All integers are unsigned
+little-endian unless stated otherwise.
 
 ## Commit model
 
@@ -198,6 +199,21 @@ stored separator equals the referenced child's actual minimum key, child ranges 
 children have equal height, and no page is reached twice or through a cycle. Traversal depth is bounded
 to fail closed on malicious/corrupt structures.
 
+## Ordered range scans
+
+`range_scan(start, end, limit)` returns at most `limit` live entries in ascending bytewise key order.
+The lower bound is inclusive, the optional upper bound is exclusive, and `end = None` is unbounded.
+Equal bounds and a zero limit return an empty result; an upper bound that sorts before the lower bound
+is invalid input. Scans are read-only and do not change metadata generation or committed page count.
+
+Format v1 deliberately continues to require zero leaf right-sibling fields. A scan instead descends
+through internal children in separator order. For child `i`, the exact minimum of child `i + 1` is an
+exclusive upper bound on every key in child `i`; if that next minimum is less than or equal to `start`,
+child `i` can be skipped. Traversal stops globally when a child minimum reaches `end`, a leaf key reaches
+`end`, or `limit` rows have been emitted. This preserves ordered semantics without introducing sibling
+references that copy-on-write mutation and orphan-page reachability would also have to rewrite/track.
+Values, including overflow-backed values, are materialized only for rows that survive the range bounds.
+
 ## Slotted-page behavior
 
 `Page::insert_cell` stores one non-empty encoded cell. Slots grow upward from byte 40 while payloads
@@ -211,8 +227,8 @@ semantics.
 
 ## Explicitly deferred
 
-Format/tree work still does not define physical file compaction/truncation, a copy-on-write-compatible
-ordered leaf scan, multi-operation transactions, WAL-based in-place replacement,
-or concurrent writers. Fault injection for every intermediate mutation write is also still required
+Format/tree work still does not define physical file compaction/truncation, multi-operation
+transactions, WAL-based in-place replacement, or concurrent writers. Fault injection for every
+intermediate mutation write is also still required
 before performance experiments; current evidence covers pager torn/truncated states plus the semantic
 unpublished-shadow-root case.

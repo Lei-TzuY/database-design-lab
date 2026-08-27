@@ -5,6 +5,7 @@ mod common;
 mod delete;
 mod overflow;
 mod reuse;
+mod scan;
 
 use super::{
     corruption, BtreeError, Page, PageKind, Pager, Result, CHECKSUM_OFFSET, DATA_HEADER_LEN,
