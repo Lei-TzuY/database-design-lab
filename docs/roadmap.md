@@ -37,8 +37,12 @@ because later work has begun.
 
 Do not create a B+ tree crate until its first PR includes executable pager/page behavior.
 
-- [ ] Write page-format and crash-state design with version/checksum/free-space invariants.
-- [ ] Implement bounded pager and cache with corruption validation.
+- [x] Write page-format and crash-state design with version/checksum/free-space invariants
+  (`docs/btree-page-format.md`).
+- [x] Implement bounded pager and cache with corruption validation (`db-storage-btree`): mirrored
+  superblocks, synchronized immutable page allocation, slotted-page packing, root metadata commits,
+  checksum/reference validation, bounded cache eviction, interrupted-allocation recovery, and torn
+  superblock/truncation/corruption tests.
 - [ ] Implement lookup/insert and root/non-root split properties.
 - [ ] Implement deletion, redistribution/merge, root contraction, and space reuse.
 - [ ] Expose true ordered scans through the common capability contract.
