@@ -16,14 +16,14 @@ constraints—not a list of products we pretend to have built.
 ## Implemented baseline
 
 The workspace currently contains five crates with executable behavior. The B+ tree is now a common
-persistent point-operation `KvEngine`; ordered scans remain a separate capability:
+persistent `KvEngine` for point operations and bounded ordered range scans:
 
 | Crate | Implemented role |
 | --- | --- |
 | `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution and differential harness |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
-| `db-storage-btree` | Common persistent point `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
+| `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -38,14 +38,17 @@ allocation space without a persistent free-list. Keys that would overfill a tree
 that cannot fit inline are stored in checksummed overflow-page chains; live key/value chains participate
 in the same reachability/reuse proof. The B+ tree implements the common 4 KiB-key/1 MiB-value point
 contract, including explicit `REOPEN`, and is differentially tested against the in-memory oracle.
-Physical file compaction/truncation and ordered scans remain deferred.
+Ordered B+ tree scans walk the internal hierarchy in key order rather than persisting leaf sibling
+links, so scans introduce no extra COW/reuse edge. Physical file compaction/truncation remains deferred.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
-at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, and an
-explicit `REOPEN` workload boundary. Both persistent point engines now implement that contract and can
-participate in the common differential harness; ordered range capability remains false for the B+ tree.
-Range scans, transactions, multi-process writers, compaction, replication, SQL, MVCC, Raft, graph,
-time-series, and columnar execution are not implemented.
+at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
+and a bounded half-open ordered range API `[start, end)`, with `end = None` meaning unbounded. The
+in-memory oracle and B+ tree advertise ordered range support; the append log deliberately does not,
+because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still serializes
+point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
+multi-process writers, compaction, replication, SQL, MVCC, Raft, graph, time-series, and columnar
+execution are not implemented.
 
 ## Run the laboratory
 

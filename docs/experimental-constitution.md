@@ -24,14 +24,17 @@ All comparable engines implement the following single-operation semantics:
 | `PUT(k, v)` | `map[k] = v` | the previous value or missing |
 | `GET(k)` | none | the current value or missing |
 | `DELETE(k)` | remove `k`; the log engine appends a tombstone even for a miss | the removed value or missing |
+| `RANGE(start, end, limit)` | none | up to `limit` live pairs in bytewise key order from `[start, end)`; `end` may be unbounded |
 | `REOPEN` | close/reconstruct engine state | successful lifecycle boundary |
 
 Keys and values are arbitrary bytes. Empty keys and values are valid, while missing and empty remain
-distinct. Keys are at most 4,096 bytes and values at most 1,048,576 bytes. There is no implicit text
-encoding, ordering API, transaction group, snapshot, TTL, compare-and-swap, or concurrency guarantee
-in the current common semantics. JSON workload bytes use even-length hexadecimal strings.
+distinct. Keys are at most 4,096 bytes and values at most 1,048,576 bytes. Ordered range bounds use
+the same bytewise ordering as B+ tree routing: the lower bound is inclusive, the upper bound exclusive,
+`end = None` is unbounded, equal bounds are empty, and `end < start` is invalid. There is no implicit
+text encoding, transaction group, snapshot, TTL, compare-and-swap, or concurrency guarantee.
 
-Workload schema version 1 records an optional seed and ordered steps. The built-in generator uses a
+Workload schema version 1 records an optional seed and ordered point/lifecycle steps; it does not yet
+serialize range scans. The built-in generator uses a
 specified SplitMix64 implementation, not an unspecified thread RNG. It chooses 50% puts, 30% gets,
 and 20% deletes; these weights are generator defaults, not a claim that they model production. A
 configuration and generated trace are experiment inputs and must be archived together.

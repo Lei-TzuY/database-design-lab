@@ -5,8 +5,9 @@
 //! update/deletion, split/rebalance/root contraction, reachability-derived page reuse, and checksummed
 //! overflow chains for keys through 4 KiB and values through 1 MiB. Mutations synchronize key/value
 //! overflow pages and replacement tree pages before atomically publishing a new root. The tree now
-//! implements the common point-operation `KvEngine` contract; ordered scans, physical file compaction,
-//! and exhaustive mutation-write fault injection remain deferred.
+//! implements the common `KvEngine` point contract plus bounded half-open ordered scans by walking
+//! internal children in key order; physical file compaction and exhaustive mutation-write fault
+//! injection remain deferred.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
