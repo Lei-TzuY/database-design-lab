@@ -22,8 +22,13 @@ jobs:
           components: rustfmt, clippy
       - name: Apply range scan integration
         run: |
-          python .github/scripts/integrate_range_scan.py
-          python .github/scripts/fix_range_scan.py
+          if [ ! -f crates/db-storage-btree/src/tree/scan.rs ]; then
+            python .github/scripts/integrate_range_scan.py
+            python .github/scripts/fix_range_scan.py
+          fi
+          if grep -q 'ordered scans remain a separate capability' README.md; then
+            python .github/scripts/update_range_docs.py
+          fi
       - name: Validate
         run: |
           cargo fmt --all
@@ -38,6 +43,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-core/src/engine.rs crates/db-core/src/lib.rs crates/db-storage-memory/src/lib.rs crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/scan.rs crates/db-storage-btree/src/tree/common.rs
-          git commit -m "feat(btree): add common ordered range scans"
+          git add README.md crates/db-core/src/engine.rs crates/db-core/src/lib.rs crates/db-storage-memory/src/lib.rs crates/db-storage-btree/src/lib.rs crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/scan.rs crates/db-storage-btree/src/tree/common.rs docs/btree-page-format.md docs/design-space.md docs/experimental-constitution.md docs/roadmap.md
+          git commit -m "feat(btree): document common ordered range scans"
           git push origin HEAD:feat/btree-ordered-range-scan
