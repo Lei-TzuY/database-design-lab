@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply common-contract integration
-        run: python .github/scripts/integrate_common_kv.py
+        run: |
+          python .github/scripts/integrate_common_kv.py
+          python .github/scripts/fix_common_kv.py
       - name: Validate
         run: |
           cargo fmt --all
