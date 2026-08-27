@@ -67,7 +67,7 @@ Status is explicit and intentionally sparse:
 | Binary KV + in-memory map + caller serialization + standalone | Implemented oracle | `db-storage-memory`; deterministic semantic tests |
 | Binary KV + append log + caller serialization + standalone | Implemented candidate | `db-storage-log`; replay, checksum, corruption, prefix-interruption, and differential tests |
 | Ordered KV range scan on append log | Not exposed | the replay `BTreeMap` is recovery state, not a measured on-disk ordered access path |
-| Binary KV + B+ tree + standalone | Next storage experiment | requires pager/page-format evidence; no crate exists yet |
+| Binary KV + B+ tree + standalone | Pager/page foundation implemented | `db-storage-btree` now has mirrored superblocks, checksummed 4 KiB slotted pages, bounded validated caching, root metadata commits, and interrupted-allocation recovery; lookup/insert/split and `KvEngine` semantics are not implemented yet |
 | Binary KV + LSM + standalone | Planned after B+ tree | requires WAL/MemTable/SSTable/compaction evidence; no crate exists yet |
 | Relational/document/wide-column/graph/time-series models | Deferred | storage comparison must first be trustworthy |
 | 2PL/MVCC/OCC/serializable concurrency | Deferred | transactions and anomaly suites do not yet exist |
@@ -101,5 +101,7 @@ engine-specific operation, durability mode, ordering rule, or consistency level.
 The baseline uses Rust standard regular-file I/O, explicit little-endian fields, and no memory maps or
 POSIX-only syscall. CI therefore tests Linux, macOS, and Windows. Filesystem and device guarantees for
 `sync_data`/`sync_all` differ; experiments must record them. The append engine assumes one caller and
-one process owns a file. Opening the same file concurrently is outside the capability contract, not a
-supported concurrency mode.
+one process owns a file. The B+ tree pager likewise provides no cross-process exclusion, and currently
+commits only immutable page allocation plus mirrored root/page-count metadata rather than arbitrary
+in-place page replacement. Opening the same persistent file concurrently is outside the capability
+contract, not a supported concurrency mode.
