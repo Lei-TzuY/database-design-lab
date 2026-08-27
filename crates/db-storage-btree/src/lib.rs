@@ -3,9 +3,10 @@
 //! Fixed 4 KiB slotted pages, mirrored superblocks, synchronized immutable allocation, and a bounded
 //! validated-page cache form the physical layer. The tree layer adds binary point lookup, insertion/
 //! update/deletion, split/rebalance/root contraction, reachability-derived page reuse, and checksummed
-//! overflow chains for values through the common 1 MiB limit. Mutations synchronize replacement and
-//! overflow pages before atomically publishing a new root. Ordered scans, 4 KiB keys, physical file
-//! compaction, and common `KvEngine` admission remain deferred.
+//! overflow chains for keys through 4 KiB and values through 1 MiB. Mutations synchronize key/value
+//! overflow pages and replacement tree pages before atomically publishing a new root. The tree now
+//! implements the common point-operation `KvEngine` contract; ordered scans, physical file compaction,
+//! and exhaustive mutation-write fault injection remain deferred.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};

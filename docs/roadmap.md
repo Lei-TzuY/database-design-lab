@@ -60,9 +60,10 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
   delete, and orphan-page reuse without unbounded page-count growth.
 - [ ] Expose true ordered scans through the common capability contract, including a sibling/link or
   traversal design compatible with copy-on-write mutation.
-- [ ] Admit B+ tree to the common `KvEngine` differential harness by reconciling the remaining
-  1,024-byte tree key limit with the common 4 KiB contract, wiring trait-level reopen/capabilities, and
-  adding deterministic differential regressions.
+- [x] Admit B+ tree to the common `KvEngine` differential harness. Keys through 4 KiB use inline
+  descriptors or checksummed overflow blobs in leaves and internal exact-minimum separators; trait-level
+  capabilities/reopen match the common contract, and deterministic differential tests cover empty/binary
+  keys, the 4 KiB/1 MiB size limits, overwrite, delete, and repeated reopen against the memory oracle.
 - [ ] Add torn-page/update fault injection and deterministic crash-state regressions beyond the
   unpublished-shadow-page protocol before performance work.
 
