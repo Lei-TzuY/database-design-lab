@@ -20,11 +20,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Align implementation and documentation
-        run: |
-          python .github/scripts/integrate_overflow_values.py
-          python .github/scripts/fix_overflow_integration.py
-          python .github/scripts/update_overflow_docs.py
+      - name: Align overflow documentation
+        run: python .github/scripts/update_overflow_docs.py
       - name: Validate implementation
         run: |
           cargo fmt --all
@@ -39,6 +36,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md crates/db-storage-btree/src/lib.rs crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/delete.rs crates/db-storage-btree/src/tree/reuse.rs crates/db-storage-btree/src/tree/overflow.rs docs/btree-page-format.md docs/design-space.md docs/roadmap.md
+          git add README.md crates/db-storage-btree/src/lib.rs crates/db-storage-btree/src/tree.rs docs/btree-page-format.md docs/design-space.md docs/roadmap.md
           git commit -m "docs(btree): specify overflow value chains"
           git push origin HEAD:feat/btree-overflow-values
