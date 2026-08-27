@@ -14,8 +14,7 @@ text = text.replace(
 )
 text = text.replace(
     "            value: b\"new-but-unpublished\".to_vec(),",
-    "            value: StoredValue::Inline(b\"new-but-unpublished\".to_vec()),",
+    "            value: super::StoredValue::Inline(b\"new-but-unpublished\".to_vec()),",
     1,
 )
-# The shadow-page regression lives in this module, so StoredValue is already in scope as a sibling item.
 tree.write_text(text)
