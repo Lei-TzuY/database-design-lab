@@ -1,0 +1,292 @@
+from pathlib import Path
+
+lib = Path("crates/db-storage-btree/src/lib.rs")
+text = lib.read_text()
+text = text.replace(
+    "pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES};",
+    "pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};",
+    1,
+)
+text = text.replace(
+    "const KIND_INTERNAL: u8 = 2;",
+    "const KIND_INTERNAL: u8 = 2;\nconst KIND_OVERFLOW: u8 = 3;",
+    1,
+)
+text = text.replace(
+    "    /// Internal page; later phases will encode separator/child cells here.\n    Internal,",
+    "    /// Internal page containing separator/child cells.\n    Internal,\n    /// Overflow page containing one chunk of a large value and an optional next-page link.\n    Overflow,",
+    1,
+)
+text = text.replace(
+    "            Self::Internal => KIND_INTERNAL,",
+    "            Self::Internal => KIND_INTERNAL,\n            Self::Overflow => KIND_OVERFLOW,",
+    1,
+)
+text = text.replace(
+    "            KIND_INTERNAL => Ok(Self::Internal),",
+    "            KIND_INTERNAL => Ok(Self::Internal),\n            KIND_OVERFLOW => Ok(Self::Overflow),",
+    1,
+)
+text = text.replace(
+    "    /// Optional right sibling used only by leaf pages.\n    #[must_use]\n    pub fn right_sibling(&self) -> Option<u64> {\n        match read_u64(&self.bytes[32..40]) {\n            ROOT_NONE => None,\n            page_id => Some(page_id),\n        }\n    }",
+    "    fn page_link(&self) -> Option<u64> {\n        match read_u64(&self.bytes[32..40]) {\n            ROOT_NONE => None,\n            page_id => Some(page_id),\n        }\n    }\n\n    /// Optional right sibling used only by tree leaf pages.\n    #[must_use]\n    pub fn right_sibling(&self) -> Option<u64> {\n        if self.kind == PageKind::Leaf {\n            self.page_link()\n        } else {\n            None\n        }\n    }\n\n    /// Optional next page used only by overflow-value pages.\n    #[must_use]\n    pub fn overflow_next(&self) -> Option<u64> {\n        if self.kind == PageKind::Overflow {\n            self.page_link()\n        } else {\n            None\n        }\n    }",
+    1,
+)
+marker = "    /// Inserts one opaque non-empty cell into the slotted-page body."
+overflow_setter = "    /// Sets an overflow page's next-page link before the page is committed.\n    pub fn set_overflow_next(&mut self, next: Option<u64>) -> Result<()> {\n        self.validate()?;\n        if self.kind != PageKind::Overflow {\n            return Err(BtreeError::InvalidInput(\n                \"overflow next-page link is only defined for overflow pages\".to_owned(),\n            ));\n        }\n        let encoded = next.unwrap_or(ROOT_NONE);\n        if encoded != ROOT_NONE && encoded < SUPERBLOCK_COUNT {\n            return Err(BtreeError::InvalidInput(format!(\n                \"overflow next page {encoded} overlaps mirrored superblocks\"\n            )));\n        }\n        if encoded == self.page_id {\n            return Err(BtreeError::InvalidInput(\n                \"overflow page cannot point to itself\".to_owned(),\n            ));\n        }\n        self.bytes[32..40].copy_from_slice(&encoded.to_le_bytes());\n        refresh_checksum(&mut self.bytes);\n        Ok(())\n    }\n\n"
+if overflow_setter not in text:
+    text = text.replace(marker, overflow_setter + marker, 1)
+text = text.replace(
+    "        if let Some(sibling) = page.right_sibling() {\n            if sibling >= self.active.page_count {\n                return Err(corruption(\n                    offset + 32,\n                    format!(\n                        \"leaf page {page_id} points to uncommitted right sibling {sibling}; committed page_count is {}\",\n                        self.active.page_count\n                    ),\n                ));\n            }\n        }",
+    "        if let Some(link) = page.page_link() {\n            if link >= self.active.page_count {\n                return Err(corruption(\n                    offset + 32,\n                    format!(\n                        \"page {page_id} points to uncommitted linked page {link}; committed page_count is {}\",\n                        self.active.page_count\n                    ),\n                ));\n            }\n        }",
+    1,
+)
+lib.write_text(text)
+
+tree = Path("crates/db-storage-btree/src/tree.rs")
+text = tree.read_text()
+if "mod overflow;\n" not in text:
+    text = text.replace("mod delete;\n", "mod delete;\nmod overflow;\n", 1)
+text = text.replace(
+    "pub const MAX_TREE_KEY_BYTES: usize = 1024;",
+    "pub const MAX_TREE_KEY_BYTES: usize = 1024;\n/// Maximum value size accepted by the tree; matches the common KV value contract.\npub const MAX_TREE_VALUE_BYTES: usize = 1024 * 1024;",
+    1,
+)
+text = text.replace(
+    "const LEAF_CELL_HEADER_LEN: usize = 6;",
+    "const LEAF_CELL_HEADER_LEN: usize = 6;\nconst VALUE_OVERFLOW_FLAG: u32 = 1 << 31;\nconst VALUE_LENGTH_MASK: u32 = VALUE_OVERFLOW_FLAG - 1;\nconst OVERFLOW_VALUE_REF_LEN: usize = 8;",
+    1,
+)
+text = text.replace(
+    "                    return match entries.binary_search_by(|entry| entry.key.as_slice().cmp(key)) {\n                        Ok(index) => Ok(Some(entries[index].value.clone())),\n                        Err(_) => Ok(None),\n                    };",
+    "                    return match entries.binary_search_by(|entry| entry.key.as_slice().cmp(key)) {\n                        Ok(index) => {\n                            let stored = entries[index].value.clone();\n                            self.load_value(&stored).map(Some)\n                        }\n                        Err(_) => Ok(None),\n                    };",
+    1,
+)
+text = text.replace(
+    "        let previous = self.get(key)?;\n        self.refresh_reusable_pages()?;\n\n        let replacements = match self.pager.root_page_id() {",
+    "        let previous = self.get(key)?;\n        self.refresh_reusable_pages()?;\n        let stored_value = self.store_value(key, value)?;\n\n        let replacements = match self.pager.root_page_id() {",
+    1,
+)
+text = text.replace(
+    "Some(root) => self.rewrite_insert(root, key, value, 0)?,",
+    "Some(root) => self.rewrite_insert(root, key, &stored_value, 0)?,",
+    1,
+)
+text = text.replace(
+    "                    value: value.to_vec(),",
+    "                    value: stored_value.clone(),",
+    1,
+)
+text = text.replace(
+    "        value: &[u8],\n        depth: usize,",
+    "        value: &StoredValue,\n        depth: usize,",
+    1,
+)
+text = text.replace(
+    "                    Ok(index) => entries[index].value = value.to_vec(),",
+    "                    Ok(index) => entries[index].value = value.clone(),",
+    1,
+)
+text = text.replace(
+    "                            value: value.to_vec(),",
+    "                            value: value.clone(),",
+    1,
+)
+text = text.replace(
+    "                let entries = decode_leaf(&page)?;\n                let first = entries.first().ok_or_else(|| {",
+    "                let entries = decode_leaf(&page)?;\n                for entry in &entries {\n                    self.validate_value_reachability(&entry.value, seen)?;\n                }\n                let first = entries.first().ok_or_else(|| {",
+    1,
+)
+target = "                Ok(SubtreeBounds {\n                    min_key: child_bounds[0].min_key.clone(),\n                    max_key: child_bounds\n                        .last()\n                        .expect(\"internal page has children\")\n                        .max_key\n                        .clone(),\n                    height: height + 1,\n                })\n            }\n        }"
+replacement = "                Ok(SubtreeBounds {\n                    min_key: child_bounds[0].min_key.clone(),\n                    max_key: child_bounds\n                        .last()\n                        .expect(\"internal page has children\")\n                        .max_key\n                        .clone(),\n                    height: height + 1,\n                })\n            }\n            PageKind::Overflow => Err(corruption(\n                0,\n                format!(\"tree edge references overflow page {page_id} as a B+ tree node\"),\n            )),\n        }"
+if target not in text:
+    raise SystemExit("validate_subtree tail marker not found")
+text = text.replace(target, replacement, 1)
+text = text.replace(
+    "struct LeafEntry {\n    key: Vec<u8>,\n    value: Vec<u8>,\n}",
+    "struct LeafEntry {\n    key: Vec<u8>,\n    value: StoredValue,\n}\n\n#[derive(Debug, Clone, PartialEq, Eq)]\nenum StoredValue {\n    Inline(Vec<u8>),\n    Overflow { len: u32, first_page_id: u64 },\n}",
+    1,
+)
+start = text.index("fn validate_key_value(key: &[u8], value: &[u8]) -> Result<()> {")
+end = text.index("\nfn encode_leaf_cell", start)
+text = text[:start] + '''fn validate_key_value(key: &[u8], value: &[u8]) -> Result<()> {
+    validate_key(key)?;
+    if value.len() > MAX_TREE_VALUE_BYTES {
+        return Err(BtreeError::InvalidInput(format!(
+            "B+ tree value has {} bytes; maximum is {MAX_TREE_VALUE_BYTES}",
+            value.len()
+        )));
+    }
+    let value_len = u32::try_from(value.len()).map_err(|_| {
+        BtreeError::InvalidInput("value length does not fit the on-page u32 field".to_owned())
+    })?;
+    if value_len > VALUE_LENGTH_MASK {
+        return Err(BtreeError::InvalidInput(
+            "value length collides with the overflow marker bit".to_owned(),
+        ));
+    }
+    Ok(())
+}
+''' + text[end + 1:]
+start = text.index("fn encode_leaf_cell(entry: &LeafEntry) -> Result<Vec<u8>> {")
+end = text.index("\nfn decode_leaf", start)
+text = text[:start] + '''fn encode_leaf_cell(entry: &LeafEntry) -> Result<Vec<u8>> {
+    validate_key(&entry.key)?;
+    let key_len = u16::try_from(entry.key.len()).map_err(|_| {
+        BtreeError::InvalidInput("key length does not fit the on-page u16 field".to_owned())
+    })?;
+    let (value_field, payload_len) = match &entry.value {
+        StoredValue::Inline(value) => {
+            if value.len() > MAX_TREE_VALUE_BYTES {
+                return Err(BtreeError::InvalidInput(format!(
+                    "B+ tree value has {} bytes; maximum is {MAX_TREE_VALUE_BYTES}",
+                    value.len()
+                )));
+            }
+            let len = u32::try_from(value.len()).map_err(|_| {
+                BtreeError::InvalidInput("inline value length does not fit u32".to_owned())
+            })?;
+            (len, value.len())
+        }
+        StoredValue::Overflow { len, first_page_id } => {
+            if *len == 0 || usize::try_from(*len).unwrap_or(usize::MAX) > MAX_TREE_VALUE_BYTES {
+                return Err(BtreeError::InvalidInput(
+                    "overflow value length is outside supported bounds".to_owned(),
+                ));
+            }
+            if *first_page_id < SUPERBLOCK_COUNT {
+                return Err(BtreeError::InvalidInput(format!(
+                    "overflow value page {first_page_id} overlaps mirrored superblocks"
+                )));
+            }
+            (VALUE_OVERFLOW_FLAG | *len, OVERFLOW_VALUE_REF_LEN)
+        }
+    };
+    let mut cell = Vec::with_capacity(LEAF_CELL_HEADER_LEN + entry.key.len() + payload_len);
+    cell.extend_from_slice(&key_len.to_le_bytes());
+    cell.extend_from_slice(&value_field.to_le_bytes());
+    cell.extend_from_slice(&entry.key);
+    match &entry.value {
+        StoredValue::Inline(value) => cell.extend_from_slice(value),
+        StoredValue::Overflow { first_page_id, .. } => {
+            cell.extend_from_slice(&first_page_id.to_le_bytes());
+        }
+    }
+    Ok(cell)
+}
+''' + text[end + 1:]
+start = text.index("fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {")
+end = text.index("\nfn encode_internal_cell", start)
+text = text[:start] + '''fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {
+    if page.kind() != PageKind::Leaf {
+        return Err(corruption(0, "attempted leaf decoding on a non-leaf page"));
+    }
+    let mut entries = Vec::with_capacity(usize::from(page.cell_count()));
+    for index in 0..page.cell_count() {
+        let cell = page.cell(index)?;
+        if cell.len() < LEAF_CELL_HEADER_LEN {
+            return Err(corruption(
+                0,
+                format!("leaf page {} slot {index} is shorter than its cell header", page.page_id()),
+            ));
+        }
+        let key_len = usize::from(u16::from_le_bytes([cell[0], cell[1]]));
+        let value_field = u32::from_le_bytes([cell[2], cell[3], cell[4], cell[5]]);
+        let is_overflow = value_field & VALUE_OVERFLOW_FLAG != 0;
+        let value_len_u32 = value_field & VALUE_LENGTH_MASK;
+        let value_len = usize::try_from(value_len_u32)
+            .map_err(|_| corruption(0, "leaf value length does not fit usize"))?;
+        if value_len > MAX_TREE_VALUE_BYTES {
+            return Err(corruption(
+                0,
+                format!("leaf page {} contains oversized value length {value_len}", page.page_id()),
+            ));
+        }
+        if is_overflow && value_len == 0 {
+            return Err(corruption(0, "overflow leaf value encodes zero length"));
+        }
+        let value_payload_len = if is_overflow { OVERFLOW_VALUE_REF_LEN } else { value_len };
+        let expected = LEAF_CELL_HEADER_LEN
+            .checked_add(key_len)
+            .and_then(|length| length.checked_add(value_payload_len))
+            .ok_or_else(|| corruption(0, "leaf cell decoded length overflowed usize"))?;
+        if expected != cell.len() {
+            return Err(corruption(
+                0,
+                format!(
+                    "leaf page {} slot {index} encodes {expected} bytes but slot contains {}",
+                    page.page_id(), cell.len()
+                ),
+            ));
+        }
+        if key_len > MAX_TREE_KEY_BYTES {
+            return Err(corruption(
+                0,
+                format!("leaf page {} contains oversized key of {key_len} bytes", page.page_id()),
+            ));
+        }
+        let key_end = LEAF_CELL_HEADER_LEN + key_len;
+        let value = if is_overflow {
+            let bytes = &cell[key_end..key_end + OVERFLOW_VALUE_REF_LEN];
+            let first_page_id = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            if first_page_id < SUPERBLOCK_COUNT {
+                return Err(corruption(
+                    0,
+                    format!("leaf page {} references invalid overflow page {first_page_id}", page.page_id()),
+                ));
+            }
+            StoredValue::Overflow {
+                len: value_len_u32,
+                first_page_id,
+            }
+        } else {
+            StoredValue::Inline(cell[key_end..].to_vec())
+        };
+        entries.push(LeafEntry {
+            key: cell[LEAF_CELL_HEADER_LEN..key_end].to_vec(),
+            value,
+        });
+    }
+    validate_leaf_order(&entries, page.page_id())?;
+    Ok(entries)
+}
+''' + text[end + 1:]
+tree.write_text(text)
+
+delete = Path("crates/db-storage-btree/src/tree/delete.rs")
+text = delete.read_text()
+marker = "                }\n            }\n        }\n    }\n\n    fn rebalance_after_delete"
+if marker not in text:
+    raise SystemExit("delete rewrite match marker not found")
+text = text.replace(
+    marker,
+    "                }\n            }\n            PageKind::Overflow => Err(corruption(\n                0,\n                format!(\"delete traversal reached overflow page {page_id} as a tree node\"),\n            )),\n        }\n    }\n\n    fn rebalance_after_delete",
+    1,
+)
+text = text.replace(
+    "            PageKind::Internal => self.rebalance_internal_pair(&left_page, &right_page)?,\n        };",
+    "            PageKind::Internal => self.rebalance_internal_pair(&left_page, &right_page)?,\n            PageKind::Overflow => {\n                return Err(corruption(0, \"overflow page appeared as a B+ tree sibling\"));\n            }\n        };",
+    1,
+)
+text = text.replace(
+    "fn page_is_underfull(page: &Page) -> Result<bool> {\n    if page.kind() == PageKind::Internal && page.cell_count() < 2 {",
+    "fn page_is_underfull(page: &Page) -> Result<bool> {\n    if page.kind() == PageKind::Overflow {\n        return Err(corruption(0, \"overflow page appeared as a B+ tree child\"));\n    }\n    if page.kind() == PageKind::Internal && page.cell_count() < 2 {",
+    1,
+)
+delete.write_text(text)
+
+reuse = Path("crates/db-storage-btree/src/tree/reuse.rs")
+text = reuse.read_text()
+text = text.replace(
+    "    use crate::PageKind;",
+    "    use crate::tree::StoredValue;\n    use crate::PageKind;",
+    1,
+)
+text = text.replace(
+    "            value: b\"unpublished\".to_vec(),",
+    "            value: StoredValue::Inline(b\"unpublished\".to_vec()),",
+    1,
+)
+reuse.write_text(text)
