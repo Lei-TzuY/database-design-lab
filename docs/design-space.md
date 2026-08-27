@@ -67,7 +67,7 @@ Status is explicit and intentionally sparse:
 | Binary KV + in-memory map + caller serialization + standalone | Implemented oracle | `db-storage-memory`; deterministic semantic tests |
 | Binary KV + append log + caller serialization + standalone | Implemented candidate | `db-storage-log`; replay, checksum, corruption, prefix-interruption, and differential tests |
 | Ordered KV range scan on append log | Not exposed | the replay `BTreeMap` is recovery state, not a measured on-disk ordered access path |
-| Binary KV + B+ tree + standalone | Point slice implemented, common capability deferred | `db-storage-btree` has mirrored checksummed pages plus copy-on-write binary lookup/insertion, root/non-root splits, root publication, reopen validation, and deterministic split/shadow-page tests; delete, reclamation, ordered scan, overflow values, and common `KvEngine` admission remain deferred |
+| Binary KV + B+ tree + standalone | Point mutation slice implemented, common capability deferred | `db-storage-btree` has mirrored checksummed pages plus copy-on-write binary lookup/insert/delete, root/non-root splits, delete redistribution/merge, root contraction, reachability-derived orphan-page reuse, root publication, reopen validation, and deterministic split/delete/reuse/shadow-page tests; physical compaction, ordered scan, overflow values, and common `KvEngine` admission remain deferred |
 | Binary KV + LSM + standalone | Planned after B+ tree | requires WAL/MemTable/SSTable/compaction evidence; no crate exists yet |
 | Relational/document/wide-column/graph/time-series models | Deferred | storage comparison must first be trustworthy |
 | 2PL/MVCC/OCC/serializable concurrency | Deferred | transactions and anomaly suites do not yet exist |
@@ -103,5 +103,6 @@ POSIX-only syscall. CI therefore tests Linux, macOS, and Windows. Filesystem and
 `sync_data`/`sync_all` differ; experiments must record them. The append engine assumes one caller and
 one process owns a file. The B+ tree likewise provides no cross-process exclusion. Its current mutation protocol avoids
 in-place replacement entirely: copy-on-write pages are synchronized before a mirrored root-pointer
-transition publishes the new tree; unreachable historical pages are not reclaimed yet. Opening the same persistent file concurrently is outside the capability
+transition publishes the new tree. Pages outside current-root reachability are recycled only on later
+mutations, after they are proven unreachable; physical file compaction is not implemented. Opening the same persistent file concurrently is outside the capability
 contract, not a supported concurrency mode.

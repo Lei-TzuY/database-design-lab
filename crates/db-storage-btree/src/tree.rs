@@ -1,5 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
+
+mod delete;
+mod reuse;
 
 use super::{
     corruption, BtreeError, Page, PageKind, Pager, Result, CHECKSUM_OFFSET, DATA_HEADER_LEN,
@@ -17,16 +20,18 @@ const INTERNAL_CELL_HEADER_LEN: usize = 10;
 const MAX_TREE_HEIGHT: usize = 64;
 const PAGE_BODY_CAPACITY: usize = CHECKSUM_OFFSET - DATA_HEADER_LEN;
 
-/// Persistent copy-on-write B+ tree supporting binary point lookup and insertion/update.
+/// Persistent copy-on-write B+ tree supporting binary point lookup, insertion/update, and deletion.
 ///
-/// Mutations never overwrite a reachable data page. A `put` rewrites the changed leaf and every
-/// ancestor as newly appended immutable pages, synchronizes those pages through [`Pager`], then
-/// publishes exactly one new root pointer through the mirrored superblock. A crash before that final
-/// root publication leaves the previous tree authoritative; already committed shadow pages are
-/// unreachable space that later reclamation work may recover.
+/// Mutations never overwrite a reachable data page. `put` and `delete` append replacement leaves and
+/// ancestors through [`Pager`] before publishing exactly one new root pointer through the mirrored
+/// superblock. Deletion byte-balances or merges an underfull child with an adjacent sibling and
+/// contracts one-child roots. Before each mutation, committed pages outside current-root reachability
+/// become a reusable pool; overwriting such an orphan cannot damage the authoritative old tree. A
+/// crash before root publication therefore leaves the previous tree authoritative.
 #[derive(Debug)]
 pub struct BPlusTree {
     pager: Pager,
+    reusable_pages: VecDeque<u64>,
 }
 
 impl BPlusTree {
@@ -34,6 +39,7 @@ impl BPlusTree {
     pub fn create_new(path: impl AsRef<Path>, cache_capacity: usize) -> Result<Self> {
         Ok(Self {
             pager: Pager::create_new(path, cache_capacity)?,
+            reusable_pages: VecDeque::new(),
         })
     }
 
@@ -41,8 +47,10 @@ impl BPlusTree {
     pub fn open(path: impl AsRef<Path>, cache_capacity: usize) -> Result<Self> {
         let mut tree = Self {
             pager: Pager::open(path, cache_capacity)?,
+            reusable_pages: VecDeque::new(),
         };
         tree.validate_reachable_tree()?;
+        tree.refresh_reusable_pages()?;
         Ok(tree)
     }
 
@@ -111,11 +119,13 @@ impl BPlusTree {
 
     /// Inserts or replaces one binary key/value pair and returns the previous value.
     ///
-    /// One encoded entry must fit on an otherwise empty leaf. Deletion and page reclamation are not
-    /// part of this phase, so repeated updates intentionally leave unreachable historical pages.
+    /// One encoded entry must fit on an otherwise empty leaf. Before writing, the tree derives a
+    /// reusable-page pool from committed pages not reachable from the current root; only those orphan
+    /// pages may be overwritten before the final copy-on-write root publication.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
         validate_key_value(key, value)?;
         let previous = self.get(key)?;
+        self.refresh_reusable_pages()?;
 
         let replacements = match self.pager.root_page_id() {
             Some(root) => self.rewrite_insert(root, key, value, 0)?,
@@ -249,11 +259,11 @@ impl BPlusTree {
         let first = entries.first().ok_or_else(|| {
             BtreeError::InvalidInput("cannot persist an empty leaf page".to_owned())
         })?;
-        let mut page = self.pager.prepare_new_page(PageKind::Leaf)?;
+        let (mut page, recycled) = self.prepare_tree_page(PageKind::Leaf)?;
         for cell in cells {
             page.insert_cell(cell)?;
         }
-        let page_id = self.pager.commit_new_page(page)?;
+        let page_id = self.commit_tree_page(page, recycled)?;
         Ok(ChildRef {
             min_key: first.key.clone(),
             page_id,
@@ -282,11 +292,11 @@ impl BPlusTree {
         let first = children.first().ok_or_else(|| {
             BtreeError::InvalidInput("cannot persist an empty internal page".to_owned())
         })?;
-        let mut page = self.pager.prepare_new_page(PageKind::Internal)?;
+        let (mut page, recycled) = self.prepare_tree_page(PageKind::Internal)?;
         for cell in cells {
             page.insert_cell(cell)?;
         }
-        let page_id = self.pager.commit_new_page(page)?;
+        let page_id = self.commit_tree_page(page, recycled)?;
         Ok(ChildRef {
             min_key: first.min_key.clone(),
             page_id,
@@ -326,6 +336,12 @@ impl BPlusTree {
         let page = self.pager.read_page(page_id)?;
         match page.kind() {
             PageKind::Leaf => {
+                if page.right_sibling().is_some() {
+                    return Err(corruption(
+                        0,
+                        format!("reachable tree leaf page {page_id} has a sibling pointer; point-tree v1 requires zero"),
+                    ));
+                }
                 let entries = decode_leaf(&page)?;
                 let first = entries.first().ok_or_else(|| {
                     corruption(0, format!("reachable leaf page {page_id} is empty"))
