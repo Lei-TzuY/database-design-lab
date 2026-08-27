@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Wire deletion module
+      - name: Wire deletion module and apply lint fix
         shell: python
         run: |
           from pathlib import Path
@@ -31,6 +31,13 @@ jobs:
               pos = text.index(marker)
               text = text[:pos] + "mod delete;\n\n" + text[pos:]
               path.write_text(text)
+
+          delete = Path("crates/db-storage-btree/src/tree/delete.rs")
+          text = delete.read_text().replace(
+              "BPlusTree, ChildRef, LeafEntry, Page, PageKind,",
+              "BPlusTree, ChildRef, Page, PageKind,",
+          )
+          delete.write_text(text)
       - name: Validate implementation
         run: |
           cargo fmt --all
