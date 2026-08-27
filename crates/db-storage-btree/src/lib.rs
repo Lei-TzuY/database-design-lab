@@ -727,17 +727,15 @@ impl PageCache {
 
     fn insert(&mut self, page: Page) {
         let page_id = page.page_id;
-        if self.pages.contains_key(&page_id) {
-            self.pages.insert(page_id, page);
+        if self.pages.insert(page_id, page).is_some() {
             self.touch(page_id);
             return;
         }
-        if self.pages.len() == self.capacity {
+        if self.pages.len() > self.capacity {
             if let Some(evicted) = self.order.pop_front() {
                 self.pages.remove(&evicted);
             }
         }
-        self.pages.insert(page_id, page);
         self.order.push_back(page_id);
     }
 
