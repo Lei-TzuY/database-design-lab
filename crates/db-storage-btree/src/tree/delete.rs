@@ -1,7 +1,7 @@
 use super::{
     cells_fit, choose_split, decode_internal, decode_leaf, encode_internal_cell, encode_leaf_cell,
-    route_child, validate_child_refs, validate_key, BPlusTree, ChildRef, LeafEntry, Page, PageKind,
-    Result, MAX_TREE_HEIGHT, PAGE_BODY_CAPACITY, SLOT_LEN,
+    route_child, validate_child_refs, validate_key, BPlusTree, ChildRef, Page, PageKind, Result,
+    MAX_TREE_HEIGHT, PAGE_BODY_CAPACITY, SLOT_LEN,
 };
 use crate::{corruption, BtreeError};
 
@@ -22,7 +22,10 @@ impl BPlusTree {
             return Ok(None);
         };
         let root = self.pager.root_page_id().ok_or_else(|| {
-            corruption(0, "B+ tree lookup found a value while committed root is empty")
+            corruption(
+                0,
+                "B+ tree lookup found a value while committed root is empty",
+            )
         })?;
 
         let replacement = self.rewrite_delete(root, key, 0)?;
@@ -66,7 +69,9 @@ impl BPlusTree {
                 let mut entries = decode_leaf(&page)?;
                 let index = entries
                     .binary_search_by(|entry| entry.key.as_slice().cmp(key))
-                    .map_err(|_| corruption(0, "delete rewrite could not find previously located key"))?;
+                    .map_err(|_| {
+                        corruption(0, "delete rewrite could not find previously located key")
+                    })?;
                 entries.remove(index);
                 if entries.is_empty() {
                     Ok(None)
@@ -162,7 +167,8 @@ impl BPlusTree {
 
         let split = choose_split(&cells).ok_or_else(|| {
             BtreeError::InvalidInput(
-                "delete leaf redistribution cannot divide sibling entries into two pages".to_owned(),
+                "delete leaf redistribution cannot divide sibling entries into two pages"
+                    .to_owned(),
             )
         })?;
         Ok(vec![
@@ -171,11 +177,7 @@ impl BPlusTree {
         ])
     }
 
-    fn rebalance_internal_pair(
-        &mut self,
-        left: &Page,
-        right: &Page,
-    ) -> Result<Vec<ChildRef>> {
+    fn rebalance_internal_pair(&mut self, left: &Page, right: &Page) -> Result<Vec<ChildRef>> {
         let mut grandchildren = decode_internal(left)?;
         grandchildren.extend(decode_internal(right)?);
         validate_child_refs(&grandchildren)?;
@@ -189,7 +191,8 @@ impl BPlusTree {
 
         let split = choose_internal_rebalance_split(&cells).ok_or_else(|| {
             BtreeError::InvalidInput(
-                "delete internal redistribution cannot keep two children on each sibling".to_owned(),
+                "delete internal redistribution cannot keep two children on each sibling"
+                    .to_owned(),
             )
         })?;
         Ok(vec![

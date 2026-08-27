@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+mod delete;
+
 use super::{
     corruption, BtreeError, Page, PageKind, Pager, Result, CHECKSUM_OFFSET, DATA_HEADER_LEN,
     SLOT_LEN, SUPERBLOCK_COUNT,
