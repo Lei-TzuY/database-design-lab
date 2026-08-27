@@ -1,6 +1,6 @@
 use super::{
-    cells_fit, choose_split, decode_internal, decode_leaf, encode_internal_cell, encode_leaf_cell,
-    route_child, validate_child_refs, validate_key, BPlusTree, ChildRef, Page, PageKind, Result,
+    cells_fit, choose_split, encode_internal_cell, encode_leaf_cell, route_child,
+    validate_child_refs, validate_key, BPlusTree, ChildRef, Page, PageKind, Result,
     MAX_TREE_HEIGHT, PAGE_BODY_CAPACITY, SLOT_LEN,
 };
 use crate::{corruption, BtreeError};
@@ -38,7 +38,7 @@ impl BPlusTree {
                     if page.kind() != PageKind::Internal {
                         break;
                     }
-                    let children = decode_internal(&page)?;
+                    let children = self.decode_internal(&page, None)?;
                     if children.len() != 1 {
                         break;
                     }
@@ -67,7 +67,7 @@ impl BPlusTree {
         let page = self.pager.read_page(page_id)?;
         match page.kind() {
             PageKind::Leaf => {
-                let mut entries = decode_leaf(&page)?;
+                let mut entries = self.decode_leaf(&page, None)?;
                 let index = entries
                     .binary_search_by(|entry| entry.key.as_slice().cmp(key))
                     .map_err(|_| {
@@ -81,7 +81,7 @@ impl BPlusTree {
                 }
             }
             PageKind::Internal => {
-                let mut children = decode_internal(&page)?;
+                let mut children = self.decode_internal(&page, None)?;
                 let child_index = route_child(&children, key)?;
                 let child_id = children[child_index].page_id;
                 match self.rewrite_delete(child_id, key, depth + 1)? {
@@ -155,10 +155,10 @@ impl BPlusTree {
     }
 
     fn rebalance_leaf_pair(&mut self, left: &Page, right: &Page) -> Result<Vec<ChildRef>> {
-        let mut entries = decode_leaf(left)?;
-        entries.extend(decode_leaf(right)?);
+        let mut entries = self.decode_leaf(left, None)?;
+        entries.extend(self.decode_leaf(right, None)?);
         for pair in entries.windows(2) {
-            if pair[0].key >= pair[1].key {
+            if pair[0].key.as_slice() >= pair[1].key.as_slice() {
                 return Err(corruption(
                     0,
                     "delete leaf rebalance encountered overlapping sibling key ranges",
@@ -186,8 +186,8 @@ impl BPlusTree {
     }
 
     fn rebalance_internal_pair(&mut self, left: &Page, right: &Page) -> Result<Vec<ChildRef>> {
-        let mut grandchildren = decode_internal(left)?;
-        grandchildren.extend(decode_internal(right)?);
+        let mut grandchildren = self.decode_internal(left, None)?;
+        grandchildren.extend(self.decode_internal(right, None)?);
         validate_child_refs(&grandchildren)?;
         let cells = grandchildren
             .iter()
