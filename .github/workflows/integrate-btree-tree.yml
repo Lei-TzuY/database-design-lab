@@ -20,20 +20,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Export tree API
+      - name: Export tree API and apply known lint fix
         shell: python
         run: |
           from pathlib import Path
 
-          path = Path("crates/db-storage-btree/src/lib.rs")
-          text = path.read_text()
+          lib = Path("crates/db-storage-btree/src/lib.rs")
+          text = lib.read_text()
           export = "mod tree;\n\npub use tree::{BPlusTree, MAX_TREE_KEY_BYTES};\n"
           marker = "use thiserror::Error;\n"
           if export not in text:
               if marker not in text:
                   raise SystemExit("lib.rs import marker not found")
               text = text.replace(marker, marker + "\n" + export, 1)
-              path.write_text(text)
+              lib.write_text(text)
+
+          tree = Path("crates/db-storage-btree/src/tree.rs")
+          text = tree.read_text()
+          text = text.replace(
+              "best.map_or(true, |(_, current)| imbalance < current)",
+              "best.is_none_or(|(_, current)| imbalance < current)",
+          )
+          tree.write_text(text)
       - name: Validate implementation
         run: |
           cargo fmt --all
