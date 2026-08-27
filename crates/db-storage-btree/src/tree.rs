@@ -134,7 +134,8 @@ impl BPlusTree {
 
     /// Inserts or replaces one binary key/value pair and returns the previous value.
     ///
-    /// One encoded entry must fit on an otherwise empty leaf. Before writing, the tree derives a
+    /// Values through 1 MiB are accepted. Values that do not fit inline are stored in checksummed
+    /// overflow pages before the replacement leaf is committed. Before writing, the tree derives a
     /// reusable-page pool from committed pages not reachable from the current root; only those orphan
     /// pages may be overwritten before the final copy-on-write root publication.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {

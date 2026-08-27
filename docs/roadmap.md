@@ -54,10 +54,15 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
   ids from validated current-root reachability before each mutation. Recycled pages are synchronized
   before root publication, never overwrite the authoritative tree, and deterministic tests prove file
   page count stabilizes across repeated updates and empty-tree reuse. Physical file compaction remains deferred.
+- [x] Support values through the common 1 MiB limit with checksummed overflow-page chains. Leaf
+  references preserve logical length, overflow pages are committed tail-to-head before leaf/root
+  publication, reopen validates canonical chains, and deterministic tests cover 1 MiB round-trip,
+  delete, and orphan-page reuse without unbounded page-count growth.
 - [ ] Expose true ordered scans through the common capability contract, including a sibling/link or
   traversal design compatible with copy-on-write mutation.
-- [ ] Admit B+ tree to the common `KvEngine` differential harness by reconciling page-local key/value
-  limits, implementing delete/reopen semantics, and declaring explicit capabilities.
+- [ ] Admit B+ tree to the common `KvEngine` differential harness by reconciling the remaining
+  1,024-byte tree key limit with the common 4 KiB contract, wiring trait-level reopen/capabilities, and
+  adding deterministic differential regressions.
 - [ ] Add torn-page/update fault injection and deterministic crash-state regressions beyond the
   unpublished-shadow-page protocol before performance work.
 

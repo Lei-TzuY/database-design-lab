@@ -2,9 +2,10 @@
 //!
 //! Fixed 4 KiB slotted pages, mirrored superblocks, synchronized immutable allocation, and a bounded
 //! validated-page cache form the physical layer. The tree layer adds binary point lookup, insertion/
-//! update, and root/non-root split propagation. Mutations append replacement pages before atomically
-//! publishing a new root; deletion, reclamation, ordered scans, overflow values, and common `KvEngine`
-//! admission remain deferred.
+//! update/deletion, split/rebalance/root contraction, reachability-derived page reuse, and checksummed
+//! overflow chains for values through the common 1 MiB limit. Mutations synchronize replacement and
+//! overflow pages before atomically publishing a new root. Ordered scans, 4 KiB keys, physical file
+//! compaction, and common `KvEngine` admission remain deferred.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -70,7 +71,7 @@ pub enum BtreeError {
 /// Physical role of a data page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageKind {
-    /// Leaf page; later phases will encode key/value cells here.
+    /// Leaf page containing sorted key/value cells or overflow-value references.
     Leaf,
     /// Internal page containing separator/child cells.
     Internal,

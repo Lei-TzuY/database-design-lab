@@ -23,7 +23,7 @@ an executable persistent point-operation slice, but is not yet a complete common
 | `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution and differential harness |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
-| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`/`DELETE`, root/non-root splits, byte-aware delete redistribution/merge, root contraction, reachability-derived orphan-page reuse, reachable-tree validation, and bounded validated-page caching |
+| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`/`DELETE`, root/non-root splits, delete redistribution/merge, root contraction, reachability-derived page reuse, checksummed overflow chains through 1 MiB values, reachable-tree validation, and bounded validated-page caching |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -34,13 +34,15 @@ an underfull child with an adjacent sibling before one final root publication. D
 a one-child root and can publish an empty tree after the last key. A crash before that root publication
 therefore leaves the old root authoritative. Before each later mutation, committed pages outside the
 current root's reachability are eligible for synchronized overwrite and reuse, so COW history becomes
-allocation space without a persistent free-list. Physical file compaction/truncation, ordered scans,
-large overflow values, and a common `KvEngine` implementation remain deferred.
+allocation space without a persistent free-list. Values that cannot fit in a leaf are stored in
+checksummed overflow-page chains and are included in the same reachability/reuse proof. Physical file
+compaction/truncation, ordered scans, 4 KiB keys, and a common `KvEngine` implementation remain deferred.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, and an
-explicit `REOPEN` workload boundary. The current B+ tree point slice intentionally has a narrower
-page-local key/value bound and therefore is not yet admitted to common differential experiments.
+explicit `REOPEN` workload boundary. The B+ tree now matches the common 1 MiB value limit, including
+empty values, but still caps keys at 1,024 bytes rather than the common 4 KiB limit and is therefore not
+yet admitted to common differential experiments.
 Range scans, transactions, multi-process writers, compaction, replication, SQL, MVCC, Raft, graph,
 time-series, and columnar execution are not implemented.
 
@@ -85,14 +87,18 @@ unrecognized tail fails closed. `verify` reports a recoverable partial tail with
 The B+ tree pager uses a different commit unit. Two checksummed 4 KiB superblocks alternate metadata
 generations. A newly allocated immutable page is synchronized before `page_count + 1` is written to
 the inactive superblock and synchronized. Tree mutation is copy-on-write: the changed leaf and every
-ancestor are appended as immutable pages. Root/non-root overflows split into new pages; deletion
-removes the target entry, merges sibling pages when their combined encoded cells fit, otherwise
+ancestor are appended as immutable pages. A large value is first written as a tail-to-head chain of
+checksummed overflow pages so every next-page target is already durable before its predecessor. The
+replacement leaf then stores the logical value length and first overflow page id. Root/non-root tree
+overflows split into new pages; deletion removes the target entry, merges sibling pages when their
+combined encoded cells fit, otherwise
 redistributes them by encoded byte size, and contracts a one-child root. Only after all replacement
 pages are durable is the new root id published through another superblock transition. Reopen selects
 the newest valid superblock and validates the complete reachable tree,
 including sorted leaf keys, ordered separators, separator/child-minimum agreement, equal child heights,
-non-overlapping ranges, cycle/duplicate-reference rejection, and zero sibling pointers for the current
-point-tree representation. Before a mutation, every committed page absent from that validated reachable
+non-overlapping ranges, cycle/duplicate-reference rejection, canonical overflow-chain lengths, and zero
+sibling pointers for the current point-tree representation. Overflow pages referenced by live leaves are
+part of the reachable set. Before a mutation, every committed page absent from that validated reachable
 set is reusable. A recycled page is fully overwritten and `sync_data` completes before any new root can
 reference it; no `page_count` transition is needed because its physical extent was already committed.
 This reclaims logical allocation space but does not shrink the physical file.
@@ -112,7 +118,8 @@ handle is poisoned and must be reopened. See [the append-log format](docs/on-dis
   between dimensions.
 - [Append-log format](docs/on-disk-format.md): exact append record bytes and recovery decisions.
 - [B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, copy-on-write
-  insert/delete publication, split/rebalance behavior, validation, and current crash-state limits.
+  insert/delete publication, overflow-value chains, split/rebalance behavior, validation, and current
+  crash-state limits.
 - [Roadmap](docs/roadmap.md): evidence-linked completed items and deliberately deferred phases.
 
 GitHub Actions runs formatting, Clippy with warnings denied, tests, and rustdoc on stable Rust, checks
