@@ -185,7 +185,10 @@ impl BPlusTree {
 
     fn commit_leaf_level(&mut self, entries: &[LeafEntry]) -> Result<Vec<ChildRef>> {
         if entries.is_empty() {
-            return Err(corruption(0, "attempted to persist an empty reachable leaf"));
+            return Err(corruption(
+                0,
+                "attempted to persist an empty reachable leaf",
+            ));
         }
         let cells = entries
             .iter()
@@ -314,7 +317,9 @@ impl BPlusTree {
         if !seen.insert(page_id) {
             return Err(corruption(
                 0,
-                format!("reachable B+ tree contains a cycle or duplicate page reference at {page_id}"),
+                format!(
+                    "reachable B+ tree contains a cycle or duplicate page reference at {page_id}"
+                ),
             ));
         }
 
@@ -463,7 +468,10 @@ fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {
         if cell.len() < LEAF_CELL_HEADER_LEN {
             return Err(corruption(
                 0,
-                format!("leaf page {} slot {index} is shorter than its cell header", page.page_id()),
+                format!(
+                    "leaf page {} slot {index} is shorter than its cell header",
+                    page.page_id()
+                ),
             ));
         }
         let key_len = usize::from(u16::from_le_bytes([cell[0], cell[1]]));
@@ -486,7 +494,10 @@ fn decode_leaf(page: &Page) -> Result<Vec<LeafEntry>> {
         if key_len > MAX_TREE_KEY_BYTES {
             return Err(corruption(
                 0,
-                format!("leaf page {} contains oversized key of {key_len} bytes", page.page_id()),
+                format!(
+                    "leaf page {} contains oversized key of {key_len} bytes",
+                    page.page_id()
+                ),
             ));
         }
         let key_end = LEAF_CELL_HEADER_LEN + key_len;
@@ -562,7 +573,10 @@ fn decode_internal(page: &Page) -> Result<Vec<ChildRef>> {
         if page_id < SUPERBLOCK_COUNT {
             return Err(corruption(
                 0,
-                format!("internal page {} references invalid child {page_id}", page.page_id()),
+                format!(
+                    "internal page {} references invalid child {page_id}",
+                    page.page_id()
+                ),
             ));
         }
         children.push(ChildRef {
@@ -648,7 +662,7 @@ fn choose_split(cells: &[Vec<u8>]) -> Option<usize> {
         let right = total.checked_sub(left)?;
         if left <= PAGE_BODY_CAPACITY && right <= PAGE_BODY_CAPACITY {
             let imbalance = left.abs_diff(right);
-            if best.map_or(true, |(_, current)| imbalance < current) {
+            if best.is_none_or(|(_, current)| imbalance < current) {
                 best = Some((split, imbalance));
             }
         }
@@ -676,7 +690,10 @@ mod tests {
                 .expect("insert binary key"),
             None
         );
-        assert_eq!(tree.get(b"").expect("read empty key"), Some(b"zero".to_vec()));
+        assert_eq!(
+            tree.get(b"").expect("read empty key"),
+            Some(b"zero".to_vec())
+        );
         assert_eq!(
             tree.put(b"", b"updated").expect("update empty key"),
             Some(b"zero".to_vec())
@@ -715,7 +732,10 @@ mod tests {
 
         assert!(tree.height().expect("height after splits") >= 3);
         for (key, value) in &keys {
-            assert_eq!(tree.get(key).expect("lookup after splits"), Some(value.clone()));
+            assert_eq!(
+                tree.get(key).expect("lookup after splits"),
+                Some(value.clone())
+            );
         }
         drop(tree);
 

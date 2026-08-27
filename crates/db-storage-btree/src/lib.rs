@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+mod tree;
+
+pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES};
+
 /// Fixed physical page size for B+ tree format v1.
 pub const PAGE_SIZE: usize = 4096;
 /// Number of mirrored metadata pages at the beginning of every page file.
