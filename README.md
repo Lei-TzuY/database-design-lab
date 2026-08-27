@@ -15,18 +15,23 @@ constraints—not a list of products we pretend to have built.
 
 ## Implemented baseline
 
-The first baseline contains four crates, all with executable behavior:
+The workspace currently contains five crates with executable behavior. The B+ tree crate is a physical
+page/pager foundation, not yet a complete KV engine:
 
 | Crate | Implemented role |
 | --- | --- |
 | `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution and differential harness |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
+| `db-storage-btree` | Fixed 4 KiB checksummed slotted pages, mirrored superblocks, crash-recoverable immutable page allocation, root metadata commits, and a bounded validated-page cache |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
-The append log is a foundation, not a disguised B+ tree or partial LSM. It is the smallest persistent
-architecture that makes framing, versioning, checksums, bounded decoding, durability boundaries,
-replay, corruption policy, and differential testing real before more complex engines are attempted.
+The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
+The B+ tree work now builds on a separate page file whose two mirrored superblocks define the committed
+physical extent. New immutable pages are synchronized before a newer metadata generation commits them;
+a torn newer superblock therefore falls back to the prior committed generation and any one-page orphan
+allocation can be discarded safely. No B+ tree lookup, split, deletion, ordered scan, or `KvEngine`
+implementation is claimed yet.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, and an
@@ -60,22 +65,29 @@ silently contaminate a correctness comparison.
 
 ## Persistence and recovery contract
 
-Format v1 has a checksummed magic/version file header. Each record has its own magic, version, kind,
-flags, monotonic sequence, bounded little-endian lengths, header checksum, and full-record checksum.
-The decoder validates the physical extent and all limits before allocating payload memory and uses
-checked arithmetic for every derived extent.
+Append-log format v1 has a checksummed magic/version file header. Each record has its own magic,
+version, kind, flags, monotonic sequence, bounded little-endian lengths, header checksum, and
+full-record checksum. The decoder validates the physical extent and all limits before allocating
+payload memory and uses checked arithmetic for every derived extent.
 
-A successful mutation has completed `write_all` and `sync_data` before the in-memory index changes or
-the call returns. On reopen, every complete valid record is replayed. A structurally valid but
-incomplete final append is discarded by truncating back to its starting offset and synchronizing the
-repair. A checksum failure, absurd length, unknown record kind/version, sequence discontinuity, or
+A successful append-log mutation has completed `write_all` and `sync_data` before the in-memory index
+changes or the call returns. On reopen, every complete valid record is replayed. A structurally valid
+but incomplete final append is discarded by truncating back to its starting offset and synchronizing
+the repair. A checksum failure, absurd length, unknown record kind/version, sequence discontinuity, or
 unrecognized tail fails closed. `verify` reports a recoverable partial tail without modifying it.
+
+The B+ tree pager uses a different commit unit. Two checksummed 4 KiB superblocks alternate metadata
+generations. A newly allocated immutable page is synchronized before `page_count + 1` is written to
+the inactive superblock and synchronized. Reopen selects the newest valid superblock, fails if committed
+bytes are missing, and discards at most one trailing page that metadata never committed. There is no
+in-place page-write API yet because crash-safe tree mutation has not been specified or proven.
 
 These guarantees do not include multi-operation transactions, concurrent-process exclusion,
 directory-entry durability for initial file creation, protection against lying storage hardware, or
-cryptographic integrity. An I/O error during append has an ambiguous commit outcome; the live engine
-is poisoned and must be reopened. See [the on-disk format](docs/on-disk-format.md) for exact bytes and
-[the experimental constitution](docs/experimental-constitution.md) for the fault model.
+cryptographic integrity. An I/O error during a persistent commit has an ambiguous outcome; the live
+handle is poisoned and must be reopened. See [the append-log format](docs/on-disk-format.md),
+[the B+ tree page format](docs/btree-page-format.md), and
+[the experimental constitution](docs/experimental-constitution.md) for exact fault models.
 
 ## Experimental discipline
 
@@ -83,13 +95,16 @@ is poisoned and must be reopened. See [the on-disk format](docs/on-disk-format.m
   metrics, reproducibility, failure handling, and non-goals.
 - [Design space](docs/design-space.md): definitions, capability/compatibility caveats, and coupling
   between dimensions.
+- [Append-log format](docs/on-disk-format.md): exact append record bytes and recovery decisions.
+- [B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, allocation
+  commit ordering, validation, and current crash-state limits.
 - [Roadmap](docs/roadmap.md): evidence-linked completed items and deliberately deferred phases.
 
 GitHub Actions runs formatting, Clippy with warnings denied, tests, and rustdoc on stable Rust, checks
-the declared Rust 1.85 minimum, and runs tests on Linux, macOS, and Windows. Format parsing uses
-explicit endian conversion and no platform-specific filesystem API. Hosted CI timing is smoke
-evidence only; this repository publishes no performance result and gates no performance regression
-without a controlled host.
+the declared Rust 1.85 minimum, and runs tests on Linux, macOS, and Windows. Persistent formats use
+explicit endian conversion and no platform-specific filesystem API. Hosted CI timing is smoke evidence
+only; this repository publishes no performance result and gates no performance regression without a
+controlled host.
 
 ## License
 
