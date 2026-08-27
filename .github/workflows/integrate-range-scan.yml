@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply range scan integration
-        run: python .github/scripts/integrate_range_scan.py
+        run: |
+          python .github/scripts/integrate_range_scan.py
+          python .github/scripts/fix_range_scan.py
       - name: Validate
         run: |
           cargo fmt --all
