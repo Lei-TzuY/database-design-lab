@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply key overflow integration
-        run: python .github/scripts/integrate_key_overflow.py
+        run: |
+          python .github/scripts/integrate_key_overflow.py
+          python .github/scripts/fix_key_overflow.py
       - name: Validate
         run: |
           cargo fmt --all
