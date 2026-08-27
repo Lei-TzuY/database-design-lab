@@ -23,7 +23,7 @@ an executable persistent point-operation slice, but is not yet a complete common
 | `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution and differential harness |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
-| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`/`DELETE`, root/non-root splits, byte-aware delete redistribution/merge, root contraction, reachable-tree validation, and bounded validated-page caching |
+| `db-storage-btree` | Fixed 4 KiB checksummed pages and mirrored superblocks plus copy-on-write binary `GET`/`PUT`/`DELETE`, root/non-root splits, byte-aware delete redistribution/merge, root contraction, reachability-derived orphan-page reuse, reachable-tree validation, and bounded validated-page caching |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -32,8 +32,10 @@ extent and published root. `PUT` and `DELETE` never overwrite a reachable page: 
 leaves and ancestors, with insertion splitting overflowing pages and deletion merging or byte-balancing
 an underfull child with an adjacent sibling before one final root publication. Deletion also contracts
 a one-child root and can publish an empty tree after the last key. A crash before that root publication
-therefore leaves the old root authoritative; committed shadow pages are unreachable history. Space
-reclamation/reuse, ordered scans, large overflow values, and a common `KvEngine` implementation remain deferred.
+therefore leaves the old root authoritative. Before each later mutation, committed pages outside the
+current root's reachability are eligible for synchronized overwrite and reuse, so COW history becomes
+allocation space without a persistent free-list. Physical file compaction/truncation, ordered scans,
+large overflow values, and a common `KvEngine` implementation remain deferred.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, and an
@@ -89,8 +91,11 @@ redistributes them by encoded byte size, and contracts a one-child root. Only af
 pages are durable is the new root id published through another superblock transition. Reopen selects
 the newest valid superblock and validates the complete reachable tree,
 including sorted leaf keys, ordered separators, separator/child-minimum agreement, equal child heights,
-non-overlapping ranges, and cycle/duplicate-reference rejection. Unreachable historical pages are not
-reclaimed yet.
+non-overlapping ranges, cycle/duplicate-reference rejection, and zero sibling pointers for the current
+point-tree representation. Before a mutation, every committed page absent from that validated reachable
+set is reusable. A recycled page is fully overwritten and `sync_data` completes before any new root can
+reference it; no `page_count` transition is needed because its physical extent was already committed.
+This reclaims logical allocation space but does not shrink the physical file.
 
 These guarantees do not include multi-operation transactions, concurrent-process exclusion,
 directory-entry durability for initial file creation, protection against lying storage hardware, or

@@ -21,6 +21,7 @@ impl BPlusTree {
         let Some(previous_value) = previous else {
             return Ok(None);
         };
+        self.refresh_reusable_pages()?;
         let root = self.pager.root_page_id().ok_or_else(|| {
             corruption(
                 0,

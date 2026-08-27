@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{self, Seek, SeekFrom, Write};
 
-use super::{BPlusTree, Page, PageKind, Result, MAX_TREE_HEIGHT};
+use super::{BPlusTree, Page, PageKind, Result};
 use crate::{corruption, page_offset, SUPERBLOCK_COUNT};
 
 impl BPlusTree {
@@ -12,11 +12,12 @@ impl BPlusTree {
         }
         let end = SUPERBLOCK_COUNT
             .checked_add(self.pager.data_page_count())
-            .ok_or_else(|| corruption(0, "committed page range overflowed u64 during reuse scan"))?;
+            .ok_or_else(|| {
+                corruption(0, "committed page range overflowed u64 during reuse scan")
+            })?;
         self.reusable_pages.clear();
-        self.reusable_pages.extend(
-            (SUPERBLOCK_COUNT..end).filter(|page_id| !reachable.contains(page_id)),
-        );
+        self.reusable_pages
+            .extend((SUPERBLOCK_COUNT..end).filter(|page_id| !reachable.contains(page_id)));
         Ok(())
     }
 
@@ -56,11 +57,6 @@ impl BPlusTree {
         self.refresh_reusable_pages()?;
         Ok(self.reusable_pages.iter().copied().collect())
     }
-
-    #[allow(dead_code)]
-    fn _height_bound_marker(&self) -> usize {
-        MAX_TREE_HEIGHT
-    }
 }
 
 #[cfg(test)]
@@ -84,7 +80,10 @@ mod tests {
         assert_eq!(tree.data_page_count(), 2);
         tree.put(b"key", b"v4").expect("fourth value");
         assert_eq!(tree.data_page_count(), 2);
-        assert_eq!(tree.get(b"key").expect("latest value"), Some(b"v4".to_vec()));
+        assert_eq!(
+            tree.get(b"key").expect("latest value"),
+            Some(b"v4".to_vec())
+        );
         drop(tree);
 
         let mut reopened = BPlusTree::open(&path, 2).expect("reopen tree");
@@ -142,7 +141,8 @@ mod tests {
         assert_eq!(tree.root_page_id(), None);
         let pages = tree.data_page_count();
 
-        tree.put(b"other", b"replacement").expect("reuse orphan page");
+        tree.put(b"other", b"replacement")
+            .expect("reuse orphan page");
         assert_eq!(tree.data_page_count(), pages);
         assert_eq!(
             tree.get(b"other").expect("replacement value"),

@@ -50,8 +50,10 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
 - [x] Implement copy-on-write deletion with missing-key no-op semantics, byte-aware adjacent-sibling
   redistribution/merge, empty-tree publication, and root contraction; deterministic multi-level tests
   delete a height-3+ tree down to one leaf and validate reopen.
-- [ ] Implement crash-safe space reuse/reclamation for unreachable copy-on-write history without
-  weakening root-publication atomicity or corruption detection.
+- [x] Reclaim unreachable copy-on-write history as reusable allocation space by deriving orphan page
+  ids from validated current-root reachability before each mutation. Recycled pages are synchronized
+  before root publication, never overwrite the authoritative tree, and deterministic tests prove file
+  page count stabilizes across repeated updates and empty-tree reuse. Physical file compaction remains deferred.
 - [ ] Expose true ordered scans through the common capability contract, including a sibling/link or
   traversal design compatible with copy-on-write mutation.
 - [ ] Admit B+ tree to the common `KvEngine` differential harness by reconciling page-local key/value

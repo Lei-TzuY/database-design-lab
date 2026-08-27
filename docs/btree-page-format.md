@@ -3,8 +3,8 @@
 Format v1 uses immutable checksummed 4,096-byte pages plus mirrored metadata. The executable tree
 layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update/deletion,
 root/non-root split propagation, deletion redistribution/merge, and root contraction. It is intentionally
-not yet a common `KvEngine`: space reclamation, ordered scans, overflow values, and common-contract size
-limits remain deferred. All
+not yet a common `KvEngine`: physical file compaction, ordered scans, overflow values, and common-contract
+size limits remain deferred. All
 integers are unsigned little-endian unless stated otherwise.
 
 ## Commit model
@@ -60,6 +60,23 @@ in-place torn-page update problem; it does **not** reclaim unreachable historica
 
 The deterministic test suite also constructs a committed-but-unpublished shadow page and verifies that
 reopen continues to return the value reachable through the older root.
+
+## Reachability-derived page reuse
+
+Before each mutating tree operation, the currently published root is structurally validated while its
+reachable page ids are collected. Every committed data-page id outside that set is an orphan from an
+earlier successful COW publication (or an unpublished failed/shadow attempt) and is eligible for reuse.
+The current root cannot reference such a page; point-tree v1 additionally requires reachable leaf
+right-sibling fields to be zero so no hidden tree edge escapes the reachability walk.
+
+A recycled page is rebuilt with the same physical page id, fully overwritten, and `sync_data` is called
+before it may appear beneath a newly published root. Recycling does not change `page_count`: the extent
+was already committed. If the recycled write tears or the process crashes before root publication, the
+old root still does not reference that page, so reopen validates the old tree and the orphan id can be
+reused again. If the new root becomes durable, every recycled page it references was synchronized first.
+This derives free space from reachability instead of persisting a separate free-list, avoiding a second
+metadata structure that would itself require atomic update rules. The physical file does not shrink;
+compaction/truncation is a separate future concern.
 
 ## Superblocks: pages 0 and 1
 
@@ -159,8 +176,8 @@ semantics.
 
 ## Explicitly deferred
 
-Format/tree work still does not define a free-list or copy-on-write history reclamation, overflow
-values, a copy-on-write-compatible ordered leaf scan,
+Format/tree work still does not define physical file compaction/truncation, overflow values, a
+copy-on-write-compatible ordered leaf scan,
 common `KvEngine` capability admission, multi-operation transactions, WAL-based in-place replacement,
 or concurrent writers. Fault injection for every intermediate mutation write is also still required
 before performance experiments; current evidence covers pager torn/truncated states plus the semantic
