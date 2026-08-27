@@ -1,0 +1,179 @@
+name: Integrate B+ tree reuse
+
+on:
+  push:
+    branches: [feat/btree-delete-rebalance]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/btree-delete-rebalance
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Wire reachability-derived page reuse
+        shell: python
+        run: |
+          from pathlib import Path
+
+          tree = Path("crates/db-storage-btree/src/tree.rs")
+          text = tree.read_text()
+          text = text.replace(
+              "use std::collections::BTreeSet;",
+              "use std::collections::{BTreeSet, VecDeque};",
+              1,
+          )
+          if "mod reuse;\n" not in text:
+              text = text.replace("mod delete;\n", "mod delete;\nmod reuse;\n", 1)
+          text = text.replace(
+              "pub struct BPlusTree {\n    pager: Pager,\n}",
+              "pub struct BPlusTree {\n    pager: Pager,\n    reusable_pages: VecDeque<u64>,\n}",
+              1,
+          )
+          text = text.replace(
+              "Ok(Self {\n            pager: Pager::create_new(path, cache_capacity)?,\n        })",
+              "Ok(Self {\n            pager: Pager::create_new(path, cache_capacity)?,\n            reusable_pages: VecDeque::new(),\n        })",
+              1,
+          )
+          text = text.replace(
+              "let mut tree = Self {\n            pager: Pager::open(path, cache_capacity)?,\n        };\n        tree.validate_reachable_tree()?;\n        Ok(tree)",
+              "let mut tree = Self {\n            pager: Pager::open(path, cache_capacity)?,\n            reusable_pages: VecDeque::new(),\n        };\n        tree.validate_reachable_tree()?;\n        tree.refresh_reusable_pages()?;\n        Ok(tree)",
+              1,
+          )
+          text = text.replace(
+              "/// One encoded entry must fit on an otherwise empty leaf. Deletion and page reclamation are not\n    /// part of this phase, so repeated updates intentionally leave unreachable historical pages.",
+              "/// One encoded entry must fit on an otherwise empty leaf. Before writing, the tree derives a\n    /// reusable-page pool from committed pages not reachable from the current root; only those orphan\n    /// pages may be overwritten before the final copy-on-write root publication.",
+              1,
+          )
+          old = "let previous = self.get(key)?;\n\n        let replacements = match self.pager.root_page_id()"
+          new = "let previous = self.get(key)?;\n        self.refresh_reusable_pages()?;\n\n        let replacements = match self.pager.root_page_id()"
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              "let mut page = self.pager.prepare_new_page(PageKind::Leaf)?;",
+              "let (mut page, recycled) = self.prepare_tree_page(PageKind::Leaf)?;",
+              1,
+          )
+          text = text.replace(
+              "let mut page = self.pager.prepare_new_page(PageKind::Internal)?;",
+              "let (mut page, recycled) = self.prepare_tree_page(PageKind::Internal)?;",
+              1,
+          )
+          text = text.replace(
+              "let page_id = self.pager.commit_new_page(page)?;",
+              "let page_id = self.commit_tree_page(page, recycled)?;",
+          )
+          leaf_marker = "PageKind::Leaf => {\n                let entries = decode_leaf(&page)?;"
+          leaf_replacement = "PageKind::Leaf => {\n                if page.right_sibling().is_some() {\n                    return Err(corruption(\n                        0,\n                        format!(\"reachable tree leaf page {page_id} has a sibling pointer; point-tree v1 requires zero\"),\n                    ));\n                }\n                let entries = decode_leaf(&page)?;"
+          text = text.replace(leaf_marker, leaf_replacement, 1)
+          text = text.replace(
+              "/// superblock. Deletion byte-balances or merges an underfull child with an adjacent sibling and\n/// contracts one-child roots. A crash before root publication leaves the previous tree authoritative;\n/// already committed shadow pages are unreachable space that later reclamation work may recover.",
+              "/// superblock. Deletion byte-balances or merges an underfull child with an adjacent sibling and\n/// contracts one-child roots. Before each mutation, committed pages outside current-root reachability\n/// become a reusable pool; overwriting such an orphan cannot damage the authoritative old tree. A\n/// crash before root publication therefore leaves the previous tree authoritative.",
+              1,
+          )
+          tree.write_text(text)
+
+          delete = Path("crates/db-storage-btree/src/tree/delete.rs")
+          text = delete.read_text()
+          old = "let Some(previous_value) = previous else {\n            return Ok(None);\n        };\n        let root = self.pager.root_page_id()"
+          new = "let Some(previous_value) = previous else {\n            return Ok(None);\n        };\n        self.refresh_reusable_pages()?;\n        let root = self.pager.root_page_id()"
+          text = text.replace(old, new, 1)
+          delete.write_text(text)
+
+          reuse = Path("crates/db-storage-btree/src/tree/reuse.rs")
+          text = reuse.read_text()
+          text = text.replace(
+              "use super::{BPlusTree, Page, PageKind, Result, MAX_TREE_HEIGHT};",
+              "use super::{BPlusTree, Page, PageKind, Result};",
+              1,
+          )
+          start = text.find("\n    #[allow(dead_code)]\n    fn _height_bound_marker")
+          if start != -1:
+              end = text.find("\n    }\n", start)
+              if end == -1:
+                  raise SystemExit("reuse marker method end not found")
+              text = text[:start] + text[end + len("\n    }\n"):]
+          reuse.write_text(text)
+
+          readme = Path("README.md")
+          text = readme.read_text()
+          text = text.replace(
+              "root contraction, reachable-tree validation, and bounded validated-page caching |",
+              "root contraction, reachability-derived orphan-page reuse, reachable-tree validation, and bounded validated-page caching |",
+              1,
+          )
+          text = text.replace(
+              "therefore leaves the old root authoritative; committed shadow pages are unreachable history. Space\nreclamation/reuse, ordered scans, large overflow values, and a common `KvEngine` implementation remain deferred.",
+              "therefore leaves the old root authoritative. Before each later mutation, committed pages outside the\ncurrent root's reachability are eligible for synchronized overwrite and reuse, so COW history becomes\nallocation space without a persistent free-list. Physical file compaction/truncation, ordered scans,\nlarge overflow values, and a common `KvEngine` implementation remain deferred.",
+              1,
+          )
+          text = text.replace(
+              "non-overlapping ranges, and cycle/duplicate-reference rejection. Unreachable historical pages are not\nreclaimed yet.",
+              "non-overlapping ranges, cycle/duplicate-reference rejection, and zero sibling pointers for the current\npoint-tree representation. Before a mutation, every committed page absent from that validated reachable\nset is reusable. A recycled page is fully overwritten and `sync_data` completes before any new root can\nreference it; no `page_count` transition is needed because its physical extent was already committed.\nThis reclaims logical allocation space but does not shrink the physical file.",
+              1,
+          )
+          readme.write_text(text)
+
+          roadmap = Path("docs/roadmap.md")
+          text = roadmap.read_text().replace(
+              "- [ ] Implement crash-safe space reuse/reclamation for unreachable copy-on-write history without\n  weakening root-publication atomicity or corruption detection.",
+              "- [x] Reclaim unreachable copy-on-write history as reusable allocation space by deriving orphan page\n  ids from validated current-root reachability before each mutation. Recycled pages are synchronized\n  before root publication, never overwrite the authoritative tree, and deterministic tests prove file\n  page count stabilizes across repeated updates and empty-tree reuse. Physical file compaction remains deferred.",
+              1,
+          )
+          roadmap.write_text(text)
+
+          design = Path("docs/design-space.md")
+          text = design.read_text().replace(
+              "root contraction, root publication, reopen validation, and deterministic split/delete/shadow-page tests; reclamation, ordered scan, overflow values, and common `KvEngine` admission remain deferred |",
+              "root contraction, reachability-derived orphan-page reuse, root publication, reopen validation, and deterministic split/delete/reuse/shadow-page tests; physical compaction, ordered scan, overflow values, and common `KvEngine` admission remain deferred |",
+              1,
+          )
+          text = text.replace(
+              "transition publishes the new tree; unreachable historical pages are not reclaimed yet.",
+              "transition publishes the new tree. Pages outside current-root reachability are recycled only on later\nmutations, after they are proven unreachable; physical file compaction is not implemented.",
+              1,
+          )
+          design.write_text(text)
+
+          page = Path("docs/btree-page-format.md")
+          text = page.read_text()
+          text = text.replace(
+              "not yet a common `KvEngine`: space reclamation, ordered scans, overflow values, and common-contract size\nlimits remain deferred.",
+              "not yet a common `KvEngine`: physical file compaction, ordered scans, overflow values, and common-contract\nsize limits remain deferred.",
+              1,
+          )
+          section = "## Reachability-derived page reuse\n\nBefore each mutating tree operation, the currently published root is structurally validated while its\nreachable page ids are collected. Every committed data-page id outside that set is an orphan from an\nearlier successful COW publication (or an unpublished failed/shadow attempt) and is eligible for reuse.\nThe current root cannot reference such a page; point-tree v1 additionally requires reachable leaf\nright-sibling fields to be zero so no hidden tree edge escapes the reachability walk.\n\nA recycled page is rebuilt with the same physical page id, fully overwritten, and `sync_data` is called\nbefore it may appear beneath a newly published root. Recycling does not change `page_count`: the extent\nwas already committed. If the recycled write tears or the process crashes before root publication, the\nold root still does not reference that page, so reopen validates the old tree and the orphan id can be\nreused again. If the new root becomes durable, every recycled page it references was synchronized first.\nThis derives free space from reachability instead of persisting a separate free-list, avoiding a second\nmetadata structure that would itself require atomic update rules. The physical file does not shrink;\ncompaction/truncation is a separate future concern.\n\n"
+          marker = "## Superblocks: pages 0 and 1\n"
+          if section not in text:
+              text = text.replace(marker, section + marker, 1)
+          text = text.replace(
+              "Format/tree work still does not define a free-list or copy-on-write history reclamation, overflow\nvalues, a copy-on-write-compatible ordered leaf scan,",
+              "Format/tree work still does not define physical file compaction/truncation, overflow values, a\ncopy-on-write-compatible ordered leaf scan,",
+              1,
+          )
+          page.write_text(text)
+      - name: Validate implementation
+        run: |
+          cargo fmt --all
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+      - name: Commit reuse integration when needed
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/delete.rs crates/db-storage-btree/src/tree/reuse.rs docs/btree-page-format.md docs/design-space.md docs/roadmap.md
+          git commit -m "feat(btree): recycle unreachable COW pages"
+          git push origin HEAD:feat/btree-delete-rebalance
