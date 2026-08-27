@@ -27,30 +27,32 @@ jobs:
 
           path = Path("crates/db-storage-btree/src/lib.rs")
           text = path.read_text()
-          old = '''        if self.pages.contains_key(&page_id) {
-              self.pages.insert(page_id, page);
-              self.touch(page_id);
-              return;
-          }
-          if self.pages.len() == self.capacity {
-              if let Some(evicted) = self.order.pop_front() {
-                  self.pages.remove(&evicted);
-              }
-          }
-          self.pages.insert(page_id, page);
-          self.order.push_back(page_id);
-          '''
-          new = '''        if self.pages.insert(page_id, page).is_some() {
-              self.touch(page_id);
-              return;
-          }
-          if self.pages.len() > self.capacity {
-              if let Some(evicted) = self.order.pop_front() {
-                  self.pages.remove(&evicted);
-              }
-          }
-          self.order.push_back(page_id);
-          '''
+          old = "\n".join([
+              "        if self.pages.contains_key(&page_id) {",
+              "            self.pages.insert(page_id, page);",
+              "            self.touch(page_id);",
+              "            return;",
+              "        }",
+              "        if self.pages.len() == self.capacity {",
+              "            if let Some(evicted) = self.order.pop_front() {",
+              "                self.pages.remove(&evicted);",
+              "            }",
+              "        }",
+              "        self.pages.insert(page_id, page);",
+              "        self.order.push_back(page_id);",
+          ])
+          new = "\n".join([
+              "        if self.pages.insert(page_id, page).is_some() {",
+              "            self.touch(page_id);",
+              "            return;",
+              "        }",
+              "        if self.pages.len() > self.capacity {",
+              "            if let Some(evicted) = self.order.pop_front() {",
+              "                self.pages.remove(&evicted);",
+              "            }",
+              "        }",
+              "        self.order.push_back(page_id);",
+          ])
           if old in text:
               path.write_text(text.replace(old, new, 1))
           elif new not in text:
