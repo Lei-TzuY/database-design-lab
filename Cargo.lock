@@ -146,6 +146,8 @@ name = "db-storage-btree"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "db-core",
+ "db-storage-memory",
  "tempfile",
  "thiserror",
 ]

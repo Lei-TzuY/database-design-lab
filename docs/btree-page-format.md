@@ -3,9 +3,9 @@
 Format v1 uses immutable checksummed 4,096-byte pages plus mirrored metadata. The executable tree
 layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update/deletion,
 root/non-root split propagation, deletion redistribution/merge, root contraction, reachability-derived
-page reuse, and checksummed overflow chains through 1 MiB values. It is intentionally not yet a common
-`KvEngine`: physical file compaction, ordered scans, the remaining 1,024-byte key limit, and trait-level
-capability/reopen integration remain deferred. All integers are unsigned little-endian unless stated otherwise.
+page reuse, checksummed overflow chains for keys through 4 KiB and values through 1 MiB, and the
+common point-operation `KvEngine` contract. Physical file compaction, ordered scans, and exhaustive
+mutation-write fault injection remain deferred. All integers are unsigned little-endian unless stated otherwise.
 
 ## Commit model
 
@@ -34,9 +34,10 @@ A successful tree mutation does not modify any page reachable from the currently
 `PUT` performs:
 
 1. Searches from the current root to the target leaf.
-2. Encodes the new value inline when it fits; otherwise commits its overflow chunks tail-to-head so
-   every next-page link points to an already synchronized committed page.
-3. Builds a replacement leaf in memory with the key inserted or value replaced.
+2. Encodes the new key inline when its descriptor can remain page-local; otherwise commits the key
+   overflow chunks tail-to-head. Values use the same durable overflow-chain protocol when needed.
+3. Builds a replacement leaf in memory with the key inserted or value replaced. Long exact-minimum
+   keys used by internal cells are materialized through the same overflow mechanism before that parent.
 4. If a tree page overflows, divides its sorted cells into two independently valid pages.
 5. Commits replacement leaf/split pages as immutable allocations.
 6. Rebuilds the parent with replacement child references; parent overflow recursively produces two
@@ -69,8 +70,8 @@ reopen continues to return the value reachable through the older root.
 Before each mutating tree operation, the currently published root is structurally validated while its
 reachable page ids are collected. Every committed data-page id outside that set is an orphan from an
 earlier successful COW publication (or an unpublished failed/shadow attempt) and is eligible for reuse.
-The current root cannot reference such a page. Reachability includes every overflow page referenced
-by a live leaf and rejects duplicate/cyclic overflow references. Point-tree v1 additionally requires
+The current root cannot reference such a page. Reachability includes every overflow page referenced by a live leaf key/value or internal exact-minimum
+separator and rejects duplicate/cyclic overflow references. Point-tree v1 additionally requires
 reachable leaf right-sibling fields to be zero so no hidden tree edge escapes the reachability walk.
 
 A recycled page is rebuilt with the same physical page id, fully overwritten, and `sync_data` is called
@@ -139,50 +140,56 @@ are legal. Duplicate keys are not: `PUT` replaces the value while rebuilding the
 
 | Cell offset | Bytes | Meaning |
 | ---: | ---: | --- |
-| 0 | 2 | key length |
+| 0 | 2 | key descriptor |
 | 2 | 4 | value descriptor |
-| 6 | `key length` | opaque binary key |
-| ... | variable | inline bytes or one `u64` overflow-head page id |
+| 6 | variable | inline key bytes or one `u64` key-overflow head |
+| ... | variable | inline value bytes or one `u64` value-overflow head |
 
-The descriptor's high bit is the overflow flag; the low 31 bits encode the logical value length. When
+The key descriptor's high bit is the key-overflow flag and its low 15 bits are the logical key length.
+Keys through 4,096 bytes are accepted. Keys up to 4,034 bytes remain inline; the conservative threshold
+ensures an inline key still leaves room for a value-overflow descriptor in an otherwise empty leaf.
+Longer keys store exactly one `u64` overflow-head page id in the cell. Because 4,096 is far below the
+15-bit marker boundary, old inline v1 key encodings remain unambiguous.
+
+The value descriptor's high bit is the overflow flag; the low 31 bits encode the logical value length. When
 the high bit is clear, exactly that many value bytes follow the key, preserving compatibility with the
 previous inline v1 encoding. When the high bit is set, the logical length must be `1..=1,048,576` and
 exactly eight bytes follow the key containing the first overflow page id. Because the common value limit
 is only 1 MiB, the marker bit cannot collide with a previously legal inline length. New readers can open
 older inline-only v1 files; older binaries intentionally reject kind-3 pages in files that use overflow.
 
-The tree now accepts values through the common 1 MiB limit. Keys remain capped at 1,024 bytes so internal
-separator pages retain useful fanout; this remaining key mismatch is the storage-format blocker for
-common `KvEngine` admission.
+The tree therefore accepts the complete common point size contract: 4 KiB keys and 1 MiB values.
 
-## Overflow value pages
+## Overflow key/value pages
 
 An overflow page has kind `3`, exactly one non-empty slotted cell, and uses header bytes 32–39 as an
-optional next-page id. The single cell is raw value data; with one four-byte slot, canonical payload
-capacity is 4,048 bytes. A value is divided with `rchunks(4048)` and pages are committed tail-to-head,
+optional next-page id. The single cell is raw key or value data; with one four-byte slot, canonical payload
+capacity is 4,048 bytes. A blob is divided with `rchunks(4048)` and pages are committed tail-to-head,
 therefore every nonzero next link names a page that was already synchronized before its predecessor.
 The leaf is committed only after the full chain exists, and the new root is published only after the
 leaf and all rewritten ancestors are durable.
 
-Reopen derives the exact expected page count from the logical value length, requires the first chunk to
+Reopen derives the exact expected page count from the logical key/value length, requires the first chunk to
 hold the remainder and every later chunk to hold exactly 4,048 bytes, requires exactly one cell per
 overflow page, rejects short/long chains, kind mismatches, cycles, duplicate references, invalid links,
 and total-length mismatches. Overflow pages are added to the same reachable-page set used by COW space
-reuse, so a live value chain can never be selected as an orphan. A failed/unpublished replacement chain
-is unreachable and may be recycled by a later mutation. The 1 MiB maximum uses at most 260 overflow
-pages.
+reuse, so a live key or value chain can never be selected as an orphan. A failed/unpublished replacement
+chain is unreachable and may be recycled by a later mutation. A 4 KiB key uses at most two overflow
+pages; the 1 MiB value maximum uses at most 260.
 
 ## Internal cells
 
 Every internal cell describes one child and the exact minimum key reachable in that child. Cells are
-sorted by that minimum key. This representation deliberately stores the first child's minimum too,
-which keeps routing and structural validation uniform.
+sorted by that minimum key. This representation deliberately stores the first child's minimum too, which keeps routing and
+structural validation uniform. A long exact minimum uses the same high-bit key descriptor and overflow
+blob format as a leaf key; routing compares reconstructed logical key bytes, so separator semantics do
+not change when storage moves out of line.
 
 | Cell offset | Bytes | Meaning |
 | ---: | ---: | --- |
-| 0 | 2 | separator/minimum-key length |
+| 0 | 2 | separator/minimum-key descriptor |
 | 2 | 8 | committed child page id |
-| 10 | `key length` | exact minimum key reachable from the child |
+| 10 | variable | inline exact minimum key or one `u64` key-overflow head |
 
 Lookup chooses the child whose minimum key is the greatest key not greater than the search key; a
 search smaller than the first separator descends into the first child and naturally returns missing at
@@ -205,8 +212,7 @@ semantics.
 ## Explicitly deferred
 
 Format/tree work still does not define physical file compaction/truncation, a copy-on-write-compatible
-ordered leaf scan, 4 KiB tree keys, common `KvEngine` capability admission, multi-operation transactions,
-WAL-based in-place replacement,
+ordered leaf scan, multi-operation transactions, WAL-based in-place replacement,
 or concurrent writers. Fault injection for every intermediate mutation write is also still required
 before performance experiments; current evidence covers pager torn/truncated states plus the semantic
 unpublished-shadow-root case.

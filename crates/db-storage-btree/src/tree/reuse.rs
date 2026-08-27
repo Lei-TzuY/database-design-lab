@@ -64,7 +64,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::BPlusTree;
-    use crate::tree::StoredValue;
+    use crate::tree::{StoredKey, StoredValue};
     use crate::PageKind;
 
     #[test]
@@ -113,7 +113,7 @@ mod tests {
             .expect("prepare recycled shadow");
         assert!(recycled);
         let cell = super::super::encode_leaf_cell(&super::super::LeafEntry {
-            key: b"key".to_vec(),
+            key: StoredKey::Inline(b"key".to_vec()),
             value: StoredValue::Inline(b"unpublished".to_vec()),
         })
         .expect("encode shadow value");

@@ -1,15 +1,46 @@
 use std::collections::BTreeSet;
 
 use super::{
-    BPlusTree, PageKind, Result, StoredValue, LEAF_CELL_HEADER_LEN, MAX_TREE_VALUE_BYTES,
-    PAGE_BODY_CAPACITY, SLOT_LEN,
+    validate_key, BPlusTree, PageKind, Result, StoredKey, StoredValue, LEAF_CELL_HEADER_LEN,
+    MAX_INLINE_KEY_BYTES, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES, PAGE_BODY_CAPACITY, SLOT_LEN,
 };
 use crate::{corruption, BtreeError};
 
 pub(super) const OVERFLOW_CELL_CAPACITY: usize = PAGE_BODY_CAPACITY - SLOT_LEN;
 
 impl BPlusTree {
-    pub(super) fn store_value(&mut self, key: &[u8], value: &[u8]) -> Result<StoredValue> {
+    pub(super) fn store_key(&mut self, key: &[u8]) -> Result<StoredKey> {
+        validate_key(key)?;
+        if key.len() <= MAX_INLINE_KEY_BYTES {
+            return Ok(StoredKey::Inline(key.to_vec()));
+        }
+        let first_page_id = self.commit_overflow_blob(key)?;
+        Ok(StoredKey::Overflow {
+            bytes: key.to_vec(),
+            first_page_id,
+        })
+    }
+
+    pub(super) fn load_key_blob(
+        &mut self,
+        first_page_id: u64,
+        encoded_len: u16,
+        seen: Option<&mut BTreeSet<u64>>,
+    ) -> Result<StoredKey> {
+        let bytes = self.read_overflow_blob(
+            first_page_id,
+            u32::from(encoded_len),
+            seen,
+            MAX_TREE_KEY_BYTES,
+            "key",
+        )?;
+        Ok(StoredKey::Overflow {
+            bytes,
+            first_page_id,
+        })
+    }
+
+    pub(super) fn store_value(&mut self, key: &StoredKey, value: &[u8]) -> Result<StoredValue> {
         if value.len() > MAX_TREE_VALUE_BYTES {
             return Err(BtreeError::InvalidInput(format!(
                 "B+ tree value has {} bytes; maximum is {MAX_TREE_VALUE_BYTES}",
@@ -19,7 +50,7 @@ impl BPlusTree {
 
         let inline_occupied = SLOT_LEN
             .checked_add(LEAF_CELL_HEADER_LEN)
-            .and_then(|length| length.checked_add(key.len()))
+            .and_then(|length| length.checked_add(key.encoded_payload_len()))
             .and_then(|length| length.checked_add(value.len()))
             .ok_or_else(|| {
                 BtreeError::InvalidInput("inline leaf value extent overflowed usize".to_owned())
@@ -41,7 +72,7 @@ impl BPlusTree {
         match value {
             StoredValue::Inline(bytes) => Ok(bytes.clone()),
             StoredValue::Overflow { len, first_page_id } => {
-                self.read_overflow_blob(*first_page_id, *len, None)
+                self.read_overflow_blob(*first_page_id, *len, None, MAX_TREE_VALUE_BYTES, "value")
             }
         }
     }
@@ -52,7 +83,13 @@ impl BPlusTree {
         seen: &mut BTreeSet<u64>,
     ) -> Result<()> {
         if let StoredValue::Overflow { len, first_page_id } = value {
-            self.read_overflow_blob(*first_page_id, *len, Some(seen))?;
+            self.read_overflow_blob(
+                *first_page_id,
+                *len,
+                Some(seen),
+                MAX_TREE_VALUE_BYTES,
+                "value",
+            )?;
         }
         Ok(())
     }
@@ -78,13 +115,15 @@ impl BPlusTree {
         first_page_id: u64,
         encoded_len: u32,
         mut global_seen: Option<&mut BTreeSet<u64>>,
+        max_len: usize,
+        blob_kind: &str,
     ) -> Result<Vec<u8>> {
         let expected_len = usize::try_from(encoded_len)
             .map_err(|_| corruption(0, "overflow value length does not fit usize"))?;
-        if expected_len == 0 || expected_len > MAX_TREE_VALUE_BYTES {
+        if expected_len == 0 || expected_len > max_len {
             return Err(corruption(
                 0,
-                format!("overflow value encodes invalid length {expected_len}"),
+                format!("overflow {blob_kind} encodes invalid length {expected_len}"),
             ));
         }
         let page_count = expected_len

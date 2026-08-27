@@ -23,6 +23,8 @@ pub enum StorageArchitecture {
     InMemoryReference,
     /// Versioned checksummed mutation log plus replay index.
     AppendLog,
+    /// Checksummed page file with a copy-on-write B+ tree and mirrored metadata.
+    BPlusTree,
 }
 
 /// Concurrency contract actually enforced by the current engine boundary.
@@ -51,6 +53,8 @@ pub enum CrashRecovery {
     None,
     /// Valid records replay and a structurally valid incomplete final append is discarded.
     TruncatedFinalAppend,
+    /// Durable COW pages are published by alternating checksummed root metadata copies.
+    MirroredCopyOnWritePages,
 }
 
 /// Distribution behavior currently exposed by an engine.
