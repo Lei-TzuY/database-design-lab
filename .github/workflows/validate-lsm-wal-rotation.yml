@@ -5,7 +5,7 @@ on:
     branches: [feat/lsm-wal-rotation]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,24 +20,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply integration patch
+      - name: Validate committed tree
         run: |
-          python .github/scripts/apply_lsm_wal_rotation.py
-          python .github/scripts/fix_lsm_wal_rotation_round2.py
-      - name: Validate
-        run: |
-          cargo fmt --all
+          cargo fmt --all --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-      - name: Commit validated implementation
-        shell: bash
-        run: |
-          if git diff --quiet; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/manifest.rs crates/db-storage-lsm/src/wal.rs crates/db-storage-lsm/src/tests.rs crates/db-storage-lsm/src/sstable_tests.rs crates/db-storage-lsm/src/wal_rotation_tests.rs
-          git commit -m "feat(lsm): validate WAL rotation and reclamation"
-          git push origin HEAD:feat/lsm-wal-rotation
