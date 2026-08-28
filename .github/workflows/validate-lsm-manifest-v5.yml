@@ -20,15 +20,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Add tableless Manifest v4 migration proof
-        run: python .github/scripts/add_lsm_v5_tableless_migration_test.py
+      - name: Apply Manifest v5 documentation
+        run: python .github/scripts/update_lsm_manifest_v5_docs.py
       - name: Validate committed Manifest v5 tree
         run: |
           cargo fmt --all
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-      - name: Commit validated migration regression
+      - name: Commit validated documentation
         shell: bash
         run: |
           if git diff --quiet; then
@@ -36,6 +36,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-lsm/src/compaction_tests.rs
-          git commit -m "test(lsm): prove tableless Manifest v4 allocation migration"
+          git add README.md docs/lsm-sstable-manifest-format.md docs/lsm-wal-format.md docs/roadmap.md docs/design-space.md
+          git commit -m "docs(lsm): specify Manifest v5 allocation watermark"
           git push origin HEAD:fix/lsm-table-id-high-watermark
