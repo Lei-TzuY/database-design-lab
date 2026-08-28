@@ -20,15 +20,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply Manifest v4 integration
-        run: python .github/scripts/apply_lsm_tombstone_elision.py
-      - name: Validate
+      - name: Apply orphan-floor hardening
+        run: python .github/scripts/fix_lsm_empty_checkpoint_id_floor.py
+      - name: Validate committed v4 tree
         run: |
           cargo fmt --all
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-      - name: Commit validated implementation
+      - name: Commit validated hardening
         shell: bash
         run: |
           if git diff --quiet; then
@@ -36,6 +36,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/manifest.rs crates/db-storage-lsm/src/compaction_tests.rs crates/db-storage-lsm/src/wal_rotation_tests.rs crates/db-storage-lsm/src/tombstone_elision_tests.rs
-          git commit -m "feat(lsm): add durable-empty checkpoints and tombstone elision"
+          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/manifest.rs crates/db-storage-lsm/src/tombstone_elision_tests.rs
+          git commit -m "test(lsm): preserve orphan id floor through empty checkpoints"
           git push origin HEAD:feat/lsm-tombstone-elision
