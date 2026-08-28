@@ -6,7 +6,9 @@
 //! WAL segments rotate only after published SSTables cover their complete sequence range. SSTable v2
 //! embeds a checksummed Bloom filter for point-read rejection. Flushes enter overlapping L0; four
 //! L0 tables trigger a synchronous full-set merge into one non-overlapping L1 run, published through
-//! mirrored CURRENT before obsolete sorted-table/manifest files are reclaimed.
+//! mirrored CURRENT before obsolete sorted-table/manifest files are reclaimed. Deterministic
+//! compaction fault tests exercise pre-write, torn durable output, and post-sync reported errors at
+//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries.
 
 mod bloom;
 mod manifest;

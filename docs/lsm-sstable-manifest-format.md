@@ -159,6 +159,16 @@ tests corrupt the newer CURRENT mirror after obsolete-file cleanup and require t
 the single L1 run successfully. They also verify tombstone retention and a newer L0 value overriding an
 older L1 tombstone across reopen.
 
+The compaction fault matrix records the four durable publication classes in order: replacement L1
+SSTable, Manifest v3, first CURRENT slot, then mirror CURRENT slot. Each class is exercised under a
+before-write error, a synchronized torn-output aftermath, and an after-sync reported error. Torn
+SSTable/Manifest cases truncate the new immutable file to half its committed extent; torn CURRENT cases
+overwrite half of the selected 4 KiB slot and synchronize the damaged bytes. The triggering live handle
+is poisoned and must be reopened. Before the first CURRENT becomes fully durable, reopen must select the
+complete four-L0 input version; an after-sync error from the first CURRENT and every mirror-stage error
+select the complete one-L1 version. Every case rechecks all logical keys plus `verify`, so a structurally
+mixed publication cannot pass merely because point reads happen to agree.
+
 ## Mirrored CURRENT publication
 
 `CURRENT` is exactly 8,192 bytes: two independent 4 KiB slots. Each slot contains magic `DBLSMCUR`,
@@ -231,8 +241,8 @@ double-mirror publication, but deliberately retains logical tombstones.
 
 ## Explicitly deferred
 
-Safe tombstone elision, generalized size-based/multi-run levels, block/cache design, compaction fault
-injection, and read/write/space-amplification instrumentation remain separate evidence milestones. Bloom
+Safe tombstone elision, generalized size-based/multi-run levels, block/cache design, and
+read/write/space-amplification instrumentation remain separate evidence milestones. Bloom
 filtering is part of SSTable v2; level metadata and full-set L0-to-L1 publication are part of Manifest v3;
 WAL segment rotation/reclamation remains part of the implemented crash-state protocol. Parent-directory
 durability remains subject to the repository-wide portable-fsync caveat.

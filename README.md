@@ -63,9 +63,12 @@ point reads may use a negative filter result to skip an SSTable, so the probabil
 silently introduce a false negative. Flushes enter overlapping L0; four L0 tables trigger a synchronous
 full-set merge of all authoritative SSTables into one L1 run. The compacted SSTable and Manifest v3 are
 synchronized, the same manifest is published through both CURRENT mirrors, and only then are obsolete
-SSTables/manifests eligible for best-effort deletion. Tombstones are deliberately retained, and the
-current one-run L1 policy is correctness evidence rather than a production leveled strategy, so this is
-still not a fair B+ tree performance comparison participant.
+SSTables/manifests eligible for best-effort deletion. Deterministic fault injection now covers the
+replacement L1 SSTable, Manifest v3, first CURRENT publication, and mirror CURRENT publication under
+before-write, torn-output, and post-sync reported failures. Reopen is required to select either the
+complete four-L0 input version or the complete one-L1 compacted version; no mixed version is accepted.
+Tombstones are deliberately retained, and the current one-run L1 policy is correctness evidence rather
+than a production leveled strategy, so this is still not a fair B+ tree performance comparison participant.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
