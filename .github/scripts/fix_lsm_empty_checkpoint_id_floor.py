@@ -1,115 +1,8 @@
 from pathlib import Path
 
-# Manifest: let compaction carry an observed on-disk id floor into v4 even when it emits no table.
-p = Path("crates/db-storage-lsm/src/manifest.rs")
-text = p.read_text()
-old = '''pub(super) fn prepare_install(
-    directory: &Path,
-    current: &VersionSet,
-    new_manifest_id: u64,
-    durable_sequence: u64,
-    tables: Vec<SstableDescriptor>,
-    wal_id: u64,
-    wal_first_sequence: u64,
-) -> Result<VersionSet> {
-    let generation = current
-        .current_generation
-        .checked_add(1)
-        .ok_or_else(|| corruption(0, "CURRENT generation exhausted"))?;
-    let table_id_high_watermark = tables
-        .iter()
-        .fold(current.table_id_high_watermark, |high, descriptor| {
-            high.max(descriptor.table_id)
-        });
-    validate_version_set(
-        MANIFEST_FORMAT_VERSION,
-        durable_sequence,
-        wal_id,
-        wal_first_sequence,
-        table_id_high_watermark,
-        &tables,
-    )?;
-    let next = VersionSet {
-        current_generation: generation,
-        manifest_id: new_manifest_id,
-        durable_sequence,
-        wal_id,
-        wal_first_sequence,
-        table_id_high_watermark,
-        tables,
-    };
-    write_manifest_new(directory, &next)?;
-    Ok(next)
-}
-'''
-new = '''pub(super) fn prepare_install(
-    directory: &Path,
-    current: &VersionSet,
-    new_manifest_id: u64,
-    durable_sequence: u64,
-    tables: Vec<SstableDescriptor>,
-    wal_id: u64,
-    wal_first_sequence: u64,
-) -> Result<VersionSet> {
-    prepare_install_with_table_id_floor(
-        directory,
-        current,
-        new_manifest_id,
-        durable_sequence,
-        tables,
-        wal_id,
-        wal_first_sequence,
-        current.table_id_high_watermark,
-    )
-}
-
-pub(super) fn prepare_install_with_table_id_floor(
-    directory: &Path,
-    current: &VersionSet,
-    new_manifest_id: u64,
-    durable_sequence: u64,
-    tables: Vec<SstableDescriptor>,
-    wal_id: u64,
-    wal_first_sequence: u64,
-    table_id_high_watermark_floor: u64,
-) -> Result<VersionSet> {
-    let generation = current
-        .current_generation
-        .checked_add(1)
-        .ok_or_else(|| corruption(0, "CURRENT generation exhausted"))?;
-    let table_id_high_watermark = tables.iter().fold(
-        current
-            .table_id_high_watermark
-            .max(table_id_high_watermark_floor),
-        |high, descriptor| high.max(descriptor.table_id),
-    );
-    validate_version_set(
-        MANIFEST_FORMAT_VERSION,
-        durable_sequence,
-        wal_id,
-        wal_first_sequence,
-        table_id_high_watermark,
-        &tables,
-    )?;
-    let next = VersionSet {
-        current_generation: generation,
-        manifest_id: new_manifest_id,
-        durable_sequence,
-        wal_id,
-        wal_first_sequence,
-        table_id_high_watermark,
-        tables,
-    };
-    write_manifest_new(directory, &next)?;
-    Ok(next)
-}
-'''
-if old not in text:
-    raise SystemExit("missing current prepare_install implementation")
-p.write_text(text.replace(old, new, 1))
-
-# Compaction: next_table_id already incorporates every canonical SSTable observed during open, including
-# unreferenced crash orphans. Persist next_table_id - 1 before cleanup can remove those names.
+# Compaction already has the correct observed allocation floor in next_table_id because open() takes the
+# maximum of active descriptors, persisted v4 high watermark, and every canonical SSTable name. Carry
+# next_table_id - 1 into a temporary VersionSet clone before prepare_install(); no new manifest API needed.
 p = Path("crates/db-storage-lsm/src/lib.rs")
 text = p.read_text()
 old = '''        let compacted = manifest::prepare_install(
@@ -125,15 +18,18 @@ old = '''        let compacted = manifest::prepare_install(
 new = '''        let observed_table_id_high_watermark = table_id
             .checked_sub(1)
             .ok_or_else(|| corruption("next SSTable id unexpectedly reached zero"))?;
-        let compacted = manifest::prepare_install_with_table_id_floor(
+        let mut compaction_base = self.version.clone();
+        compaction_base.table_id_high_watermark = compaction_base
+            .table_id_high_watermark
+            .max(observed_table_id_high_watermark);
+        let compacted = manifest::prepare_install(
             &self.path,
-            &self.version,
+            &compaction_base,
             manifest_id,
             durable_sequence,
             descriptors,
             self.version.wal_id,
             self.version.wal_first_sequence,
-            observed_table_id_high_watermark,
         )?;
 '''
 if old not in text:
