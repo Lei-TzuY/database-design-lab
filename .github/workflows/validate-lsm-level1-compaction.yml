@@ -21,7 +21,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply compaction integration
-        run: python .github/scripts/apply_lsm_level1_compaction.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('.github/scripts/apply_lsm_level1_compaction.py')
+          text = p.read_text().replace('pub sstables: usize;', 'pub sstables: usize,')
+          p.write_text(text)
+          PY
+          python .github/scripts/apply_lsm_level1_compaction.py
       - name: Validate
         run: |
           cargo fmt --all
