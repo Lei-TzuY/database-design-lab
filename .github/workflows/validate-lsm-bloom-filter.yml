@@ -25,6 +25,7 @@ jobs:
           python .github/scripts/apply_lsm_bloom_filter.py
           python .github/scripts/fix_lsm_bloom_round2.py
           python .github/scripts/finalize_lsm_bloom.py
+          python .github/scripts/fix_lsm_bloom_evidence_count.py
       - name: Validate
         run: |
           cargo fmt --all
