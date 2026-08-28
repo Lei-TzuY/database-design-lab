@@ -24,7 +24,7 @@ optional capability and is comparable only when every participant advertises `or
 | --- | --- | --- |
 | `PUT(k, v)` | `map[k] = v` | the previous value or missing |
 | `GET(k)` | none | the current value or missing |
-| `DELETE(k)` | remove `k`; the log engine appends a tombstone even for a miss | the removed value or missing |
+| `DELETE(k)` | remove `k`; append-log and LSM engines persist a tombstone even for a miss | the removed value or missing |
 | `RANGE(start, end, limit)` | none | up to `limit` live pairs in bytewise key order from `[start, end)`; `end` may be unbounded |
 | `REOPEN` | close/reconstruct engine state | successful lifecycle boundary |
 
@@ -88,7 +88,7 @@ including at EOF. Read-only verification reports but does not perform recovery.
 Successful mutations call `write_all` and `sync_data` before acknowledgement. Tests may therefore
 assert replay of completed calls and removal of an incomplete final record. They may not infer safety
 for a filesystem or device that violates sync contracts. Initial file data is synced, but the parent
-directory is not; a system crash immediately after first creation may lose the directory entry. An
+directory is not; a system crash immediately after first creation may lose the directory entry. A WAL
 append I/O error is an ambiguous outcome and poisons the handle until reopen.
 
 Crash consistency is demonstrated through fault injection or prefix/corruption fixtures, never by the
@@ -98,8 +98,10 @@ overflow, leaf, and internal pages plus allocation/root superblocks are failed b
 synchronized half write, and after a complete synchronized write whose acknowledgement is forced to
 fail. Reopen must expose the complete old tree or complete new tree, and the live handle is poisoned
 after every injected write error. This is a software fault model under the stated sync contract, not an
-exhaustive model of device/controller/power-loss behavior. Future LSM engines must likewise define and
-test each state transition.
+exhaustive model of device/controller/power-loss behavior. The current LSM foundation applies the same
+discipline to its WAL: structural prefix cuts are recoverable only for the final expected record, while
+complete checksum failures and unexplained tails fail closed. SSTable flush and manifest publication do
+not exist yet, so no crash guarantee for either is claimed.
 
 ## 6. Metrics definitions
 
@@ -151,7 +153,8 @@ claim.
 ## 9. Current non-goals
 
 The current baseline does not implement SQL, relational schemas, transactions, MVCC, 2PL, OCC,
-multi-process concurrency, file locking, an ordered append-log access path, LSM trees, physical B+ tree
-file compaction, Bloom filters, replication, sharding, consensus, graph traversal, time-series retention,
-columnar execution, online format migration, encryption, or production operations. These are
-intentionally deferred rather than represented by placeholders.
+multi-process concurrency, file locking, an ordered append-log access path, LSM SSTables/manifests,
+LSM compaction or WAL reclamation, physical B+ tree file compaction, Bloom filters, replication,
+sharding, consensus, graph traversal, time-series retention, columnar execution, online format
+migration, encryption, or production operations. These are intentionally deferred rather than
+represented by placeholders.
