@@ -17,6 +17,49 @@ fn read_u64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes.try_into().expect("fixed u64 slice"))
 }
 
+fn write_v1_empty_manifest(path: &std::path::Path) {
+    let mut bytes = vec![0_u8; 64];
+    bytes[0..8].copy_from_slice(b"DBLSMMAN");
+    bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
+    bytes[10..12].copy_from_slice(&64_u16.to_le_bytes());
+    bytes[16..24].copy_from_slice(&1_u64.to_le_bytes());
+    let header_crc = crc32fast::hash(&bytes[..60]);
+    bytes[60..64].copy_from_slice(&header_crc.to_le_bytes());
+    let file_crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&file_crc.to_le_bytes());
+    fs::write(path.join("MANIFEST-0000000000000001"), bytes).expect("write v1 manifest");
+}
+
+#[test]
+fn manifest_v1_reopens_with_implicit_initial_wal_and_upgrades_on_first_flush() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    drop(engine);
+    write_v1_empty_manifest(&path);
+
+    let mut reopened = LsmEngine::open(&path).expect("open v1 manifest");
+    let legacy = reopened.stats().expect("v1 manifest stats");
+    assert_eq!(legacy.active_wal_id, 1);
+    assert_eq!(legacy.active_wal_first_sequence, 1);
+    assert_eq!(legacy.durable_sequence, 0);
+    assert_eq!(legacy.wal_records, 0);
+
+    reopened.put(b"a", &large_value(0x01)).expect("put a");
+    reopened
+        .put(b"b", &large_value(0x02))
+        .expect("flush and upgrade manifest");
+    let upgraded = reopened.stats().expect("upgraded stats");
+    assert_eq!(upgraded.active_wal_id, 2);
+    assert_eq!(upgraded.active_wal_first_sequence, 3);
+    assert_eq!(upgraded.durable_sequence, 2);
+    assert!(!path.join(wal_file_name(1)).exists());
+    assert!(path.join("MANIFEST-0000000000000003").exists());
+    reopened.reopen().expect("reopen upgraded state");
+    assert_eq!(reopened.get(b"a").expect("get a"), Some(large_value(0x01)));
+    assert_eq!(reopened.get(b"b").expect("get b"), Some(large_value(0x02)));
+}
+
 #[test]
 fn fully_flushed_segment_rotates_and_reclaims_only_after_both_current_mirrors_move() {
     let directory = tempdir().expect("temporary directory");
