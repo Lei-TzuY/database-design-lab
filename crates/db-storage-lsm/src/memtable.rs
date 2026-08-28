@@ -10,7 +10,7 @@ pub(super) struct VersionedEntry {
     pub(super) value: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct MemTable {
     entries: BTreeMap<Vec<u8>, VersionedEntry>,
     approximate_bytes: usize,
@@ -116,6 +116,26 @@ impl MemTableSet {
             }
         }
         visible
+    }
+
+    pub(super) fn oldest_immutable_snapshot(
+        &self,
+    ) -> Result<Option<(BTreeMap<Vec<u8>, VersionedEntry>, u64)>> {
+        let Some(table) = self.immutable.first() else {
+            return Ok(None);
+        };
+        let durable_sequence = table
+            .last_sequence
+            .ok_or_else(|| corruption("frozen MemTable has no last sequence"))?;
+        Ok(Some((table.entries.clone(), durable_sequence)))
+    }
+
+    pub(super) fn retire_oldest_immutable(&mut self) -> Result<()> {
+        if self.immutable.is_empty() {
+            return Err(corruption("attempted to retire a missing frozen MemTable"));
+        }
+        self.immutable.remove(0);
+        Ok(())
     }
 
     pub(super) fn mutable_entries(&self) -> usize {
