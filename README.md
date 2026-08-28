@@ -39,7 +39,13 @@ that cannot fit inline are stored in checksummed overflow-page chains; live key/
 in the same reachability/reuse proof. The B+ tree implements the common 4 KiB-key/1 MiB-value point
 contract, including explicit `REOPEN`, and is differentially tested against the in-memory oracle.
 Ordered B+ tree scans walk the internal hierarchy in key order rather than persisting leaf sibling
-links, so scans introduce no extra COW/reuse edge. Physical file compaction/truncation remains deferred.
+links, so scans introduce no extra COW/reuse edge. Deterministic mutation fault tests exercise appended
+and recycled overflow/leaf/internal page writes, allocation metadata, and final root publication under
+pre-write, torn-half-write, and post-sync error modes. Reopen must select either the complete old tree or
+the complete new tree; only a fully synchronized root superblock whose caller still receives an I/O
+error may expose the new state. Torn recycled orphans remain unreachable and are proven safely
+overwriteable by a later mutation. Physical file compaction/truncation and arbitrary device/cache
+power-loss modeling remain deferred.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,

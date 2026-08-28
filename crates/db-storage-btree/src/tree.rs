@@ -3,6 +3,8 @@ use std::path::Path;
 
 mod common;
 mod delete;
+#[cfg(test)]
+mod fault;
 mod overflow;
 mod reuse;
 mod scan;
