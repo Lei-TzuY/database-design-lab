@@ -289,10 +289,41 @@ WAL/MemTable tail, keep the newest version of each key, remove tombstones, and a
 bounds/limit. The current L0/L1 compactor removes superseded physical table versions only after
 double-mirror publication. It drops logical tombstones only at the documented full-set proof point.
 
+## Amplification instrumentation
+
+`LsmEngine` exposes resettable, process-local raw counters plus exact integer ratio pairs. They are
+measurement evidence for this implementation, not device-level telemetry and not benchmark conclusions.
+A logical `reopen` on the same engine handle preserves the counters; constructing a new engine handle
+starts a new measurement window. Counter saturation cannot change database behavior.
+
+The implemented ratios are intentionally explicit:
+
+- **point read:** SSTables consulted by successful explicit `GET` calls / explicit `GET` calls. MemTable
+  hits therefore contribute zero sorted-table consults, while an absent key may consult every current run.
+  Internal lookups used to return a previous value from `PUT`/`DELETE` are not counted as user reads.
+- **range read:** physical SSTable records decoded inside successful range scans / logical live records
+  returned. Multiple physical versions of one logical key therefore remain visible in the numerator.
+- **data write:** complete WAL mutation-record bytes + flush SSTable file bytes + compaction-output SSTable
+  file bytes / acknowledged logical mutation bytes (`key + PUT value`, or key only for DELETE). Manifest,
+  `CURRENT`, filesystem metadata, cache traffic, and device writeback are outside this deliberately narrow
+  numerator. `compaction_input_sstable_bytes` is exposed separately as read-side compaction work.
+- **sorted-table space:** bytes in SSTables referenced by the authoritative manifest / durable live
+  key+value bytes represented by those SSTables. Unflushed WAL/MemTable state is excluded from both sides
+  of this sorted-table ratio. A zero denominator is preserved as `0` rather than converted to NaN/infinity.
+
+A hand-computable regression creates four two-entry L0 flushes, verifies that first-compaction input bytes
+equal the sum of those flush outputs, and verifies that the surviving L1 file size equals compaction output
+bytes. It then layers a two-entry L0 over an eight-entry L1: three point reads require exactly 5 SSTable
+consults (`5/3`), while a full range decodes 10 physical versions and returns 9 logical keys (`10/9`).
+The same suite checks physical SSTable bytes from directory metadata and exact WAL record framing. A
+separate deterministic state machine drives two full-set compaction cycles with overwrites and deletes
+against `db-storage-memory`, including range comparisons and reopen after each compacted version.
+
 ## Explicitly deferred
 
 Generalized size-based/multi-run levels, snapshot-aware or replication-aware tombstone GC, block/cache
-design, and read/write/space-amplification instrumentation remain separate evidence milestones. Bloom
+design, common cross-engine amplification counters, and device-level I/O attribution remain separate
+evidence milestones. Bloom
 filtering is part of SSTable v2; level metadata and full-set L0-to-L1 publication remain readable from
 Manifest v3; the GC proof watermark and table-less durable state originated in Manifest v4; persistent
 SSTable allocation history across orphan cleanup is Manifest v5. WAL segment rotation/reclamation remains

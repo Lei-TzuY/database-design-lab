@@ -444,7 +444,8 @@ impl SsTable {
         start: &[u8],
         end: Option<&[u8]>,
         visible: &mut BTreeMap<Vec<u8>, VersionedEntry>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
+        let mut decoded_records = 0_u64;
         for entry in &self.index {
             if entry.key.as_slice() < start {
                 continue;
@@ -454,6 +455,7 @@ impl SsTable {
             }
             let offset = usize_from_u64(entry.record_offset, entry.record_offset)?;
             let (key, decoded, _) = decode_record(&self.bytes, offset, self.bytes.len())?;
+            decoded_records = decoded_records.saturating_add(1);
             let replace = visible
                 .get(key.as_slice())
                 .is_none_or(|current| decoded.sequence > current.sequence);
@@ -461,7 +463,7 @@ impl SsTable {
                 visible.insert(key, decoded);
             }
         }
-        Ok(())
+        Ok(decoded_records)
     }
 
     #[cfg(test)]

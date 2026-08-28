@@ -10,7 +10,9 @@
 //! records that proof point in Manifest v5 before obsolete sorted-table/manifest files are reclaimed.
 //! Deterministic
 //! compaction fault tests exercise pre-write, torn durable output, and post-sync reported errors at
-//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries.
+//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries. A second
+//! deterministic evidence layer compares multi-cycle compaction against the in-memory oracle and exposes
+//! exact integer read/data-write/sorted-table-space amplification counters for hand-computable traces.
 
 mod bloom;
 mod manifest;
@@ -96,6 +98,68 @@ pub struct LsmStats {
     pub tombstone_gc_sequence: u64,
 }
 
+/// Process-local, resettable counters for reproducible LSM amplification experiments.
+///
+/// These counters deliberately describe the implemented data path rather than pretending to be
+/// device-level I/O telemetry. SSTables are fully resident after open, so point/range read counters
+/// measure sorted-table work (tables consulted and physical versions decoded). Write counters include
+/// WAL mutation records plus immutable SSTable bytes produced by flush and compaction; manifest,
+/// CURRENT, filesystem metadata, cache traffic, and device writeback are outside this accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct LsmInstrumentation {
+    /// Successful explicit `GET` operations.
+    pub point_reads: u64,
+    /// SSTables consulted by successful explicit `GET` operations.
+    pub point_sstable_consults: u64,
+    /// Successful explicit range-scan operations, including empty-result scans.
+    pub range_scans: u64,
+    /// Logical records returned by successful range scans.
+    pub range_result_records: u64,
+    /// Physical SSTable records decoded while serving successful range scans.
+    pub range_sstable_records_decoded: u64,
+    /// Successful acknowledged PUT/DELETE mutations.
+    pub logical_mutations: u64,
+    /// Key plus PUT-value bytes accepted by successful mutations; DELETE contributes key bytes only.
+    pub logical_mutation_bytes: u64,
+    /// Complete encoded WAL mutation-record bytes written during this measurement window.
+    pub wal_record_bytes_written: u64,
+    /// Number of immutable MemTable flush SSTables created.
+    pub flushes: u64,
+    /// SSTable file bytes written by immutable MemTable flushes.
+    pub flush_sstable_bytes_written: u64,
+    /// Number of full-set compactions started after the L0 trigger fired.
+    pub compactions: u64,
+    /// Authoritative SSTable bytes consumed as full-set compaction input.
+    pub compaction_input_sstable_bytes: u64,
+    /// Replacement L1 SSTable bytes written by compaction; table-less GC contributes zero.
+    pub compaction_output_sstable_bytes_written: u64,
+}
+
+/// Exact integer numerator/denominator pair for an amplification metric.
+///
+/// A zero denominator is preserved rather than converted to NaN/infinity so experiment code can
+/// decide how to render an empty measurement window without losing the raw evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct AmplificationRatio {
+    /// Raw work/space numerator.
+    pub numerator: u64,
+    /// Raw logical baseline denominator.
+    pub denominator: u64,
+}
+
+/// Reproducible amplification report derived from current state plus process-local counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct LsmAmplificationReport {
+    /// SSTables consulted per explicit point GET.
+    pub point_read_tables_per_get: AmplificationRatio,
+    /// Physical SSTable versions decoded per logical range record returned.
+    pub range_versions_per_result: AmplificationRatio,
+    /// WAL-record + flush-SSTable + compaction-output bytes per acknowledged logical mutation byte.
+    pub data_write_bytes_per_logical_byte: AmplificationRatio,
+    /// Authoritative SSTable bytes per durable live key+value byte represented by those SSTables.
+    pub sorted_table_bytes_per_durable_live_byte: AmplificationRatio,
+}
+
 /// Read-only verification result for the implemented LSM directory state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerificationReport {
@@ -115,6 +179,7 @@ pub struct LsmEngine {
     next_table_id: u64,
     next_manifest_id: u64,
     next_wal_id: u64,
+    instrumentation: LsmInstrumentation,
     poisoned: bool,
     #[cfg(test)]
     compaction_fault_spec: Option<CompactionFaultSpec>,
@@ -177,6 +242,7 @@ impl LsmEngine {
             next_table_id: 1,
             next_manifest_id: 2,
             next_wal_id: 2,
+            instrumentation: LsmInstrumentation::default(),
             poisoned: false,
             #[cfg(test)]
             compaction_fault_spec: None,
@@ -246,6 +312,7 @@ impl LsmEngine {
             next_manifest_id: checked_next_id(layout.max_manifest_id, "manifest")?,
             next_wal_id: checked_next_id(layout.max_wal_id, "WAL")?,
             version,
+            instrumentation: LsmInstrumentation::default(),
             poisoned: false,
             #[cfg(test)]
             compaction_fault_spec: None,
@@ -383,16 +450,88 @@ impl LsmEngine {
         })
     }
 
-    fn current_entry(&self, key: &[u8]) -> Result<Option<VersionedEntry>> {
-        if let Some(entry) = self.memtables.get(key) {
-            return Ok(Some(entry.clone()));
+    /// Returns a copy of the process-local instrumentation counters.
+    #[must_use]
+    pub const fn instrumentation(&self) -> LsmInstrumentation {
+        self.instrumentation
+    }
+
+    /// Resets process-local amplification counters without modifying database state.
+    pub fn reset_instrumentation(&mut self) {
+        self.instrumentation = LsmInstrumentation::default();
+    }
+
+    /// Builds exact raw amplification ratios from the current measurement window and durable SSTables.
+    ///
+    /// Computing the sorted-table space denominator decodes the authoritative SSTable set in memory but
+    /// does not increment read counters. The denominator excludes unflushed WAL/MemTable state so it is
+    /// paired with exactly the durable sorted-table bytes in the numerator.
+    pub fn amplification_report(&self) -> Result<LsmAmplificationReport> {
+        self.ensure_usable()?;
+        let authoritative_sstable_bytes = self
+            .version
+            .tables
+            .iter()
+            .fold(0_u64, |total, table| total.saturating_add(table.file_bytes));
+        let mut durable = BTreeMap::new();
+        for table in &self.tables {
+            let _ = table.overlay_range(b"", None, &mut durable)?;
         }
+        let durable_live_bytes = durable.into_iter().try_fold(0_u64, |total, (key, entry)| {
+            let Some(value) = entry.value else {
+                return Ok(total);
+            };
+            let bytes = key
+                .len()
+                .checked_add(value.len())
+                .ok_or_else(|| corruption("durable live logical byte count overflowed usize"))?;
+            let bytes = u64::try_from(bytes)
+                .map_err(|_| corruption("durable live logical byte count does not fit u64"))?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| corruption("durable live logical byte count overflowed u64"))
+        })?;
+        let data_write_bytes = self
+            .instrumentation
+            .wal_record_bytes_written
+            .saturating_add(self.instrumentation.flush_sstable_bytes_written)
+            .saturating_add(self.instrumentation.compaction_output_sstable_bytes_written);
+        Ok(LsmAmplificationReport {
+            point_read_tables_per_get: AmplificationRatio {
+                numerator: self.instrumentation.point_sstable_consults,
+                denominator: self.instrumentation.point_reads,
+            },
+            range_versions_per_result: AmplificationRatio {
+                numerator: self.instrumentation.range_sstable_records_decoded,
+                denominator: self.instrumentation.range_result_records,
+            },
+            data_write_bytes_per_logical_byte: AmplificationRatio {
+                numerator: data_write_bytes,
+                denominator: self.instrumentation.logical_mutation_bytes,
+            },
+            sorted_table_bytes_per_durable_live_byte: AmplificationRatio {
+                numerator: authoritative_sstable_bytes,
+                denominator: durable_live_bytes,
+            },
+        })
+    }
+
+    fn current_entry_with_consults(&self, key: &[u8]) -> Result<(Option<VersionedEntry>, u64)> {
+        if let Some(entry) = self.memtables.get(key) {
+            return Ok((Some(entry.clone()), 0));
+        }
+        let mut consulted = 0_u64;
         for table in self.tables.iter().rev() {
+            consulted = consulted.saturating_add(1);
             if let Some(entry) = table.get(key)? {
-                return Ok(Some(entry));
+                return Ok((Some(entry), consulted));
             }
         }
-        Ok(None)
+        Ok((None, consulted))
+    }
+
+    fn current_entry(&self, key: &[u8]) -> Result<Option<VersionedEntry>> {
+        Ok(self.current_entry_with_consults(key)?.0)
     }
 
     fn current_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -418,6 +557,13 @@ impl LsmEngine {
                 return Err(error);
             }
         };
+        let encoded_record_bytes = wal::RECORD_HEADER_LEN
+            .saturating_add(key.len())
+            .saturating_add(value.map_or(0, <[u8]>::len));
+        self.instrumentation.wal_record_bytes_written = self
+            .instrumentation
+            .wal_record_bytes_written
+            .saturating_add(u64::try_from(encoded_record_bytes).unwrap_or(u64::MAX));
         if let Err(error) = self
             .memtables
             .apply(sequence, key.to_vec(), value.map(<[u8]>::to_vec))
@@ -429,6 +575,13 @@ impl LsmEngine {
             self.poisoned = true;
             return Err(error);
         }
+        self.instrumentation.logical_mutations =
+            self.instrumentation.logical_mutations.saturating_add(1);
+        let logical_bytes = key.len().saturating_add(value.map_or(0, <[u8]>::len));
+        self.instrumentation.logical_mutation_bytes = self
+            .instrumentation
+            .logical_mutation_bytes
+            .saturating_add(u64::try_from(logical_bytes).unwrap_or(u64::MAX));
         Ok(())
     }
 
@@ -450,6 +603,11 @@ impl LsmEngine {
                 .ok_or_else(|| corruption("manifest id exhausted"))?;
 
             let table = SsTable::create_new(&self.path, table_id, durable_sequence, &entries)?;
+            self.instrumentation.flushes = self.instrumentation.flushes.saturating_add(1);
+            self.instrumentation.flush_sstable_bytes_written = self
+                .instrumentation
+                .flush_sstable_bytes_written
+                .saturating_add(table.descriptor().file_bytes);
             let mut descriptors = self.version.tables.clone();
             descriptors.push(table.descriptor().clone());
             let next_version = manifest::install(
@@ -487,9 +645,19 @@ impl LsmEngine {
             return Ok(());
         }
 
+        self.instrumentation.compactions = self.instrumentation.compactions.saturating_add(1);
+        let input_bytes = self
+            .version
+            .tables
+            .iter()
+            .fold(0_u64, |total, table| total.saturating_add(table.file_bytes));
+        self.instrumentation.compaction_input_sstable_bytes = self
+            .instrumentation
+            .compaction_input_sstable_bytes
+            .saturating_add(input_bytes);
         let mut merged = BTreeMap::new();
         for table in &self.tables {
-            table.overlay_range(b"", None, &mut merged)?;
+            let _ = table.overlay_range(b"", None, &mut merged)?;
         }
         if merged.is_empty() {
             return Err(corruption(
@@ -525,6 +693,10 @@ impl LsmEngine {
                 &self.path.join(sstable_file_name(table_id)),
             )?;
             let descriptor = table.descriptor().clone();
+            self.instrumentation.compaction_output_sstable_bytes_written = self
+                .instrumentation
+                .compaction_output_sstable_bytes_written
+                .saturating_add(descriptor.file_bytes);
             (Some(table), vec![descriptor], next_table_id)
         };
 
@@ -801,7 +973,13 @@ impl KvEngine for LsmEngine {
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         validate_key(key)?;
         self.ensure_usable()?;
-        self.current_value(key)
+        let (entry, consulted) = self.current_entry_with_consults(key)?;
+        self.instrumentation.point_reads = self.instrumentation.point_reads.saturating_add(1);
+        self.instrumentation.point_sstable_consults = self
+            .instrumentation
+            .point_sstable_consults
+            .saturating_add(consulted);
+        Ok(entry.and_then(|entry| entry.value))
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -820,13 +998,16 @@ impl KvEngine for LsmEngine {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         validate_range_scan(start, end)?;
         self.ensure_usable()?;
+        self.instrumentation.range_scans = self.instrumentation.range_scans.saturating_add(1);
         if limit == 0 || end.is_some_and(|end| end == start) {
             return Ok(Vec::new());
         }
 
         let mut visible = BTreeMap::new();
+        let mut decoded_records = 0_u64;
         for table in &self.tables {
-            table.overlay_range(start, end, &mut visible)?;
+            decoded_records =
+                decoded_records.saturating_add(table.overlay_range(start, end, &mut visible)?);
         }
         let lower = Bound::Included(start.to_vec());
         let upper = end
@@ -840,17 +1021,28 @@ impl KvEngine for LsmEngine {
                 visible.insert(key.clone(), entry.clone());
             }
         }
-        Ok(visible
+        let result: Vec<_> = visible
             .into_iter()
             .filter_map(|(key, entry)| entry.value.map(|value| (key, value)))
             .take(limit)
-            .collect())
+            .collect();
+        self.instrumentation.range_sstable_records_decoded = self
+            .instrumentation
+            .range_sstable_records_decoded
+            .saturating_add(decoded_records);
+        self.instrumentation.range_result_records = self
+            .instrumentation
+            .range_result_records
+            .saturating_add(u64::try_from(result.len()).unwrap_or(u64::MAX));
+        Ok(result)
     }
 
     fn reopen(&mut self) -> Result<()> {
+        let instrumentation = self.instrumentation;
         self.wal.take();
         match Self::open_existing(self.path.clone()) {
-            Ok(reopened) => {
+            Ok(mut reopened) => {
+                reopened.instrumentation = instrumentation;
                 *self = reopened;
                 Ok(())
             }
@@ -991,6 +1183,8 @@ fn injected_compaction_fault(kind: CompactionWriteKind, mode: CompactionFaultMod
 mod compaction_fault_tests;
 #[cfg(test)]
 mod compaction_tests;
+#[cfg(test)]
+mod instrumentation_tests;
 #[cfg(test)]
 mod sstable_tests;
 #[cfg(test)]
