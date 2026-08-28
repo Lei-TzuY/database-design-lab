@@ -48,7 +48,10 @@ impl EntryKind {
         match encoded {
             KIND_PUT => Ok(Self::Put),
             KIND_DELETE => Ok(Self::Delete),
-            _ => Err(corruption(offset, format!("unknown SSTable entry kind {encoded}"))),
+            _ => Err(corruption(
+                offset,
+                format!("unknown SSTable entry kind {encoded}"),
+            )),
         }
     }
 }
@@ -168,7 +171,10 @@ impl SsTable {
 
         let header = parse_header(&bytes[..SSTABLE_HEADER_LEN])?;
         if header.table_id != descriptor.table_id || header.entry_count != descriptor.entry_count {
-            return Err(corruption(0, "SSTable header does not match manifest descriptor"));
+            return Err(corruption(
+                0,
+                "SSTable header does not match manifest descriptor",
+            ));
         }
         let footer_start = usize_from_u64(header.footer_offset, 0)?;
         let footer_end = footer_start
@@ -202,7 +208,10 @@ impl SsTable {
 
         let data_start = usize_from_u64(header.data_offset, 0)?;
         let index_start = usize_from_u64(header.index_offset, 0)?;
-        if data_start != SSTABLE_HEADER_LEN || index_start > footer_start || index_start < data_start {
+        if data_start != SSTABLE_HEADER_LEN
+            || index_start > footer_start
+            || index_start < data_start
+        {
             return Err(corruption(0, "invalid SSTable data/index extent ordering"));
         }
 
@@ -213,10 +222,14 @@ impl SsTable {
             let record_offset = u64::try_from(offset)
                 .map_err(|_| corruption(0, "SSTable record offset does not fit u64"))?;
             let (key, entry, next) = decode_record(&bytes, offset, index_start)?;
-            if records.last().is_some_and(|previous: &(Vec<u8>, VersionedEntry, u64)| {
-                previous.0 >= key
-            }) {
-                return Err(corruption(record_offset, "SSTable data keys are not strictly sorted"));
+            if records
+                .last()
+                .is_some_and(|previous: &(Vec<u8>, VersionedEntry, u64)| previous.0 >= key)
+            {
+                return Err(corruption(
+                    record_offset,
+                    "SSTable data keys are not strictly sorted",
+                ));
             }
             records.push((key, entry, record_offset));
             offset = next;
@@ -232,7 +245,10 @@ impl SsTable {
         offset = index_start;
         while offset < footer_start {
             let (entry, next) = decode_index_entry(&bytes, offset, footer_start)?;
-            if index.last().is_some_and(|previous: &IndexEntry| previous.key >= entry.key) {
+            if index
+                .last()
+                .is_some_and(|previous: &IndexEntry| previous.key >= entry.key)
+            {
                 return Err(corruption(
                     u64::try_from(offset).unwrap_or(u64::MAX),
                     "SSTable index keys are not strictly sorted",
@@ -266,19 +282,22 @@ impl SsTable {
             }
         }
 
-        let first = index.first().ok_or_else(|| corruption(0, "manifest references empty SSTable"))?;
+        let first = index
+            .first()
+            .ok_or_else(|| corruption(0, "manifest references empty SSTable"))?;
         let last = index.last().expect("nonempty checked above");
         if first.key != descriptor.smallest_key || last.key != descriptor.largest_key {
-            return Err(corruption(0, "SSTable key bounds disagree with manifest descriptor"));
+            return Err(corruption(
+                0,
+                "SSTable key bounds disagree with manifest descriptor",
+            ));
         }
-        if index
-            .iter()
-            .map(|entry| entry.sequence)
-            .max()
-            .unwrap_or(0)
-            > descriptor.durable_sequence
+        if index.iter().map(|entry| entry.sequence).max().unwrap_or(0) > descriptor.durable_sequence
         {
-            return Err(corruption(0, "SSTable entry sequence exceeds durable watermark"));
+            return Err(corruption(
+                0,
+                "SSTable entry sequence exceeds durable watermark",
+            ));
         }
 
         Ok(Self {
@@ -294,7 +313,10 @@ impl SsTable {
     }
 
     pub(super) fn get(&self, key: &[u8]) -> Result<Option<VersionedEntry>> {
-        let index = match self.index.binary_search_by(|entry| entry.key.as_slice().cmp(key)) {
+        let index = match self
+            .index
+            .binary_search_by(|entry| entry.key.as_slice().cmp(key))
+        {
             Ok(index) => index,
             Err(_) => return Ok(None),
         };
@@ -358,7 +380,12 @@ pub(super) fn file_name(table_id: u64) -> String {
     format!("sst-{table_id:016}.sst")
 }
 
-fn encode_header(table_id: u64, entry_count: u64, index_offset: u64, footer_offset: u64) -> [u8; 64] {
+fn encode_header(
+    table_id: u64,
+    entry_count: u64,
+    index_offset: u64,
+    footer_offset: u64,
+) -> [u8; 64] {
     let mut header = [0_u8; 64];
     header[0..8].copy_from_slice(&SSTABLE_MAGIC);
     header[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -382,7 +409,11 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
     if version != FORMAT_VERSION {
-        return Err(DbError::UnsupportedVersion(version));
+        return Err(DbError::UnsupportedVersion {
+            format: "LSM SSTable",
+            found: u64::from(version),
+            supported: u64::from(FORMAT_VERSION),
+        });
     }
     if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
         != SSTABLE_HEADER_LEN
@@ -434,7 +465,11 @@ fn parse_footer(bytes: &[u8], offset: u64) -> Result<Footer> {
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
     if version != FORMAT_VERSION {
-        return Err(DbError::UnsupportedVersion(version));
+        return Err(DbError::UnsupportedVersion {
+            format: "LSM SSTable",
+            found: u64::from(version),
+            supported: u64::from(FORMAT_VERSION),
+        });
     }
     if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
         != SSTABLE_FOOTER_LEN
@@ -463,9 +498,10 @@ fn encode_record(key: &[u8], entry: &VersionedEntry) -> Result<Vec<u8>> {
         EntryKind::Delete
     };
     let value = entry.value.as_deref().unwrap_or_default();
-    let key_len = u32::try_from(key.len()).map_err(|_| corruption(0, "key length does not fit u32"))?;
-    let value_len = u32::try_from(value.len())
-        .map_err(|_| corruption(0, "value length does not fit u32"))?;
+    let key_len =
+        u32::try_from(key.len()).map_err(|_| corruption(0, "key length does not fit u32"))?;
+    let value_len =
+        u32::try_from(value.len()).map_err(|_| corruption(0, "value length does not fit u32"))?;
     let capacity = RECORD_HEADER_LEN
         .checked_add(key.len())
         .and_then(|size| size.checked_add(value.len()))
@@ -503,25 +539,46 @@ fn decode_record(
     }
     let expected_header_crc = u32::from_le_bytes(header[24..28].try_into().expect("fixed slice"));
     if crc32fast::hash(&header[..24]) != expected_header_crc {
-        return Err(corruption(offset as u64 + 24, "SSTable record header checksum mismatch"));
+        return Err(corruption(
+            offset as u64 + 24,
+            "SSTable record header checksum mismatch",
+        ));
     }
     let kind = EntryKind::decode(header[5], offset as u64 + 5)?;
     let sequence = u64::from_le_bytes(header[8..16].try_into().expect("fixed slice"));
-    let key_len = usize::try_from(u32::from_le_bytes(header[16..20].try_into().expect("fixed slice")))
-        .map_err(|_| corruption(offset as u64 + 16, "SSTable key length does not fit usize"))?;
-    let value_len = usize::try_from(u32::from_le_bytes(header[20..24].try_into().expect("fixed slice")))
-        .map_err(|_| corruption(offset as u64 + 20, "SSTable value length does not fit usize"))?;
+    let key_len = usize::try_from(u32::from_le_bytes(
+        header[16..20].try_into().expect("fixed slice"),
+    ))
+    .map_err(|_| corruption(offset as u64 + 16, "SSTable key length does not fit usize"))?;
+    let value_len = usize::try_from(u32::from_le_bytes(
+        header[20..24].try_into().expect("fixed slice"),
+    ))
+    .map_err(|_| {
+        corruption(
+            offset as u64 + 20,
+            "SSTable value length does not fit usize",
+        )
+    })?;
     if key_len > MAX_KEY_BYTES || value_len > MAX_VALUE_BYTES {
-        return Err(corruption(offset as u64, "SSTable record exceeds common key/value bounds"));
+        return Err(corruption(
+            offset as u64,
+            "SSTable record exceeds common key/value bounds",
+        ));
     }
     if kind == EntryKind::Delete && value_len != 0 {
-        return Err(corruption(offset as u64 + 20, "SSTable tombstone carries a value"));
+        return Err(corruption(
+            offset as u64 + 20,
+            "SSTable tombstone carries a value",
+        ));
     }
     let payload_end = checked_add(header_end, key_len, offset)?;
     let payload_end = checked_add(payload_end, value_len, offset)?;
     let record_end = checked_add(payload_end, 4, offset)?;
     if record_end > limit || record_end > bytes.len() {
-        return Err(corruption(offset as u64, "truncated SSTable record payload"));
+        return Err(corruption(
+            offset as u64,
+            "truncated SSTable record payload",
+        ));
     }
     let expected_record_crc = u32::from_le_bytes(
         bytes[payload_end..record_end]
@@ -529,7 +586,10 @@ fn decode_record(
             .expect("four-byte record crc"),
     );
     if crc32fast::hash(&bytes[offset..payload_end]) != expected_record_crc {
-        return Err(corruption(payload_end as u64, "SSTable record checksum mismatch"));
+        return Err(corruption(
+            payload_end as u64,
+            "SSTable record checksum mismatch",
+        ));
     }
     let key_start = header_end;
     let key_end = key_start + key_len;
@@ -547,7 +607,8 @@ fn encode_index_entry(key: &[u8], entry: &VersionedEntry, record_offset: u64) ->
     } else {
         EntryKind::Delete
     };
-    let key_len = u32::try_from(key.len()).map_err(|_| corruption(0, "index key length does not fit u32"))?;
+    let key_len =
+        u32::try_from(key.len()).map_err(|_| corruption(0, "index key length does not fit u32"))?;
     let capacity = INDEX_PREFIX_LEN
         .checked_add(key.len())
         .and_then(|size| size.checked_add(4))
@@ -571,8 +632,10 @@ fn decode_index_entry(bytes: &[u8], offset: usize, limit: usize) -> Result<(Inde
         return Err(corruption(offset as u64, "truncated SSTable index prefix"));
     }
     let prefix = &bytes[offset..prefix_end];
-    let key_len = usize::try_from(u32::from_le_bytes(prefix[0..4].try_into().expect("fixed slice")))
-        .map_err(|_| corruption(offset as u64, "SSTable index key length does not fit usize"))?;
+    let key_len = usize::try_from(u32::from_le_bytes(
+        prefix[0..4].try_into().expect("fixed slice"),
+    ))
+    .map_err(|_| corruption(offset as u64, "SSTable index key length does not fit usize"))?;
     if key_len > MAX_KEY_BYTES || prefix[5] != INDEX_VERSION || prefix[6..8] != [0; 2] {
         return Err(corruption(offset as u64, "invalid SSTable index entry"));
     }
@@ -582,11 +645,17 @@ fn decode_index_entry(bytes: &[u8], offset: usize, limit: usize) -> Result<(Inde
     let key_end = checked_add(prefix_end, key_len, offset)?;
     let entry_end = checked_add(key_end, 4, offset)?;
     if entry_end > limit || entry_end > bytes.len() {
-        return Err(corruption(offset as u64, "truncated SSTable index key/checksum"));
+        return Err(corruption(
+            offset as u64,
+            "truncated SSTable index key/checksum",
+        ));
     }
     let expected = u32::from_le_bytes(bytes[key_end..entry_end].try_into().expect("fixed slice"));
     if crc32fast::hash(&bytes[offset..key_end]) != expected {
-        return Err(corruption(key_end as u64, "SSTable index checksum mismatch"));
+        return Err(corruption(
+            key_end as u64,
+            "SSTable index checksum mismatch",
+        ));
     }
     Ok((
         IndexEntry {

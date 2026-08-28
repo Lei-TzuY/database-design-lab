@@ -10,6 +10,8 @@ pub(super) struct VersionedEntry {
     pub(super) value: Option<Vec<u8>>,
 }
 
+type FrozenSnapshot = (BTreeMap<Vec<u8>, VersionedEntry>, u64);
+
 #[derive(Debug, Clone, Default)]
 struct MemTable {
     entries: BTreeMap<Vec<u8>, VersionedEntry>,
@@ -118,9 +120,7 @@ impl MemTableSet {
         visible
     }
 
-    pub(super) fn oldest_immutable_snapshot(
-        &self,
-    ) -> Result<Option<(BTreeMap<Vec<u8>, VersionedEntry>, u64)>> {
+    pub(super) fn oldest_immutable_snapshot(&self) -> Result<Option<FrozenSnapshot>> {
         let Some(table) = self.immutable.first() else {
             return Ok(None);
         };

@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use db_core::{DbError, Result, MAX_KEY_BYTES};
 
@@ -142,7 +142,11 @@ fn read_current(path: &Path) -> Result<CurrentSlot> {
     }
 }
 
-fn encode_current_slot(slot_id: usize, generation: u64, manifest_id: u64) -> [u8; CURRENT_SLOT_BYTES] {
+fn encode_current_slot(
+    slot_id: usize,
+    generation: u64,
+    manifest_id: u64,
+) -> [u8; CURRENT_SLOT_BYTES] {
     let mut bytes = [0_u8; CURRENT_SLOT_BYTES];
     bytes[0..8].copy_from_slice(&CURRENT_MAGIC);
     bytes[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -161,13 +165,24 @@ fn parse_current_slot(bytes: &[u8], physical_slot: usize) -> Result<CurrentSlot>
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
     if version != FORMAT_VERSION {
-        return Err(DbError::UnsupportedVersion(version));
+        return Err(DbError::UnsupportedVersion {
+            format: "LSM CURRENT",
+            found: u64::from(version),
+            supported: u64::from(FORMAT_VERSION),
+        });
     }
     let slot_id = u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice"));
     if usize::from(slot_id) != physical_slot {
-        return Err(corruption(base + 10, "CURRENT slot id does not match physical slot"));
+        return Err(corruption(
+            base + 10,
+            "CURRENT slot id does not match physical slot",
+        ));
     }
-    if bytes[12..16] != [0; 4] || bytes[32..CURRENT_SLOT_BYTES - 4].iter().any(|byte| *byte != 0) {
+    if bytes[12..16] != [0; 4]
+        || bytes[32..CURRENT_SLOT_BYTES - 4]
+            .iter()
+            .any(|byte| *byte != 0)
+    {
         return Err(corruption(base + 12, "CURRENT reserved bytes are nonzero"));
     }
     let expected = u32::from_le_bytes(
@@ -176,7 +191,10 @@ fn parse_current_slot(bytes: &[u8], physical_slot: usize) -> Result<CurrentSlot>
             .expect("fixed slice"),
     );
     if crc32fast::hash(&bytes[..CURRENT_SLOT_BYTES - 4]) != expected {
-        return Err(corruption(base + CURRENT_SLOT_BYTES as u64 - 4, "CURRENT checksum mismatch"));
+        return Err(corruption(
+            base + CURRENT_SLOT_BYTES as u64 - 4,
+            "CURRENT checksum mismatch",
+        ));
     }
     let manifest_id = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed slice"));
     if manifest_id == 0 {
@@ -216,10 +234,7 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
     bytes.extend_from_slice(&file_crc.to_le_bytes());
 
     let path = directory.join(manifest_file_name(version.manifest_id));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     Ok(())
@@ -236,7 +251,11 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
     if version != FORMAT_VERSION {
-        return Err(DbError::UnsupportedVersion(version));
+        return Err(DbError::UnsupportedVersion {
+            format: "LSM manifest",
+            found: u64::from(version),
+            supported: u64::from(FORMAT_VERSION),
+        });
     }
     if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
         != MANIFEST_HEADER_LEN
@@ -251,7 +270,10 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
     }
     let encoded_manifest_id = u64::from_le_bytes(bytes[16..24].try_into().expect("fixed slice"));
     if encoded_manifest_id != manifest_id {
-        return Err(corruption(16, "manifest id does not match filename/CURRENT"));
+        return Err(corruption(
+            16,
+            "manifest id does not match filename/CURRENT",
+        ));
     }
     let durable_sequence = u64::from_le_bytes(bytes[24..32].try_into().expect("fixed slice"));
     let table_count = usize::try_from(u64::from_le_bytes(
@@ -267,12 +289,19 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         .and_then(|len| len.checked_add(4))
         .ok_or_else(|| corruption(40, "manifest extent arithmetic overflowed usize"))?;
     if expected_len != bytes.len() {
-        return Err(corruption(40, "manifest body length does not match physical file"));
+        return Err(corruption(
+            40,
+            "manifest body length does not match physical file",
+        ));
     }
     let crc_offset = bytes.len() - 4;
-    let expected_file_crc = u32::from_le_bytes(bytes[crc_offset..].try_into().expect("fixed slice"));
+    let expected_file_crc =
+        u32::from_le_bytes(bytes[crc_offset..].try_into().expect("fixed slice"));
     if crc32fast::hash(&bytes[..crc_offset]) != expected_file_crc {
-        return Err(corruption(crc_offset as u64, "manifest file checksum mismatch"));
+        return Err(corruption(
+            crc_offset as u64,
+            "manifest file checksum mismatch",
+        ));
     }
 
     let mut offset = MANIFEST_HEADER_LEN;
@@ -284,7 +313,10 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         offset = next;
     }
     if offset != body_end {
-        return Err(corruption(offset as u64, "manifest contains unexplained descriptor bytes"));
+        return Err(corruption(
+            offset as u64,
+            "manifest contains unexplained descriptor bytes",
+        ));
     }
     validate_table_set(durable_sequence, &tables)?;
     Ok(VersionSet {
@@ -296,8 +328,12 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
 }
 
 fn encode_descriptor(descriptor: &SstableDescriptor) -> Result<Vec<u8>> {
-    if descriptor.smallest_key.len() > MAX_KEY_BYTES || descriptor.largest_key.len() > MAX_KEY_BYTES {
-        return Err(corruption(0, "manifest SSTable key bound exceeds common key limit"));
+    if descriptor.smallest_key.len() > MAX_KEY_BYTES || descriptor.largest_key.len() > MAX_KEY_BYTES
+    {
+        return Err(corruption(
+            0,
+            "manifest SSTable key bound exceeds common key limit",
+        ));
     }
     let smallest_len = u32::try_from(descriptor.smallest_key.len())
         .map_err(|_| corruption(0, "manifest smallest-key length does not fit u32"))?;
@@ -322,20 +358,34 @@ fn encode_descriptor(descriptor: &SstableDescriptor) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn decode_descriptor(bytes: &[u8], offset: usize, limit: usize) -> Result<(SstableDescriptor, usize)> {
+fn decode_descriptor(
+    bytes: &[u8],
+    offset: usize,
+    limit: usize,
+) -> Result<(SstableDescriptor, usize)> {
     let prefix_end = offset
         .checked_add(DESCRIPTOR_PREFIX_LEN)
         .ok_or_else(|| corruption(offset as u64, "manifest descriptor extent overflowed"))?;
     if prefix_end > limit {
-        return Err(corruption(offset as u64, "truncated manifest descriptor prefix"));
+        return Err(corruption(
+            offset as u64,
+            "truncated manifest descriptor prefix",
+        ));
     }
     let prefix = &bytes[offset..prefix_end];
-    let smallest_len = usize::try_from(u32::from_le_bytes(prefix[32..36].try_into().expect("fixed slice")))
-        .map_err(|_| corruption(offset as u64 + 32, "smallest-key length does not fit usize"))?;
-    let largest_len = usize::try_from(u32::from_le_bytes(prefix[36..40].try_into().expect("fixed slice")))
-        .map_err(|_| corruption(offset as u64 + 36, "largest-key length does not fit usize"))?;
+    let smallest_len = usize::try_from(u32::from_le_bytes(
+        prefix[32..36].try_into().expect("fixed slice"),
+    ))
+    .map_err(|_| corruption(offset as u64 + 32, "smallest-key length does not fit usize"))?;
+    let largest_len = usize::try_from(u32::from_le_bytes(
+        prefix[36..40].try_into().expect("fixed slice"),
+    ))
+    .map_err(|_| corruption(offset as u64 + 36, "largest-key length does not fit usize"))?;
     if smallest_len > MAX_KEY_BYTES || largest_len > MAX_KEY_BYTES {
-        return Err(corruption(offset as u64 + 32, "manifest key bound exceeds common key limit"));
+        return Err(corruption(
+            offset as u64 + 32,
+            "manifest key bound exceeds common key limit",
+        ));
     }
     let smallest_end = prefix_end
         .checked_add(smallest_len)
@@ -343,15 +393,25 @@ fn decode_descriptor(bytes: &[u8], offset: usize, limit: usize) -> Result<(Sstab
     let largest_end = smallest_end
         .checked_add(largest_len)
         .ok_or_else(|| corruption(offset as u64, "manifest largest-key extent overflowed"))?;
-    let descriptor_end = largest_end
-        .checked_add(4)
-        .ok_or_else(|| corruption(offset as u64, "manifest descriptor checksum extent overflowed"))?;
+    let descriptor_end = largest_end.checked_add(4).ok_or_else(|| {
+        corruption(
+            offset as u64,
+            "manifest descriptor checksum extent overflowed",
+        )
+    })?;
     if descriptor_end > limit {
         return Err(corruption(offset as u64, "truncated manifest descriptor"));
     }
-    let expected_crc = u32::from_le_bytes(bytes[largest_end..descriptor_end].try_into().expect("fixed slice"));
+    let expected_crc = u32::from_le_bytes(
+        bytes[largest_end..descriptor_end]
+            .try_into()
+            .expect("fixed slice"),
+    );
     if crc32fast::hash(&bytes[offset..largest_end]) != expected_crc {
-        return Err(corruption(largest_end as u64, "manifest descriptor checksum mismatch"));
+        return Err(corruption(
+            largest_end as u64,
+            "manifest descriptor checksum mismatch",
+        ));
     }
     let descriptor = SstableDescriptor {
         table_id: u64::from_le_bytes(prefix[0..8].try_into().expect("fixed slice")),
@@ -367,7 +427,10 @@ fn decode_descriptor(bytes: &[u8], offset: usize, limit: usize) -> Result<(Sstab
         || descriptor.durable_sequence == 0
         || descriptor.smallest_key > descriptor.largest_key
     {
-        return Err(corruption(offset as u64, "invalid manifest SSTable descriptor values"));
+        return Err(corruption(
+            offset as u64,
+            "invalid manifest SSTable descriptor values",
+        ));
     }
     Ok((descriptor, descriptor_end))
 }
@@ -377,7 +440,10 @@ fn validate_table_set(durable_sequence: u64, tables: &[SstableDescriptor]) -> Re
     let mut previous_durable = 0_u64;
     for descriptor in tables {
         if descriptor.table_id <= previous_table_id {
-            return Err(corruption(0, "manifest table ids are not strictly increasing"));
+            return Err(corruption(
+                0,
+                "manifest table ids are not strictly increasing",
+            ));
         }
         if descriptor.durable_sequence <= previous_durable {
             return Err(corruption(

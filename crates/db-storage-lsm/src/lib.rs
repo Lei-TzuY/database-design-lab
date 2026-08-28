@@ -131,7 +131,16 @@ impl LsmEngine {
 
     fn open_existing(path: PathBuf) -> Result<Self> {
         let layout = validate_layout(&path)?;
-        let version = manifest::load(&path)?;
+        let version = if layout.has_version_set {
+            manifest::load(&path)?
+        } else {
+            VersionSet {
+                current_generation: 0,
+                manifest_id: 0,
+                durable_sequence: 0,
+                tables: Vec::new(),
+            }
+        };
         let mut tables = Vec::with_capacity(version.tables.len());
         for descriptor in &version.tables {
             tables.push(SsTable::open(
@@ -171,7 +180,16 @@ impl LsmEngine {
     pub fn verify(path: impl AsRef<Path>) -> Result<VerificationReport> {
         let path = path.as_ref();
         let layout = validate_layout(path)?;
-        let version = manifest::load(path)?;
+        let version = if layout.has_version_set {
+            manifest::load(path)?
+        } else {
+            VersionSet {
+                current_generation: 0,
+                manifest_id: 0,
+                durable_sequence: 0,
+                tables: Vec::new(),
+            }
+        };
         let mut sstable_entries = 0_u64;
         for descriptor in &version.tables {
             SsTable::open(
@@ -294,6 +312,10 @@ impl LsmEngine {
 
     fn flush_frozen_memtables(&mut self) -> Result<()> {
         while let Some((entries, durable_sequence)) = self.memtables.oldest_immutable_snapshot()? {
+            if self.version.manifest_id == 0 {
+                self.version = manifest::create_initial(&self.path)?;
+                self.next_manifest_id = 2;
+            }
             let table_id = self.next_table_id;
             let manifest_id = self.next_manifest_id;
             let next_table_id = table_id
@@ -424,6 +446,7 @@ struct Layout {
     wal_path: PathBuf,
     max_table_id: u64,
     max_manifest_id: u64,
+    has_version_set: bool,
 }
 
 fn validate_layout(path: &Path) -> Result<Layout> {
@@ -458,7 +481,9 @@ fn validate_layout(path: &Path) -> Result<Layout> {
         }
         if name == current_name {
             if found_current {
-                return Err(corruption("LSM directory contains duplicate CURRENT entries"));
+                return Err(corruption(
+                    "LSM directory contains duplicate CURRENT entries",
+                ));
             }
             found_current = true;
             continue;
@@ -482,19 +507,31 @@ fn validate_layout(path: &Path) -> Result<Layout> {
             "LSM directory is missing required {WAL_FILE_NAME}"
         )));
     }
-    if !found_current {
-        return Err(corruption(format!(
-            "LSM directory is missing required {CURRENT_FILE_NAME}"
-        )));
-    }
-    if max_manifest_id == 0 {
-        return Err(corruption("LSM directory contains no manifest snapshot"));
-    }
+    let has_version_set = match (found_current, max_manifest_id != 0) {
+        (true, true) => true,
+        (false, false) if max_table_id == 0 => false,
+        (false, false) => {
+            return Err(corruption(
+                "WAL-only legacy layout cannot contain SSTable files",
+            ));
+        }
+        (false, true) => {
+            return Err(corruption(
+                "LSM directory has manifest snapshots but is missing CURRENT",
+            ));
+        }
+        (true, false) => {
+            return Err(corruption(
+                "LSM directory has CURRENT but no manifest snapshot",
+            ));
+        }
+    };
 
     Ok(Layout {
         wal_path: path.join(WAL_FILE_NAME),
         max_table_id,
         max_manifest_id,
+        has_version_set,
     })
 }
 
