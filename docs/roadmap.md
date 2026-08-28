@@ -105,7 +105,13 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   SSTables/manifests are eligible for deletion. Tests cover reopen, mirror fallback after cleanup, retained
   tombstones, and newer L0 state overriding L1.
 - [ ] Prove and implement safe tombstone dropping; compaction v3 deliberately retains deletion markers.
-- [ ] Add compaction fault injection, deterministic differential tests, and instrumentation validation.
+- [x] Add deterministic compaction durable-write fault injection. The harness records replacement-L1,
+  Manifest, first-CURRENT, and mirror-CURRENT publication classes and injects before-write, synchronized
+  torn-output, and post-sync reported failures at each class. Every case poisons the live handle, reopens,
+  verifies all logical keys, and requires exactly the complete four-L0 input version or complete one-L1
+  compacted version; torn immutable files remain unreferenced and torn CURRENT slots fail by checksum.
+- [ ] Add deterministic compaction differential tests and read/write/space-amplification instrumentation
+  validation.
 
 ## Phase 4 — Fair B+ tree versus LSM experiments
 
