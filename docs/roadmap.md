@@ -92,7 +92,10 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   absurd lengths, sequence gaps, tombstones, and undeclared directory entries.
 - [x] Implement immutable sorted tables with complete indexes, per-record/index/header/footer checksums,
   whole-file checksum validation, full 4 KiB-key/1 MiB-value support, and manifest-bound key/extent metadata.
-- [ ] Add Bloom filters with measured false-positive configuration.
+- [x] Add embedded checksummed SSTable v2 Bloom filters with 10 bits/key and 7 deterministic probes.
+  SSTable v1 remains readable; v2 open validates every indexed key as filter-positive before point reads
+  may trust a negative result. A fixed 10,000-key / 50,000-absent-key corpus produces 422 false positives
+  (0.844%) and remains gated below 2%; corruption and tombstone-key coverage are tested explicitly.
 - [x] Implement tombstone-aware multi-SSTable point/range reads plus crash-safe flush manifest recovery.
   Tests cover authoritative SSTable/manifest corruption, latest-CURRENT-slot fallback with WAL replay,
   unreferenced canonical orphans, mutable WAL tails, and maximum-value flush/reopen.

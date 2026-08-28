@@ -3,8 +3,8 @@
 This document specifies the WAL and in-memory half of Phase 3. The WAL byte format remains version 1,
 but WALs are now canonical numbered segments selected by Manifest v2. Indexed SSTables, immutable
 manifest snapshots, mirrored `CURRENT`, flush publication, and the cross-file rotation/reclamation
-protocol are specified with `docs/lsm-sstable-manifest-format.md`. Bloom filters, levels, and compaction
-remain deferred. Consequently the engine is executable correctness evidence, but not yet a candidate for
+protocol and SSTable v2 Bloom filters are specified with `docs/lsm-sstable-manifest-format.md`. Levels
+and compaction remain deferred. Consequently the engine is executable correctness evidence, but not yet a candidate for
 B+ tree versus LSM performance claims.
 
 All encoded integers are unsigned little-endian. Keys and values follow the common 4,096-byte and
@@ -114,8 +114,8 @@ is no background worker or concurrent mutation contract; one caller and one proc
 
 ## Explicitly deferred
 
-The following still require focused design plus executable evidence: Bloom filters, block/cache layout,
-levels and overlap policy, tombstone dropping rules, compaction and obsolete-SSTable/manifest deletion,
+The following still require focused design plus executable evidence: block/cache layout, levels and
+overlap policy, tombstone dropping rules, compaction and obsolete-SSTable/manifest deletion,
 compaction fault injection, read/write/space amplification instrumentation, and performance comparisons.
 SSTable/Manifest v2/CURRENT bytes, flush crash states, and WAL rotation/reclamation are specified in
 `docs/lsm-sstable-manifest-format.md`.

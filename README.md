@@ -24,7 +24,7 @@ persistent point/range engine; the LSM now has a WAL/MemTable plus crash-publish
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, immutable manifest snapshots, mirrored `CURRENT` publication, crash-safe WAL rotation/reclamation, tombstones, and half-open range scans; no Bloom filters, levels, or compaction yet |
+| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, immutable manifest snapshots, mirrored `CURRENT` publication, crash-safe WAL rotation/reclamation, tombstones, and half-open range scans; no levels or compaction yet |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -57,8 +57,11 @@ id and first sequence. When the published SSTable watermark reaches the active W
 creates and synchronizes a new empty WAL, publishes a new manifest that names it, mirrors that same
 manifest into the other `CURRENT` slot, and only then removes obsolete WAL segments. Reopen therefore
 needs only the manifest-selected WAL suffix while both CURRENT mirrors remain valid after reclamation.
-There are still no Bloom filters, levels, or compaction, so this remains correctness/recovery evidence—not
-yet a fair B+ tree performance comparison participant.
+New SSTables use format v2 with a checksummed 10-bits/key, 7-probe Bloom section embedded in the same
+immutable file; v1 SSTables remain readable. Open validates every indexed key as Bloom-positive before
+point reads may use a negative filter result to skip an SSTable, so the probabilistic structure cannot
+silently introduce a false negative. Levels and compaction remain absent, so this is still not a fair
+B+ tree performance comparison participant.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
@@ -66,8 +69,8 @@ and a bounded half-open ordered range API `[start, end)`, with `end = None` mean
 in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
 does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
 serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
-multi-process writers, LSM Bloom filters/levels/compaction, replication, SQL, MVCC, Raft, graph,
-time-series, and columnar execution are not implemented.
+multi-process writers, LSM levels/compaction, replication, SQL, MVCC, Raft, graph, time-series,
+and columnar execution are not implemented.
 
 ## Run the laboratory
 
@@ -119,8 +122,10 @@ canonical incomplete final record. Frozen MemTables become synchronized immutabl
 immutable manifest is published through mirrored `CURRENT`. WAL reclamation is a second publication
 step: a new empty segment is synchronized, Manifest v2 names its id/first sequence, both CURRENT mirrors
 are moved to that same manifest, the old WAL handle is closed, and only then are obsolete canonical WAL
-segments removed. Unknown entries, identity mismatches, sequence gaps, absurd lengths, unexplained tails,
-and complete checksum failures fail closed.
+segments removed. SSTable v2 embeds its Bloom filter inside the same synchronized immutable file; the
+filter has its own checksummed parameter/payload encoding and is also covered by the SSTable whole-file
+checksum. Unknown entries, identity mismatches, sequence gaps, absurd lengths, unexplained tails, and
+complete checksum failures fail closed.
 
 The B+ tree pager uses a different commit unit. Two checksummed 4 KiB superblocks alternate metadata
 generations. A newly allocated immutable page is synchronized before `page_count + 1` is written to

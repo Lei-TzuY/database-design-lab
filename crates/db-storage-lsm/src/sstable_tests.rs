@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -6,6 +7,8 @@ use db_core::{KvEngine, MAX_VALUE_BYTES};
 use tempfile::tempdir;
 
 use super::manifest::{CURRENT_FILE_NAME, CURRENT_SLOT_BYTES};
+use super::memtable::VersionedEntry;
+use super::sstable::SsTable;
 use super::{LsmEngine, MUTABLE_MEMTABLE_BYTES_LIMIT};
 
 fn large_value(byte: u8) -> Vec<u8> {
@@ -107,6 +110,27 @@ fn referenced_sstable_corruption_fails_closed_after_wal_reclamation() {
 }
 
 #[test]
+fn referenced_sstable_bloom_corruption_fails_closed() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    {
+        let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+        engine.put(b"a", &large_value(0x35)).expect("put a");
+        engine
+            .put(b"b", &large_value(0x36))
+            .expect("put b and flush Bloom-backed SSTable");
+        assert_eq!(engine.stats().expect("stats").sstables, 1);
+    }
+
+    // SSTable v2: 64-byte file header + 40-byte Bloom header, so byte 105 lies in the bit payload.
+    flip_byte(&numbered_file(&path, "sst-", ".sst", 1), 105);
+    let error = LsmEngine::open(&path).expect_err("Bloom corruption must fail closed");
+    assert!(error.to_string().contains("corrupt"));
+    let verify_error = LsmEngine::verify(&path).expect_err("verify must reject Bloom corruption");
+    assert!(verify_error.to_string().contains("corrupt"));
+}
+
+#[test]
 fn torn_latest_current_slot_after_rotation_uses_same_manifest_and_reclaimed_wal() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
@@ -202,4 +226,62 @@ fn canonical_orphans_are_ignored_and_ids_skip_past_them() {
     assert!(numbered_file(&path, "MANIFEST-", "", 100).exists());
     reopened.reopen().expect("reopen after skipping orphan ids");
     assert!(reopened.stats().expect("final stats").sstables >= 2);
+}
+
+#[test]
+fn sstable_v2_embeds_bloom_without_false_negatives_for_values_or_tombstones() {
+    let directory = tempdir().expect("temporary directory");
+    let mut entries = BTreeMap::new();
+    for sequence in 1_u64..=512 {
+        let key = format!("key-{sequence:04}").into_bytes();
+        let value = (sequence % 7 != 0).then(|| sequence.to_le_bytes().to_vec());
+        entries.insert(key, VersionedEntry { sequence, value });
+    }
+    let table = SsTable::create_new(directory.path(), 1, 512, &entries).expect("create SSTable v2");
+    assert_eq!(table.format_version(), 2);
+    for key in entries.keys() {
+        assert_eq!(table.bloom_may_contain(key), Some(true));
+        assert_eq!(
+            table.get(key).expect("point read"),
+            entries.get(key).cloned()
+        );
+    }
+
+    let absent = (0_u64..10_000)
+        .map(|value| format!("absent-{value:05}").into_bytes())
+        .find(|key| table.bloom_may_contain(key) == Some(false))
+        .expect("Bloom filter must reject at least one deterministic absent key");
+    assert_eq!(table.get(&absent).expect("Bloom-negative read"), None);
+}
+
+#[test]
+fn legacy_sstable_v1_remains_readable_without_a_filter() {
+    let directory = tempdir().expect("temporary directory");
+    let mut entries = BTreeMap::new();
+    entries.insert(
+        b"alpha".to_vec(),
+        VersionedEntry {
+            sequence: 1,
+            value: Some(b"one".to_vec()),
+        },
+    );
+    entries.insert(
+        b"tombstone".to_vec(),
+        VersionedEntry {
+            sequence: 2,
+            value: None,
+        },
+    );
+    let table = SsTable::create_legacy_v1_for_test(directory.path(), 7, 2, &entries)
+        .expect("create/read legacy SSTable v1");
+    assert_eq!(table.format_version(), 1);
+    assert_eq!(table.bloom_may_contain(b"alpha"), None);
+    assert_eq!(
+        table.get(b"alpha").expect("legacy point read"),
+        entries.get(b"alpha".as_slice()).cloned()
+    );
+    assert_eq!(
+        table.get(b"tombstone").expect("legacy tombstone read"),
+        entries.get(b"tombstone".as_slice()).cloned()
+    );
 }

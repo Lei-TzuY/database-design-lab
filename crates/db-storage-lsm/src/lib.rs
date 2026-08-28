@@ -3,10 +3,11 @@
 //! Mutations are synchronized to the WAL before entering the mutable MemTable. When a table freezes,
 //! it is synchronously written as an indexed/checksummed SSTable, a new immutable manifest snapshot is
 //! synchronized, and only then is the new version set published through one slot of mirrored `CURRENT`.
-//! The WAL deliberately retains complete history in this phase; `durable_sequence` lets reopen skip the
-//! prefix already represented by published SSTables. Bloom filters, WAL reclamation, levels, and
-//! compaction remain later Phase 3 work.
+//! WAL segments rotate only after published SSTables cover their complete sequence range. SSTable v2
+//! embeds a checksummed Bloom filter for point-read rejection; levels and compaction remain later
+//! Phase 3 work.
 
+mod bloom;
 mod manifest;
 mod memtable;
 mod sstable;
