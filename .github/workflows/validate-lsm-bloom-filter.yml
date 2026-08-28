@@ -20,10 +20,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply Bloom integration patch
+      - name: Apply Bloom integration and evidence patches
         run: |
           python .github/scripts/apply_lsm_bloom_filter.py
           python .github/scripts/fix_lsm_bloom_round2.py
+          python .github/scripts/finalize_lsm_bloom.py
       - name: Validate
         run: |
           cargo fmt --all
@@ -38,6 +39,6 @@ jobs:
           fi
           git config user.name "LeiZ"
           git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
-          git add crates/db-storage-lsm/src/bloom.rs crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/sstable.rs crates/db-storage-lsm/src/sstable_tests.rs
-          git commit -m "feat(lsm): embed validated SSTable Bloom filters"
+          git add README.md docs/design-space.md docs/lsm-sstable-manifest-format.md docs/lsm-wal-format.md docs/roadmap.md crates/db-storage-lsm/src/bloom.rs crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/sstable.rs crates/db-storage-lsm/src/sstable_tests.rs
+          git commit -m "docs(lsm): lock Bloom filter evidence"
           git push origin HEAD:feat/lsm-bloom-filter
