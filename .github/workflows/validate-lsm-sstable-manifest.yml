@@ -20,13 +20,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Apply staged fixes
+        run: python .github/scripts/fix_lsm_sstable_manifest.py
       - name: Validate
         run: |
           cargo fmt --all
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-      - name: Commit rustfmt output
+      - name: Commit validated implementation
         shell: bash
         run: |
           if git diff --quiet; then
@@ -34,6 +36,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/manifest.rs crates/db-storage-lsm/src/sstable.rs
-          git commit -m "style(lsm): apply rustfmt"
+          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/manifest.rs crates/db-storage-lsm/src/memtable.rs crates/db-storage-lsm/src/sstable.rs crates/db-storage-lsm/src/tests.rs
+          git commit -m "feat(lsm): validate SSTable manifest foundation"
           git push origin HEAD:feat/lsm-sstable-manifest
