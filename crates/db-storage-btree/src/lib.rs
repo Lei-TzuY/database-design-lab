@@ -100,6 +100,36 @@ impl PageKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableWriteKind {
+    AppendPage(PageKind),
+    RecycledPage(PageKind),
+    AllocationSuperblock,
+    RootSuperblock,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultMode {
+    BeforeWrite,
+    TornWrite,
+    AfterSync,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FaultSpec {
+    event_index: usize,
+    mode: FaultMode,
+}
+
+#[cfg(test)]
+fn injected_fault(kind: DurableWriteKind, mode: FaultMode) -> BtreeError {
+    BtreeError::Io(io::Error::other(format!(
+        "injected durable-write fault at {kind:?} with mode {mode:?}"
+    )))
+}
+
 /// One validated 4 KiB slotted page value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
@@ -344,6 +374,10 @@ pub struct Pager {
     cache: PageCache,
     recovered_allocation: Option<RecoveredAllocation>,
     poisoned: bool,
+    #[cfg(test)]
+    fault_spec: Option<FaultSpec>,
+    #[cfg(test)]
+    fault_trace: Vec<DurableWriteKind>,
 }
 
 impl std::fmt::Debug for Pager {
@@ -387,6 +421,10 @@ impl Pager {
             cache: PageCache::new(cache_capacity),
             recovered_allocation: None,
             poisoned: false,
+            #[cfg(test)]
+            fault_spec: None,
+            #[cfg(test)]
+            fault_trace: Vec::new(),
         })
     }
 
@@ -450,6 +488,10 @@ impl Pager {
             cache: PageCache::new(cache_capacity),
             recovered_allocation,
             poisoned: false,
+            #[cfg(test)]
+            fault_spec: None,
+            #[cfg(test)]
+            fault_trace: Vec::new(),
         })
     }
 
@@ -545,16 +587,17 @@ impl Pager {
             ));
         }
 
-        let write_result = (|| -> io::Result<()> {
-            self.file.seek(SeekFrom::Start(expected_bytes))?;
-            self.file.write_all(&page.bytes)?;
-            self.file.sync_data()
-        })();
-        if let Err(error) = write_result {
+        if let Err(error) = self.write_durable_bytes(
+            expected_bytes,
+            &page.bytes,
+            DurableWriteKind::AppendPage(page.kind()),
+        ) {
             self.poisoned = true;
-            return Err(BtreeError::Io(error));
+            return Err(error);
         }
-        if let Err(error) = write_superblock(&mut self.file, next) {
+        if let Err(error) =
+            self.write_superblock_durable(next, DurableWriteKind::AllocationSuperblock)
+        {
             self.poisoned = true;
             return Err(error);
         }
@@ -563,6 +606,92 @@ impl Pager {
         let page_id = page.page_id;
         self.cache.insert(page);
         Ok(page_id)
+    }
+
+    fn commit_recycled_page(&mut self, page: Page) -> Result<u64> {
+        self.ensure_usable()?;
+        page.validate()?;
+        self.validate_committed_page_id(page.page_id)?;
+        let page_id = page.page_id;
+        let offset = page_offset(page_id)?;
+        if let Err(error) = self.write_durable_bytes(
+            offset,
+            &page.bytes,
+            DurableWriteKind::RecycledPage(page.kind()),
+        ) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.cache.insert(page);
+        Ok(page_id)
+    }
+
+    fn write_superblock_durable(
+        &mut self,
+        superblock: Superblock,
+        kind: DurableWriteKind,
+    ) -> Result<()> {
+        let offset = u64::from(superblock.slot)
+            .checked_mul(PAGE_SIZE_U64)
+            .ok_or_else(|| corruption(0, "superblock offset overflowed u64"))?;
+        self.write_durable_bytes(offset, &superblock.encode(), kind)
+    }
+
+    fn write_durable_bytes(
+        &mut self,
+        offset: u64,
+        bytes: &[u8],
+        _kind: DurableWriteKind,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            let event_index = self.fault_trace.len();
+            self.fault_trace.push(_kind);
+            if let Some(spec) = self.fault_spec {
+                if spec.event_index == event_index {
+                    match spec.mode {
+                        FaultMode::BeforeWrite => {
+                            return Err(injected_fault(_kind, spec.mode));
+                        }
+                        FaultMode::TornWrite => {
+                            let prefix = (bytes.len() / 2).max(1);
+                            self.file.seek(SeekFrom::Start(offset))?;
+                            self.file.write_all(&bytes[..prefix])?;
+                            self.file.sync_data()?;
+                            return Err(injected_fault(_kind, spec.mode));
+                        }
+                        FaultMode::AfterSync => {
+                            self.file.seek(SeekFrom::Start(offset))?;
+                            self.file.write_all(bytes)?;
+                            self.file.sync_data()?;
+                            return Err(injected_fault(_kind, spec.mode));
+                        }
+                    }
+                }
+            }
+        }
+
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(bytes)?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn begin_fault_trace_for_test(&mut self) {
+        self.fault_spec = None;
+        self.fault_trace.clear();
+    }
+
+    #[cfg(test)]
+    fn inject_fault_for_test(&mut self, event_index: usize, mode: FaultMode) {
+        self.fault_spec = Some(FaultSpec { event_index, mode });
+        self.fault_trace.clear();
+    }
+
+    #[cfg(test)]
+    fn fault_trace_for_test(&self) -> &[DurableWriteKind] {
+        &self.fault_trace
     }
 
     /// Reads and validates one committed data page.
@@ -618,7 +747,7 @@ impl Pager {
             page_count: self.active.page_count,
             root_page_id: encoded,
         };
-        if let Err(error) = write_superblock(&mut self.file, next) {
+        if let Err(error) = self.write_superblock_durable(next, DurableWriteKind::RootSuperblock) {
             self.poisoned = true;
             return Err(error);
         }
@@ -986,16 +1115,6 @@ fn read_superblock(file: &mut File, slot: u8) -> Result<Superblock> {
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(&mut bytes)?;
     Superblock::decode(&bytes, slot)
-}
-
-fn write_superblock(file: &mut File, superblock: Superblock) -> Result<()> {
-    let offset = u64::from(superblock.slot)
-        .checked_mul(PAGE_SIZE_U64)
-        .ok_or_else(|| corruption(0, "superblock offset overflowed u64"))?;
-    file.seek(SeekFrom::Start(offset))?;
-    file.write_all(&superblock.encode())?;
-    file.sync_data()?;
-    Ok(())
 }
 
 fn alternate_slot(slot: u8) -> u8 {

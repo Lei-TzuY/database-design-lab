@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
-use std::io::{self, Seek, SeekFrom, Write};
 
 use super::{BPlusTree, Page, PageKind, Result};
-use crate::{corruption, page_offset, SUPERBLOCK_COUNT};
+use crate::{corruption, SUPERBLOCK_COUNT};
 
 impl BPlusTree {
     pub(super) fn refresh_reusable_pages(&mut self) -> Result<()> {
@@ -33,23 +32,7 @@ impl BPlusTree {
             return self.pager.commit_new_page(page);
         }
 
-        self.pager.ensure_usable()?;
-        page.validate()?;
-        self.pager.validate_committed_page_id(page.page_id)?;
-        let page_id = page.page_id;
-        let offset = page_offset(page_id)?;
-        let write_result = (|| -> io::Result<()> {
-            self.pager.file.seek(SeekFrom::Start(offset))?;
-            self.pager.file.write_all(&page.bytes)?;
-            self.pager.file.sync_data()
-        })();
-        if let Err(error) = write_result {
-            self.pager.poisoned = true;
-            return Err(error.into());
-        }
-
-        self.pager.cache.insert(page);
-        Ok(page_id)
+        self.pager.commit_recycled_page(page)
     }
 
     #[cfg(test)]
