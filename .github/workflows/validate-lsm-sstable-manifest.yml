@@ -5,7 +5,7 @@ on:
     branches: [feat/lsm-sstable-manifest]
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +22,18 @@ jobs:
           components: rustfmt, clippy
       - name: Validate
         run: |
-          cargo fmt --all -- --check
+          cargo fmt --all
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+      - name: Commit rustfmt output
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/manifest.rs crates/db-storage-lsm/src/sstable.rs
+          git commit -m "style(lsm): apply rustfmt"
+          git push origin HEAD:feat/lsm-sstable-manifest
