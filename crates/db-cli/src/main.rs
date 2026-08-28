@@ -9,6 +9,7 @@ use db_core::{
     GeneratorConfig, KvEngine, Outcome, Workload,
 };
 use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
+use db_storage_lsm::LsmEngine;
 use db_storage_memory::MemoryEngine;
 use serde::Serialize;
 use thiserror::Error;
@@ -54,15 +55,18 @@ enum Command {
         /// Engine implementation.
         #[arg(long, value_enum)]
         engine: EngineKind,
-        /// Required for `log`; forbidden for `memory`.
+        /// Required for persistent engines; forbidden for `memory`.
         #[arg(long)]
         path: Option<PathBuf>,
         /// Versioned workload JSON file.
         workload: PathBuf,
     },
-    /// Compare the reference engine and a fresh append-log file step by step.
+    /// Compare the reference engine and a fresh persistent candidate step by step.
     Differential {
-        /// New append-log file to create; existing paths are rejected.
+        /// Persistent candidate engine.
+        #[arg(long, value_enum, default_value_t = PersistentEngineKind::Log)]
+        engine: PersistentEngineKind,
+        /// New candidate file or directory to create; existing paths are rejected.
         #[arg(long)]
         path: PathBuf,
         /// Versioned workload JSON file.
@@ -87,6 +91,13 @@ enum Command {
 enum EngineKind {
     Memory,
     Log,
+    Lsm,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PersistentEngineKind {
+    Log,
+    Lsm,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,22 +182,32 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
                 (EngineKind::Log, None) => Err(CliError::Usage(
                     "--path is required for the append-log engine".to_owned(),
                 )),
+                (EngineKind::Lsm, Some(path)) => {
+                    let mut engine = LsmEngine::open(path)?;
+                    print_run_report(&mut engine, &workload)
+                }
+                (EngineKind::Lsm, None) => Err(CliError::Usage(
+                    "--path is required for the LSM engine".to_owned(),
+                )),
             }
         }
-        Command::Differential { path, workload } => {
+        Command::Differential {
+            engine,
+            path,
+            workload,
+        } => {
             let workload = read_workload(&workload)?;
             let mut reference = MemoryEngine::new();
-            let mut candidate = LogEngine::create_new(path)?;
-            let reference_name = reference.capabilities().name;
-            let candidate_name = candidate.capabilities().name;
-            let report = compare_workload(&mut reference, &mut candidate, &workload)?;
-            write_stdout_json(&DifferentialCliReport {
-                reference_engine: reference_name,
-                candidate_engine: candidate_name,
-                workload_format_version: workload.format_version,
-                seed: workload.seed,
-                steps_checked: report.steps_checked,
-            })
+            match engine {
+                PersistentEngineKind::Log => {
+                    let mut candidate = LogEngine::create_new(path)?;
+                    print_differential_report(&mut reference, &mut candidate, &workload)
+                }
+                PersistentEngineKind::Lsm => {
+                    let mut candidate = LsmEngine::create_new(path)?;
+                    print_differential_report(&mut reference, &mut candidate, &workload)
+                }
+            }
         }
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
@@ -208,6 +229,23 @@ fn print_run_report<E: KvEngine>(engine: &mut E, workload: &Workload) -> Result<
         seed: workload.seed,
         steps_executed: outcomes.len(),
         outcomes,
+    })
+}
+
+fn print_differential_report<E: KvEngine>(
+    reference: &mut MemoryEngine,
+    candidate: &mut E,
+    workload: &Workload,
+) -> Result<(), CliError> {
+    let reference_name = reference.capabilities().name;
+    let candidate_name = candidate.capabilities().name;
+    let report = compare_workload(reference, candidate, workload)?;
+    write_stdout_json(&DifferentialCliReport {
+        reference_engine: reference_name,
+        candidate_engine: candidate_name,
+        workload_format_version: workload.format_version,
+        seed: workload.seed,
+        steps_checked: report.steps_checked,
     })
 }
 
@@ -249,7 +287,7 @@ mod tests {
     use clap::Parser;
     use db_core::Workload;
 
-    use super::{Cli, Command, EngineKind};
+    use super::{Cli, Command, EngineKind, PersistentEngineKind};
 
     #[test]
     fn suggested_run_shape_parses() {
@@ -278,5 +316,44 @@ mod tests {
         let workload: Workload = serde_json::from_str(encoded).expect("parse semantics fixture");
         workload.validate().expect("validate semantics fixture");
         assert_eq!(workload.steps.len(), 11);
+    }
+
+    #[test]
+    fn lsm_run_and_differential_shapes_parse() {
+        let run = Cli::try_parse_from([
+            "db-lab",
+            "run",
+            "--engine",
+            "lsm",
+            "--path",
+            "engine-dir",
+            "workload.json",
+        ])
+        .expect("parse LSM run");
+        assert!(matches!(
+            run.command,
+            Command::Run {
+                engine: EngineKind::Lsm,
+                ..
+            }
+        ));
+
+        let differential = Cli::try_parse_from([
+            "db-lab",
+            "differential",
+            "--engine",
+            "lsm",
+            "--path",
+            "fresh-dir",
+            "workload.json",
+        ])
+        .expect("parse LSM differential");
+        assert!(matches!(
+            differential.command,
+            Command::Differential {
+                engine: PersistentEngineKind::Lsm,
+                ..
+            }
+        ));
     }
 }

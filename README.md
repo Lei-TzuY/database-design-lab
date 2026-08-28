@@ -15,8 +15,8 @@ constraints—not a list of products we pretend to have built.
 
 ## Implemented baseline
 
-The workspace currently contains five crates with executable behavior. The B+ tree is now a common
-persistent `KvEngine` for point operations and bounded ordered range scans:
+The workspace currently contains six crates with executable behavior. The B+ tree is a complete common
+persistent point/range engine; the LSM work has begun with an explicitly bounded WAL/MemTable stage:
 
 | Crate | Implemented role |
 | --- | --- |
@@ -24,6 +24,7 @@ persistent `KvEngine` for point operations and bounded ordered range scans:
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
+| `db-storage-lsm` | Common persistent `KvEngine` foundation with its own versioned/checksummed WAL, synced PUT/tombstone records, deterministic recovery, ordered mutable/immutable MemTables, and half-open range scans; no SSTables or compaction yet |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -47,14 +48,21 @@ error may expose the new state. Torn recycled orphans remain unreachable and are
 overwriteable by a later mutation. Physical file compaction/truncation and arbitrary device/cache
 power-loss modeling remain deferred.
 
+The LSM foundation is not an adapter around `db-storage-log`: it owns a distinct WAL format and keeps
+sequence-tagged values/tombstones in an ordered mutable MemTable that freezes at a documented 64 KiB
+resident estimate. Reads search immutable tables newest-first, ranges resolve the newest sequence per
+key, and reopen deterministically reconstructs those table boundaries from the WAL. Because immutable
+tables are not yet flushed to SSTables and the WAL is never reclaimed, this is correctness/recovery
+evidence—not an LSM performance baseline and not yet a fair B+ tree comparison participant.
+
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
 and a bounded half-open ordered range API `[start, end)`, with `end = None` meaning unbounded. The
-in-memory oracle and B+ tree advertise ordered range support; the append log deliberately does not,
-because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still serializes
-point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
-multi-process writers, compaction, replication, SQL, MVCC, Raft, graph, time-series, and columnar
-execution are not implemented.
+in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
+does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
+serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
+multi-process writers, LSM SSTables/compaction, replication, SQL, MVCC, Raft, graph, time-series, and
+columnar execution are not implemented.
 
 ## Run the laboratory
 
@@ -65,6 +73,7 @@ cargo test --workspace --locked
 cargo run -p db-cli -- generate --seed 24301 --operations 1000 \
   --reopen-every 17 --output workload.json
 cargo run -p db-cli -- differential --path experiment.db workload.json
+cargo run -p db-cli -- differential --engine lsm --path experiment-lsm workload.json
 cargo run -p db-cli -- verify experiment.db
 cargo run -p db-cli -- inspect experiment.db --show-values
 ```
@@ -74,6 +83,8 @@ Run one engine and print every observable outcome:
 ```console
 cargo run -p db-cli -- run --engine memory fixtures/workloads/semantics-v1.json
 cargo run -p db-cli -- run --engine log --path lab.db \
+  fixtures/workloads/semantics-v1.json
+cargo run -p db-cli -- run --engine lsm --path lsm-dir \
   fixtures/workloads/semantics-v1.json
 ```
 
@@ -93,6 +104,14 @@ changes or the call returns. On reopen, every complete valid record is replayed.
 but incomplete final append is discarded by truncating back to its starting offset and synchronizing
 the repair. A checksum failure, absurd length, unknown record kind/version, sequence discontinuity, or
 unrecognized tail fails closed. `verify` reports a recoverable partial tail without modifying it.
+
+The LSM foundation stores its own WAL in an engine directory. Its header and each PUT/DELETE record
+carry independent magic/version fields, bounded little-endian lengths, contiguous sequence numbers,
+and header/full-record CRC-32 checksums. `write_all` and `sync_data` complete before a mutation enters
+the MemTable or returns. Reopen replays complete records and truncates only a structurally canonical
+incomplete final record; unknown directory entries, invalid headers, sequence gaps, absurd lengths,
+unexplained tails, and complete checksum failures fail closed. No SSTable or manifest commit guarantee
+is claimed because those formats do not exist yet.
 
 The B+ tree pager uses a different commit unit. Two checksummed 4 KiB superblocks alternate metadata
 generations. A newly allocated immutable page is synchronized before `page_count + 1` is written to
@@ -117,7 +136,8 @@ These guarantees do not include multi-operation transactions, concurrent-process
 directory-entry durability for initial file creation, protection against lying storage hardware, or
 cryptographic integrity. An I/O error during a persistent commit has an ambiguous outcome; the live
 handle is poisoned and must be reopened. See [the append-log format](docs/on-disk-format.md),
-[the B+ tree page format](docs/btree-page-format.md), and
+[the B+ tree page format](docs/btree-page-format.md),
+[the LSM WAL/MemTable format](docs/lsm-wal-format.md), and
 [the experimental constitution](docs/experimental-constitution.md) for exact fault models.
 
 ## Experimental discipline
@@ -130,6 +150,8 @@ handle is poisoned and must be reopened. See [the append-log format](docs/on-dis
 - [B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, copy-on-write
   insert/delete publication, key/value overflow chains, split/rebalance behavior, validation, and current
   crash-state limits.
+- [LSM WAL/MemTable foundation](docs/lsm-wal-format.md): directory/WAL bytes, replay and tail policy,
+  deterministic MemTable freezing, and explicitly deferred SSTable/manifest behavior.
 - [Roadmap](docs/roadmap.md): evidence-linked completed items and deliberately deferred phases.
 
 GitHub Actions runs formatting, Clippy with warnings denied, tests, and rustdoc on stable Rust, checks

@@ -49,8 +49,10 @@ pub enum DbError {
         /// Version supported by this build.
         supported: u64,
     },
-    /// The append engine cannot safely continue after an ambiguous write failure.
-    #[error("engine is poisoned by a previous append failure; reopen it before continuing")]
+    /// A persistent engine cannot safely continue after an ambiguous write failure.
+    #[error(
+        "engine is poisoned by a previous persistent-write failure; reopen it before continuing"
+    )]
     Poisoned,
 }
 

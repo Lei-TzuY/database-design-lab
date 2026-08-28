@@ -76,8 +76,15 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
 
 Begin only after the B+ tree and common ordered semantics are trustworthy.
 
-- [ ] Specify WAL/SSTable/manifest formats and atomic version-set transitions.
-- [ ] Implement WAL recovery and mutable/immutable MemTables.
+- [ ] Complete the WAL/SSTable/manifest format family and atomic version-set transitions. WAL v1 and
+  its single-file directory policy are specified in `docs/lsm-wal-format.md`; SSTable, manifest,
+  CURRENT, flush-install, and WAL-reclamation formats remain deliberately unspecified until their
+  implementation PR.
+- [x] Implement an independent versioned/checksummed WAL with synchronized PUT/tombstone records,
+  fail-closed bounded replay, canonical incomplete-tail recovery, and ordered mutable/immutable
+  MemTables. Fixed-seed differential tests cover reopen after every operation; deterministic tests
+  cover freeze/read precedence, ordered ranges, 4 KiB/1 MiB bounds, structural WAL prefixes, bit flips,
+  absurd lengths, sequence gaps, tombstones, and undeclared directory entries.
 - [ ] Implement immutable sorted tables with indexes and checksums.
 - [ ] Add Bloom filters with measured false-positive configuration.
 - [ ] Implement tombstone-aware reads, levels, compaction, and crash-safe manifest recovery.

@@ -25,6 +25,8 @@ pub enum StorageArchitecture {
     AppendLog,
     /// Checksummed page file with a copy-on-write B+ tree and mirrored metadata.
     BPlusTree,
+    /// Write-ahead log plus ordered mutable and immutable MemTables.
+    LsmTree,
 }
 
 /// Concurrency contract actually enforced by the current engine boundary.
@@ -55,6 +57,8 @@ pub enum CrashRecovery {
     TruncatedFinalAppend,
     /// Durable COW pages are published by alternating checksummed root metadata copies.
     MirroredCopyOnWritePages,
+    /// A versioned checksummed write-ahead log reconstructs MemTables during reopen.
+    WriteAheadLogReplay,
 }
 
 /// Distribution behavior currently exposed by an engine.
@@ -90,7 +94,7 @@ pub struct EngineCapabilities {
     pub max_value_bytes: usize,
 }
 
-/// Minimal engine contract proven by the reference and append-log implementations.
+/// Minimal engine contract proven by the current reference and persistent implementations.
 pub trait KvEngine {
     /// Returns explicit capabilities for experiment validation.
     fn capabilities(&self) -> EngineCapabilities;

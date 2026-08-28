@@ -5,6 +5,7 @@ members = [
     "crates/db-storage-memory",
     "crates/db-storage-log",
     "crates/db-storage-btree",
+    "crates/db-storage-lsm",
     "crates/db-cli",
 ]
 
