@@ -1,0 +1,47 @@
+name: Validate LSM amplification instrumentation
+
+on:
+  push:
+    branches:
+      - feat/lsm-amplification-instrumentation
+    paths:
+      - .github/scripts/apply_lsm_amplification.py
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply instrumentation patch
+        run: python .github/scripts/apply_lsm_amplification.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+      - name: Commit validated implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/sstable.rs crates/db-storage-lsm/src/instrumentation_tests.rs
+          if git diff --cached --quiet; then
+            echo "No implementation changes to commit"
+          else
+            git commit -m "feat(lsm): add amplification instrumentation"
+            git push
+          fi
