@@ -10,7 +10,9 @@
 //! records that proof point in Manifest v5 before obsolete sorted-table/manifest files are reclaimed.
 //! Deterministic
 //! compaction fault tests exercise pre-write, torn durable output, and post-sync reported errors at
-//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries.
+//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries. A second
+//! deterministic evidence layer compares multi-cycle compaction against the in-memory oracle and exposes
+//! exact integer read/data-write/sorted-table-space amplification counters for hand-computable traces.
 
 mod bloom;
 mod manifest;

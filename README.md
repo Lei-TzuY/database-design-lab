@@ -25,7 +25,7 @@ engine:
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, and half-open range scans |
+| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, half-open range scans, deterministic compaction differential tests, and exact integer amplification instrumentation |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -72,8 +72,15 @@ SSTable and manifest are synchronized, the same manifest is published through bo
 only then are obsolete files eligible for best-effort deletion. Deterministic fault injection covers both
 nonempty and table-less compaction under before-write, torn-output, and post-sync reported failures.
 Reopen must select either the complete four-L0 input version or the complete GC-published version; no
-mixed version is accepted. The current one-run L1 policy remains correctness evidence rather than a
-production leveled strategy, so this is still not a fair B+ tree performance comparison participant.
+mixed version is accepted. Deterministic two-cycle compaction traces are also checked against the
+in-memory oracle, including overwrite, delete, range, and reopen behavior. Process-local instrumentation
+reports raw integer numerator/denominator pairs for point SSTable consults per GET, SSTable versions
+decoded per range result, WAL+flush+compaction-output data bytes per acknowledged logical mutation byte,
+and authoritative SSTable bytes per durable live key+value byte. These are deliberately engine-level
+structural/data-path counters: manifest/CURRENT bytes, filesystem metadata, cache/device traffic, and
+hardware writeback are not silently folded into them. The current one-run L1 policy remains correctness
+evidence rather than a production leveled strategy, so this is still not a fair B+ tree performance
+comparison participant.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,

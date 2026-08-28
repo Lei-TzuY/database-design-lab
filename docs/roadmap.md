@@ -123,14 +123,18 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   A second matrix covers table-less compaction and requires either all four tombstone L0 inputs or the
   complete zero-SSTable GC version, including the retained-WAL state when rotation is skipped after a
   reported compaction failure.
-- [ ] Add deterministic compaction differential tests and read/write/space-amplification instrumentation
-  validation.
+- [x] Add deterministic compaction differential tests and read/write/space-amplification instrumentation
+  validation. Two full-set compaction cycles are checked against the in-memory oracle across overwrites,
+  deletes, ranges, and reopen. Resettable process-local counters expose exact integer point-read, range-read,
+  data-write, and sorted-table-space ratios; hand-computable tests prove 5/3 point consults, 10/9 range
+  versions/results, WAL framing, first-compaction input=flush-output bytes, and authoritative SSTable sizes.
 
 ## Phase 4 — Fair B+ tree versus LSM experiments
 
 - [ ] Freeze common point/range/write/delete/durability semantics and capability preflight.
 - [ ] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.
-- [ ] Validate counters for read, write, and space amplification on hand-computable traces.
+- [ ] Generalize validated read/write/space amplification counters into a common cross-engine experiment
+  contract. LSM-local hand-computable counters are now proven; B+ tree parity and shared reporting remain.
 - [ ] Measure recovery cost and compaction stall distributions.
 - [ ] Archive raw data and environment manifests; publish no result before this evidence exists.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
