@@ -8,7 +8,9 @@
 //! L0 tables trigger a synchronous full-set merge into one non-overlapping L1 run, published through
 //! mirrored CURRENT before obsolete sorted-table/manifest files are reclaimed. Deterministic
 //! compaction fault tests exercise pre-write, torn durable output, and post-sync reported errors at
-//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries.
+//! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries. Manifest v4
+//! persists the observed SSTable-id high watermark, permits a durable empty version set, and lets full-set
+//! compaction elide tombstones only after every older table version is part of the same merge.
 
 mod bloom;
 mod manifest;

@@ -1,13 +1,14 @@
-# LSM SSTable, manifest, WAL, and L0/L1 compaction v3
+# LSM SSTable, manifest, WAL, and L0/L1 compaction v4
 
 This document specifies persistent sorted-table publication plus crash-safe WAL segmentation and
 reclamation. Mutations are acknowledged by a checksummed WAL segment before entering memory. A frozen
 MemTable is installed as an immutable indexed SSTable through an immutable manifest snapshot and mirrored
 `CURRENT`; when that durable watermark reaches the active WAL tail, the manifest can atomically switch
 the version set to a new empty WAL and reclaim older segments only after both CURRENT mirrors move.
-SSTable v2 embeds a validated Bloom filter. Manifest v3 additionally records each table's level and
-implements a correctness-first overlapping-L0 / single-run-L1 compaction policy. Safe tombstone dropping
-remains outside this version.
+SSTable v2 embeds a validated Bloom filter. Manifest v3 introduced explicit table levels and the
+correctness-first overlapping-L0 / single-run-L1 policy. Manifest v4 keeps the descriptor encoding,
+persists SSTable-id allocation history, permits durable-empty checkpoints, and allows safe tombstone
+elision only during full-set compaction.
 
 All integers are unsigned little-endian. The common 4,096-byte key and 1,048,576-byte value limits
 remain authoritative. SSTables keep sequence numbers and explicit tombstones so reads can resolve
@@ -118,35 +119,46 @@ A `MANIFEST-%016d` is a complete version-set snapshot, not an append log. Manife
 64-byte header and remains readable with implicit WAL id 1 / first sequence 1. Manifest v2 introduced the
 80-byte header containing manifest id, durable sequence, table count, descriptor-body length, authoritative
 WAL id, WAL first sequence, reserved zeros, and header CRC. Manifest v3 keeps that 80-byte header and
-changes only the SSTable descriptor body.
+changes the SSTable descriptor body. Manifest v4 keeps the v3 descriptor bytes and assigns header bytes
+64..72 to a persistent `table_id_high_watermark`; bytes 72..76 remain reserved zero. The header CRC still
+covers bytes 0..75.
 
-Manifest v1/v2 descriptors have a 40-byte prefix and are interpreted as level 0 for compatibility. New
-Manifest v3 descriptors use a 48-byte prefix: table id, file bytes, entry count, durable sequence, a u32
-level, a zero u32 reserved field, smallest/largest-key lengths, key bounds, and descriptor CRC. The
-implemented policy accepts only levels 0 and 1 and at most one L1 descriptor. Descriptors remain ordered
-by strictly increasing table id and durable sequence. The manifest-level durable sequence must equal the
-newest descriptor's watermark, or zero when the table set is empty. No manifest is accepted merely because
-the WAL could reconstruct its data: a manifest selected by CURRENT is authoritative persistent state, so
-checksum, level, or descriptor corruption fails closed.
+Manifest v1/v2 descriptors have a 40-byte prefix and are interpreted as level 0 for compatibility.
+Manifest v3/v4 descriptors use a 48-byte prefix: table id, file bytes, entry count, durable sequence, a
+u32 level, a zero u32 reserved field, smallest/largest-key lengths, key bounds, and descriptor CRC. v1-v3
+files remain readable and derive their in-memory table-id watermark from the largest active descriptor.
+New v4 files persist the greater allocation history explicitly, including canonical crash-orphan ids that
+may later be deleted. The watermark must never be below an active descriptor id. The implemented policy
+accepts only levels 0 and 1 and at most one L1 descriptor. For nonempty version sets, the manifest durable
+sequence still equals the newest descriptor watermark. Manifest v4 additionally permits `tables = []`
+with `durable_sequence > 0`: this is a durable-empty checkpoint proving that full-set compaction has
+consumed history through that sequence. Such a checkpoint requires a nonzero table-id watermark. Semantic
+corruption tests recompute valid header/file CRCs after lowering the watermark and still require open to
+fail closed, proving these are format invariants rather than checksum accidents.
 
 ## Level policy and full-set compaction
 
 Every normal MemTable flush is published as level 0. L0 tables may overlap arbitrarily; sequence numbers,
 not key-range placement, decide which version wins. When four L0 descriptors are authoritative, the engine
-synchronously compacts **all** authoritative SSTables (the existing L1 run, if present, plus every L0)
-into one new level-1 SSTable. This deliberately simple policy means L1 is a single sorted non-overlapping
-run rather than a production size-tiered or multi-run leveled design. A later flush again creates L0 and
-may override L1 by sequence; four later L0 tables trigger another full-set rewrite.
+synchronously compacts **all** authoritative SSTables (the existing L1 run, if present, plus every L0).
+This deliberately simple policy means L1 is at most one sorted non-overlapping run rather than a production
+size-tiered or multi-run leveled design. A later flush again creates L0 and may override L1 by sequence;
+four later L0 tables trigger another full-set rewrite.
 
-Compaction overlays every input key by highest sequence, preserving explicit tombstones. Tombstones are
-not elided in v3 even though full-set compaction creates a useful future proof point: safe dropping is a
-separate milestone so deletion history is never discarded by an unstated assumption.
+Compaction first overlays every input key by highest sequence, then drops entries whose newest state is a
+tombstone. This is safe specifically because the input set is exhaustive: after the compacted version is
+published, there is no older authoritative SSTable outside the merge that a removed tombstone would need
+to suppress. WAL replay applies only records with sequence greater than the manifest durable watermark.
+If live values remain, they are written to one replacement L1. If every newest entry is a tombstone, no
+replacement SSTable is created; Manifest v4 records the same durable watermark and an empty table set.
 
 The crash-publication order is:
 
 1. Keep the old manifest/SSTables authoritative while reading all compaction inputs.
-2. Create the replacement L1 SSTable at a fresh canonical id and `sync_all` it.
-3. Create and `sync_all` a new Manifest v3 that references only that L1 output and the unchanged active WAL.
+2. If live values remain, create the replacement L1 SSTable at a fresh canonical id and `sync_all` it;
+   an empty result deliberately skips this step.
+3. Create and `sync_all` a new Manifest v4 that references the optional L1 output, unchanged active WAL,
+   durable sequence, and observed SSTable-id high watermark.
 4. Publish the new manifest through the next CURRENT generation and `sync_data`.
 5. Publish the **same manifest id** through the other CURRENT mirror at generation + 1 and `sync_data`.
 6. Only after both mirrors are self-contained on the compacted version may the live engine drop old table
@@ -156,18 +168,24 @@ Therefore interruption before the first CURRENT publication leaves the complete 
 between the two CURRENT writes both complete versions still have their physical inputs; after the second
 write either valid mirror selects the same compacted manifest, so old files are redundant. Deterministic
 tests corrupt the newer CURRENT mirror after obsolete-file cleanup and require the older mirror to reopen
-the single L1 run successfully. They also verify tombstone retention and a newer L0 value overriding an
-older L1 tombstone across reopen.
+the compacted version successfully. They verify physical tombstone elision, a newer L0 value overriding
+compacted state across reopen, and a 64-tombstone workload compacting to `durable_sequence = 64` with zero
+SSTables. Reopen/verify preserve that empty checkpoint, and the next flushed table continues above the
+persisted id high watermark rather than reusing old ids. A crash-retry regression adds canonical orphan
+SSTable id 99, publishes an empty checkpoint that cleans it up, then requires the next table to be id 100.
 
-The compaction fault matrix records the four durable publication classes in order: replacement L1
-SSTable, Manifest v3, first CURRENT slot, then mirror CURRENT slot. Each class is exercised under a
+The nonempty compaction fault matrix records four durable publication classes in order: replacement L1
+SSTable, Manifest v4, first CURRENT slot, then mirror CURRENT slot. Each class is exercised under a
 before-write error, a synchronized torn-output aftermath, and an after-sync reported error. Torn
 SSTable/Manifest cases truncate the new immutable file to half its committed extent; torn CURRENT cases
 overwrite half of the selected 4 KiB slot and synchronize the damaged bytes. The triggering live handle
-is poisoned and must be reopened. Before the first CURRENT becomes fully durable, reopen must select the
+is poisoned and must be reopened. Before the first CURRENT becomes fully durable, reopen selects the
 complete four-L0 input version; an after-sync error from the first CURRENT and every mirror-stage error
-select the complete one-L1 version. Every case rechecks all logical keys plus `verify`, so a structurally
-mixed publication cannot pass merely because point reads happen to agree.
+selects the complete one-L1 version. Empty-output compaction has no L1 write, so its stable trace is
+Manifest -> first CURRENT -> mirror CURRENT; all three classes receive the same three fault modes in a
+separate nine-case matrix, and reopen must select either four L0 tombstone tables or the durable-empty
+checkpoint. Every case rechecks logical results plus `verify`, so a structurally mixed publication cannot
+pass merely because deleted point reads happen to agree.
 
 ## Mirrored CURRENT publication
 
@@ -216,8 +234,8 @@ ordering, not a claim about hardware that violates that contract.
 Rotation is eligible only when the active WAL contains at least one record and its `next_sequence` is
 exactly `durable_sequence + 1`; this proves no unflushed mutable suffix still depends on that segment. The
 engine then creates and synchronizes a new empty canonical WAL whose first sequence is
-`durable_sequence + 1`, writes/synchronizes a new Manifest v3 naming the new WAL and unchanged SSTable
-set, and publishes that manifest through the next CURRENT generation.
+`durable_sequence + 1`, writes/synchronizes a new Manifest v4 naming the new WAL and unchanged optional
+SSTable set, and publishes that manifest through the next CURRENT generation.
 
 At this point the older CURRENT mirror may still select the previous manifest/WAL, so the old WAL is not
 yet reclaimable. The engine writes the **same new manifest id** into the other CURRENT slot at the next
@@ -236,13 +254,15 @@ Point reads search mutable/frozen MemTables first and then authoritative SSTable
 v2, manifest key bounds and the validated Bloom filter can reject a point lookup before index/data record
 decoding. Ordered range scans ignore Bloom filters, merge sequence-tagged SSTable state and the active
 WAL/MemTable tail, keep the newest version of each key, remove tombstones, and apply the common half-open
-bounds/limit. The current L0/L1 compactor removes superseded physical table versions only after
-double-mirror publication, but deliberately retains logical tombstones.
+bounds/limit. The current full-set L0/L1 compactor removes superseded physical table versions and safe
+logical tombstones only after crash-safe version publication; an all-deleted state is represented by a
+Manifest v4 durable-empty checkpoint rather than a dummy SSTable.
 
 ## Explicitly deferred
 
-Safe tombstone elision, generalized size-based/multi-run levels, block/cache design, and
-read/write/space-amplification instrumentation remain separate evidence milestones. Bloom
-filtering is part of SSTable v2; level metadata and full-set L0-to-L1 publication are part of Manifest v3;
-WAL segment rotation/reclamation remains part of the implemented crash-state protocol. Parent-directory
+Generalized size-based/multi-run levels, block/cache design, deterministic compaction differential traces,
+and read/write/space-amplification instrumentation remain separate evidence milestones. Bloom filtering
+is part of SSTable v2; explicit levels began in Manifest v3; persistent allocation history, durable-empty
+checkpoints, and safe full-set tombstone elision are part of Manifest v4; WAL segment rotation/reclamation
+remains part of the implemented crash-state protocol. Parent-directory
 durability remains subject to the repository-wide portable-fsync caveat.

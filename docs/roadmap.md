@@ -100,11 +100,15 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   Tests cover authoritative SSTable/manifest corruption, latest-CURRENT-slot fallback with WAL replay,
   unreferenced canonical orphans, mutable WAL tails, and maximum-value flush/reopen.
 - [x] Add an explicit L0/L1 overlap policy and crash-published compaction. Manifest v3 records levels;
-  flushes enter overlapping L0 and four L0 tables trigger a full-set rewrite into one L1 run. The output
-  SSTable and manifest are synchronized and published through both CURRENT mirrors before obsolete
-  SSTables/manifests are eligible for deletion. Tests cover reopen, mirror fallback after cleanup, retained
-  tombstones, and newer L0 state overriding L1.
-- [ ] Prove and implement safe tombstone dropping; compaction v3 deliberately retains deletion markers.
+  flushes enter overlapping L0 and four L0 tables trigger a full-set rewrite into at most one L1 run. The
+  replacement state and manifest are synchronized and published through both CURRENT mirrors before
+  obsolete SSTables/manifests are eligible for deletion. Tests cover reopen, mirror fallback after cleanup,
+  and newer L0 state overriding compacted L1 state.
+- [x] Prove and implement safe full-set tombstone elision with Manifest v4 durable-empty checkpoints. v4
+  persists an SSTable-id high watermark in header bytes 64..72, keeps v1-v3 readable, and permits a
+  positive durable sequence with zero tables after all newest entries are deletions. Tests prove physical
+  tombstone removal, zero-SSTable reopen/verify, post-empty allocation continuing at table 5, crash-orphan
+  id 99 forcing later table 100 even after cleanup, v3-to-v4 upgrade, and fail-closed semantic corruption.
 - [x] Add deterministic compaction durable-write fault injection. The harness records replacement-L1,
   Manifest, first-CURRENT, and mirror-CURRENT publication classes and injects before-write, synchronized
   torn-output, and post-sync reported failures at each class. Every case poisons the live handle, reopens,
