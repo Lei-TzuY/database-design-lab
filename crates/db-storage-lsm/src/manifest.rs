@@ -13,10 +13,12 @@ const CURRENT_MAGIC: [u8; 8] = *b"DBLSMCUR";
 const CURRENT_FORMAT_VERSION: u16 = 1;
 const MANIFEST_MAGIC: [u8; 8] = *b"DBLSMMAN";
 const MANIFEST_FORMAT_VERSION_V1: u16 = 1;
-const MANIFEST_FORMAT_VERSION: u16 = 2;
+const MANIFEST_FORMAT_VERSION_V2: u16 = 2;
+const MANIFEST_FORMAT_VERSION: u16 = 3;
 const MANIFEST_HEADER_LEN_V1: usize = 64;
 const MANIFEST_HEADER_LEN: usize = 80;
-const DESCRIPTOR_PREFIX_LEN: usize = 40;
+const LEGACY_DESCRIPTOR_PREFIX_LEN: usize = 40;
+const DESCRIPTOR_PREFIX_LEN: usize = 48;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VersionSet {
@@ -307,14 +309,14 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
             }
             (MANIFEST_HEADER_LEN_V1, 1, 1)
         }
-        MANIFEST_FORMAT_VERSION => {
+        MANIFEST_FORMAT_VERSION_V2 | MANIFEST_FORMAT_VERSION => {
             if bytes.len() < MANIFEST_HEADER_LEN + 4
                 || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
                     != MANIFEST_HEADER_LEN
                 || bytes[12..16] != [0; 4]
                 || bytes[64..76].iter().any(|byte| *byte != 0)
             {
-                return Err(corruption(10, "invalid v2 manifest header fields"));
+                return Err(corruption(10, "invalid v2/v3 manifest header fields"));
             }
             let expected_header_crc =
                 u32::from_le_bytes(bytes[76..80].try_into().expect("fixed slice"));
@@ -376,7 +378,7 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
     let body_end = crc_offset;
     let mut tables = Vec::with_capacity(table_count);
     for _ in 0..table_count {
-        let (descriptor, next) = decode_descriptor(&bytes, offset, body_end)?;
+        let (descriptor, next) = decode_descriptor(&bytes, offset, body_end, format_version)?;
         tables.push(descriptor);
         offset = next;
     }
@@ -398,6 +400,12 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
 }
 
 fn encode_descriptor(descriptor: &SstableDescriptor) -> Result<Vec<u8>> {
+    if descriptor.level > 1 {
+        return Err(corruption(
+            0,
+            "manifest SSTable level exceeds implemented L1 policy",
+        ));
+    }
     if descriptor.smallest_key.len() > MAX_KEY_BYTES || descriptor.largest_key.len() > MAX_KEY_BYTES
     {
         return Err(corruption(
@@ -419,6 +427,8 @@ fn encode_descriptor(descriptor: &SstableDescriptor) -> Result<Vec<u8>> {
     bytes.extend_from_slice(&descriptor.file_bytes.to_le_bytes());
     bytes.extend_from_slice(&descriptor.entry_count.to_le_bytes());
     bytes.extend_from_slice(&descriptor.durable_sequence.to_le_bytes());
+    bytes.extend_from_slice(&descriptor.level.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes.extend_from_slice(&smallest_len.to_le_bytes());
     bytes.extend_from_slice(&largest_len.to_le_bytes());
     bytes.extend_from_slice(&descriptor.smallest_key);
@@ -432,9 +442,16 @@ fn decode_descriptor(
     bytes: &[u8],
     offset: usize,
     limit: usize,
+    manifest_format_version: u16,
 ) -> Result<(SstableDescriptor, usize)> {
+    let legacy = manifest_format_version <= MANIFEST_FORMAT_VERSION_V2;
+    let prefix_len = if legacy {
+        LEGACY_DESCRIPTOR_PREFIX_LEN
+    } else {
+        DESCRIPTOR_PREFIX_LEN
+    };
     let prefix_end = offset
-        .checked_add(DESCRIPTOR_PREFIX_LEN)
+        .checked_add(prefix_len)
         .ok_or_else(|| corruption(offset as u64, "manifest descriptor extent overflowed"))?;
     if prefix_end > limit {
         return Err(corruption(
@@ -443,17 +460,52 @@ fn decode_descriptor(
         ));
     }
     let prefix = &bytes[offset..prefix_end];
+    let (level, smallest_len_offset, largest_len_offset) = if legacy {
+        (0_u32, 32_usize, 36_usize)
+    } else {
+        if u32::from_le_bytes(prefix[36..40].try_into().expect("fixed slice")) != 0 {
+            return Err(corruption(
+                offset as u64 + 36,
+                "manifest descriptor reserved field is nonzero",
+            ));
+        }
+        (
+            u32::from_le_bytes(prefix[32..36].try_into().expect("fixed slice")),
+            40_usize,
+            44_usize,
+        )
+    };
     let smallest_len = usize::try_from(u32::from_le_bytes(
-        prefix[32..36].try_into().expect("fixed slice"),
+        prefix[smallest_len_offset..smallest_len_offset + 4]
+            .try_into()
+            .expect("fixed slice"),
     ))
-    .map_err(|_| corruption(offset as u64 + 32, "smallest-key length does not fit usize"))?;
+    .map_err(|_| {
+        corruption(
+            offset as u64 + smallest_len_offset as u64,
+            "smallest-key length does not fit usize",
+        )
+    })?;
     let largest_len = usize::try_from(u32::from_le_bytes(
-        prefix[36..40].try_into().expect("fixed slice"),
+        prefix[largest_len_offset..largest_len_offset + 4]
+            .try_into()
+            .expect("fixed slice"),
     ))
-    .map_err(|_| corruption(offset as u64 + 36, "largest-key length does not fit usize"))?;
-    if smallest_len > MAX_KEY_BYTES || largest_len > MAX_KEY_BYTES {
+    .map_err(|_| {
+        corruption(
+            offset as u64 + largest_len_offset as u64,
+            "largest-key length does not fit usize",
+        )
+    })?;
+    if level > 1 {
         return Err(corruption(
             offset as u64 + 32,
+            "manifest SSTable level exceeds implemented L1 policy",
+        ));
+    }
+    if smallest_len > MAX_KEY_BYTES || largest_len > MAX_KEY_BYTES {
+        return Err(corruption(
+            offset as u64 + smallest_len_offset as u64,
             "manifest key bound exceeds common key limit",
         ));
     }
@@ -485,6 +537,7 @@ fn decode_descriptor(
     }
     let descriptor = SstableDescriptor {
         table_id: u64::from_le_bytes(prefix[0..8].try_into().expect("fixed slice")),
+        level,
         file_bytes: u64::from_le_bytes(prefix[8..16].try_into().expect("fixed slice")),
         entry_count: u64::from_le_bytes(prefix[16..24].try_into().expect("fixed slice")),
         durable_sequence: u64::from_le_bytes(prefix[24..32].try_into().expect("fixed slice")),
@@ -528,7 +581,25 @@ fn validate_version_set(
 
     let mut previous_table_id = 0_u64;
     let mut previous_durable = 0_u64;
+    let mut level1_tables = 0_usize;
     for descriptor in tables {
+        if descriptor.level > 1 {
+            return Err(corruption(
+                0,
+                "manifest SSTable level exceeds implemented L1 policy",
+            ));
+        }
+        if descriptor.level == 1 {
+            level1_tables = level1_tables
+                .checked_add(1)
+                .ok_or_else(|| corruption(0, "manifest L1 table count overflowed usize"))?;
+            if level1_tables > 1 {
+                return Err(corruption(
+                    0,
+                    "current L1 policy permits exactly one non-overlapping run",
+                ));
+            }
+        }
         if descriptor.table_id <= previous_table_id {
             return Err(corruption(
                 0,

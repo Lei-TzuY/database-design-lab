@@ -25,6 +25,7 @@ const KIND_DELETE: u8 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SstableDescriptor {
     pub(super) table_id: u64,
+    pub(super) level: u32,
     pub(super) file_bytes: u64,
     pub(super) entry_count: u64,
     pub(super) durable_sequence: u64,
@@ -85,6 +86,24 @@ impl SsTable {
         Self::create_new_with_format(
             directory,
             table_id,
+            0,
+            durable_sequence,
+            entries,
+            FORMAT_VERSION,
+        )
+    }
+
+    pub(super) fn create_new_at_level(
+        directory: &Path,
+        table_id: u64,
+        level: u32,
+        durable_sequence: u64,
+        entries: &BTreeMap<Vec<u8>, VersionedEntry>,
+    ) -> Result<Self> {
+        Self::create_new_with_format(
+            directory,
+            table_id,
+            level,
             durable_sequence,
             entries,
             FORMAT_VERSION,
@@ -101,6 +120,7 @@ impl SsTable {
         Self::create_new_with_format(
             directory,
             table_id,
+            0,
             durable_sequence,
             entries,
             LEGACY_FORMAT_VERSION,
@@ -110,6 +130,7 @@ impl SsTable {
     fn create_new_with_format(
         directory: &Path,
         table_id: u64,
+        level: u32,
         durable_sequence: u64,
         entries: &BTreeMap<Vec<u8>, VersionedEntry>,
         format_version: u16,
@@ -186,6 +207,7 @@ impl SsTable {
 
         let descriptor = SstableDescriptor {
             table_id,
+            level,
             file_bytes: u64::try_from(bytes.len())
                 .map_err(|_| corruption(0, "SSTable file size does not fit u64"))?,
             entry_count,

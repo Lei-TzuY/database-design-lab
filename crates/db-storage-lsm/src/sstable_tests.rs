@@ -223,7 +223,11 @@ fn canonical_orphans_are_ignored_and_ids_skip_past_them() {
         .put(b"d", &large_value(0x64))
         .expect("put d and publish next SSTable");
     assert!(numbered_file(&path, "sst-", ".sst", 100).exists());
-    assert!(numbered_file(&path, "MANIFEST-", "", 100).exists());
+    assert_eq!(
+        fs::read(numbered_file(&path, "sst-", ".sst", 99)).expect("read reserved orphan"),
+        b"orphan sstable",
+        "future allocation must not overwrite an ambiguous canonical orphan id"
+    );
     reopened.reopen().expect("reopen after skipping orphan ids");
     assert!(reopened.stats().expect("final stats").sstables >= 2);
 }

@@ -53,12 +53,18 @@ fn four_overlapping_l0_flush_slots_compact_to_one_l1_and_reopen() {
     assert_eq!(canonical_count(&path, "MANIFEST-", ""), 1);
 
     for (key, value) in &expected {
-        assert_eq!(engine.get(key).expect("get compacted key"), Some(value.clone()));
+        assert_eq!(
+            engine.get(key).expect("get compacted key"),
+            Some(value.clone())
+        );
     }
     engine.reopen().expect("reopen compacted L1");
     assert_eq!(engine.stats().expect("stats after reopen"), stats);
     for (key, value) in &expected {
-        assert_eq!(engine.get(key).expect("get reopened key"), Some(value.clone()));
+        assert_eq!(
+            engine.get(key).expect("get reopened key"),
+            Some(value.clone())
+        );
     }
     let verified = LsmEngine::verify(&path).expect("verify compacted engine");
     assert_eq!(verified.memtables, stats);
@@ -109,9 +115,15 @@ fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
     let stats = engine.stats().expect("mixed-level stats");
     assert_eq!(stats.level0_sstables, 1);
     assert_eq!(stats.level1_sstables, 1);
-    assert_eq!(engine.get(b"victim").expect("newest L0 wins"), Some(b"revived".to_vec()));
+    assert_eq!(
+        engine.get(b"victim").expect("newest L0 wins"),
+        Some(b"revived".to_vec())
+    );
     engine.reopen().expect("reopen mixed levels");
-    assert_eq!(engine.get(b"victim").expect("reopened newest L0"), Some(b"revived".to_vec()));
+    assert_eq!(
+        engine.get(b"victim").expect("reopened newest L0"),
+        Some(b"revived".to_vec())
+    );
 }
 
 #[test]
@@ -139,7 +151,10 @@ fn compaction_moves_both_current_mirrors_before_obsolete_file_cleanup() {
             .try_into()
             .expect("slot1 manifest"),
     );
-    assert_eq!(manifest0, manifest1, "both mirrors must name the cleanup-safe manifest");
+    assert_eq!(
+        manifest0, manifest1,
+        "both mirrors must name the cleanup-safe manifest"
+    );
     assert_eq!(generation0.abs_diff(generation1), 1);
 
     let newer_slot = usize::from(generation1 > generation0);
@@ -151,7 +166,8 @@ fn compaction_moves_both_current_mirrors_before_obsolete_file_cleanup() {
         .expect("open CURRENT to tear newest mirror");
     file.seek(SeekFrom::Start(corrupt_offset as u64))
         .expect("seek CURRENT corruption");
-    file.write_all(&[0x5a]).expect("corrupt newest CURRENT slot");
+    file.write_all(&[0x5a])
+        .expect("corrupt newest CURRENT slot");
     file.sync_all().expect("sync CURRENT corruption");
     drop(file);
 
