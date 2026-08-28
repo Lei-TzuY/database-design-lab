@@ -109,6 +109,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   the watermark through later flush/WAL rotation, and validates legacy v1–v3 manifests with an implicit
   zero watermark. Tests cover physical elision, reinsertion, fully deleted reopen/refill, corrupt
   watermarks, and old/new crash publication.
+- [x] Persist the SSTable allocation frontier through table-less GC and orphan cleanup. Manifest v5
+  extends the header with a monotonic table-id high watermark while preserving the v4 GC field in place;
+  open raises the floor from every canonical SSTable name before cleanup and the next v5 publication
+  makes that reservation durable. Tests prove v1–v4 readability, conservative table-less v4 migration,
+  checksum-valid invalid-watermark rejection, and crash orphan id 99 being followed by id 100 after the
+  orphan name has been removed.
 - [x] Add deterministic compaction durable-write fault injection. The harness records replacement-L1,
   Manifest, first-CURRENT, and mirror-CURRENT publication classes and injects before-write, synchronized
   torn-output, and post-sync reported failures at each class. Every case poisons the live handle, reopens,
