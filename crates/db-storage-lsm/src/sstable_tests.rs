@@ -34,7 +34,7 @@ fn numbered_file(directory: &Path, prefix: &str, suffix: &str, id: u64) -> PathB
 }
 
 #[test]
-fn published_sstable_plus_wal_tail_reopens_without_duplicate_application() {
+fn published_sstable_plus_active_wal_tail_reopens_without_duplicate_application() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
@@ -49,7 +49,9 @@ fn published_sstable_plus_wal_tail_reopens_without_duplicate_application() {
     assert_eq!(before.sstables, 1);
     assert_eq!(before.immutable_memtables, 0);
     assert_eq!(before.durable_sequence, 2);
-    assert_eq!(before.wal_records, 3);
+    assert_eq!(before.active_wal_id, 2);
+    assert_eq!(before.active_wal_first_sequence, 3);
+    assert_eq!(before.wal_records, 1);
     assert_eq!(before.mutable_entries, 1);
 
     engine
@@ -76,13 +78,16 @@ fn maximum_value_flushes_to_sstable_and_reopens() {
     assert_eq!(stats.sstables, 1);
     assert_eq!(stats.durable_sequence, 1);
     assert_eq!(stats.mutable_entries, 0);
+    assert_eq!(stats.wal_records, 0);
+    assert_eq!(stats.active_wal_id, 2);
+    assert_eq!(stats.active_wal_first_sequence, 2);
 
     engine.reopen().expect("reopen maximum value");
     assert_eq!(engine.get(b"max").expect("get maximum value"), Some(value));
 }
 
 #[test]
-fn referenced_sstable_corruption_fails_closed_even_with_full_wal_history() {
+fn referenced_sstable_corruption_fails_closed_after_wal_reclamation() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     {
@@ -102,7 +107,7 @@ fn referenced_sstable_corruption_fails_closed_even_with_full_wal_history() {
 }
 
 #[test]
-fn torn_latest_current_slot_falls_back_and_wal_replays_complete_state() {
+fn torn_latest_current_slot_after_rotation_uses_same_manifest_and_reclaimed_wal() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     let first = large_value(0x41);
@@ -113,20 +118,26 @@ fn torn_latest_current_slot_falls_back_and_wal_replays_complete_state() {
         engine
             .put(b"b", &second)
             .expect("put b and publish first SSTable");
-        assert_eq!(engine.stats().expect("published stats").durable_sequence, 2);
+        let stats = engine.stats().expect("published stats");
+        assert_eq!(stats.durable_sequence, 2);
+        assert_eq!(stats.active_wal_id, 2);
+        assert_eq!(stats.wal_records, 0);
     }
 
-    // Generation 1 is written to physical slot 1; damage it so slot 0 (generation 0) wins.
+    // Rotation publishes the same new manifest to generations 2 and 3. Damage generation 3 in slot 1;
+    // generation 2 still references the same SSTable set and WAL 2 after WAL 1 has been reclaimed.
     flip_byte(
         &path.join(CURRENT_FILE_NAME),
         u64::try_from(CURRENT_SLOT_BYTES + 100).expect("CURRENT offset fits u64"),
     );
 
-    let mut reopened = LsmEngine::open(&path).expect("fallback to prior CURRENT and replay WAL");
+    let mut reopened = LsmEngine::open(&path).expect("fallback to mirrored rotated CURRENT");
     let stats = reopened.stats().expect("fallback stats");
-    assert_eq!(stats.sstables, 0);
-    assert_eq!(stats.durable_sequence, 0);
-    assert_eq!(stats.wal_records, 2);
+    assert_eq!(stats.sstables, 1);
+    assert_eq!(stats.durable_sequence, 2);
+    assert_eq!(stats.active_wal_id, 2);
+    assert_eq!(stats.active_wal_first_sequence, 3);
+    assert_eq!(stats.wal_records, 0);
     assert_eq!(
         reopened.get(b"a").expect("get a after fallback"),
         Some(first)
@@ -147,9 +158,12 @@ fn authoritative_manifest_corruption_fails_closed() {
         engine
             .put(b"b", &large_value(0x52))
             .expect("put b and flush");
+        assert_eq!(engine.stats().expect("stats").active_wal_id, 2);
     }
 
-    flip_byte(&numbered_file(&path, "MANIFEST-", "", 2), 70);
+    // Manifest 2 publishes the SSTable; manifest 3 republishes the same table set bound to WAL 2 and is
+    // mirrored into both CURRENT slots before WAL 1 is removed.
+    flip_byte(&numbered_file(&path, "MANIFEST-", "", 3), 70);
     let error = LsmEngine::open(&path).expect_err("authoritative manifest corruption must fail");
     assert!(error.to_string().contains("corrupt"));
 }

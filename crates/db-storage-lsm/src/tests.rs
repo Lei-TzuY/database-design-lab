@@ -10,8 +10,8 @@ use db_storage_memory::MemoryEngine;
 use tempfile::tempdir;
 
 use super::wal::{
-    checked_record_end, encode_record, MutationKind, RECORD_HEADER_LEN, WAL_FILE_NAME,
-    WAL_HEADER_LEN,
+    checked_record_end, encode_record, file_name as wal_file_name, MutationKind, INITIAL_WAL_ID,
+    RECORD_HEADER_LEN, WAL_HEADER_LEN,
 };
 use super::{LsmEngine, MUTABLE_MEMTABLE_BYTES_LIMIT};
 
@@ -189,7 +189,8 @@ fn interrupted_final_record_recovers_at_structural_prefixes() {
         engine.put(b"a", b"one").expect("first put");
         engine.put(b"b", b"two").expect("second put");
     }
-    let complete = fs::read(complete_path.join(WAL_FILE_NAME)).expect("read complete WAL");
+    let complete =
+        fs::read(complete_path.join(wal_file_name(INITIAL_WAL_ID))).expect("read complete WAL");
     let first_record_len = RECORD_HEADER_LEN + b"a".len() + b"one".len();
     let second_record_offset = WAL_HEADER_LEN + first_record_len;
     let second_record_len = RECORD_HEADER_LEN + b"b".len() + b"two".len();
@@ -199,7 +200,7 @@ fn interrupted_final_record_recovers_at_structural_prefixes() {
         assert!(delta < second_record_len);
         let path = directory.path().join(format!("cut-{delta}"));
         fs::create_dir(&path).expect("create cut directory");
-        let wal_path = path.join(WAL_FILE_NAME);
+        let wal_path = path.join(wal_file_name(INITIAL_WAL_ID));
         fs::write(&wal_path, &complete[..second_record_offset + delta]).expect("write WAL prefix");
 
         let report = LsmEngine::verify(&path).expect("partial WAL is reportable");
@@ -237,7 +238,7 @@ fn complete_checksum_failure_and_unexplained_tail_fail_closed() {
         let mut engine = LsmEngine::create_new(&corrupt_path).expect("create corrupt fixture");
         engine.put(b"key", b"value").expect("put fixture");
     }
-    let wal_path = corrupt_path.join(WAL_FILE_NAME);
+    let wal_path = corrupt_path.join(wal_file_name(INITIAL_WAL_ID));
     let mut encoded = fs::read(&wal_path).expect("read WAL");
     *encoded.last_mut().expect("nonempty WAL") ^= 0x80;
     fs::write(&wal_path, encoded).expect("write checksum corruption");
@@ -251,7 +252,7 @@ fn complete_checksum_failure_and_unexplained_tail_fail_closed() {
     }
     let mut wal = fs::OpenOptions::new()
         .append(true)
-        .open(tail_path.join(WAL_FILE_NAME))
+        .open(tail_path.join(wal_file_name(INITIAL_WAL_ID)))
         .expect("open tail WAL");
     wal.write_all(b"NO").expect("append unknown tail");
     wal.sync_all().expect("sync unknown tail");
@@ -268,7 +269,7 @@ fn wal_header_checksum_and_unknown_version_fail_closed() {
         let engine = LsmEngine::create_new(&checksum_path).expect("create checksum fixture");
         drop(engine);
     }
-    let checksum_wal = checksum_path.join(WAL_FILE_NAME);
+    let checksum_wal = checksum_path.join(wal_file_name(INITIAL_WAL_ID));
     let mut encoded = fs::read(&checksum_wal).expect("read checksum fixture");
     encoded[32] ^= 0x80;
     fs::write(&checksum_wal, encoded).expect("write header corruption");
@@ -284,7 +285,7 @@ fn wal_header_checksum_and_unknown_version_fail_closed() {
         let engine = LsmEngine::create_new(&version_path).expect("create version fixture");
         drop(engine);
     }
-    let version_wal = version_path.join(WAL_FILE_NAME);
+    let version_wal = version_path.join(wal_file_name(INITIAL_WAL_ID));
     let mut encoded = fs::read(&version_wal).expect("read version fixture");
     encoded[8..10].copy_from_slice(&2_u16.to_le_bytes());
     let checksum = crc32fast::hash(&encoded[..36]);
@@ -309,7 +310,7 @@ fn absurd_lengths_and_sequence_discontinuity_fail_before_payload_allocation() {
     record[24..28].copy_from_slice(&header_crc.to_le_bytes());
     let mut header = fresh_wal_header(directory.path());
     header.extend_from_slice(&record[..RECORD_HEADER_LEN]);
-    fs::write(absurd_path.join(WAL_FILE_NAME), header).expect("write absurd WAL");
+    fs::write(absurd_path.join(wal_file_name(INITIAL_WAL_ID)), header).expect("write absurd WAL");
     let error = LsmEngine::open(&absurd_path).expect_err("absurd key length must fail");
     assert_eq!(error.class(), ErrorClass::Corruption);
     assert!(error.to_string().contains("key length"));
@@ -320,7 +321,8 @@ fn absurd_lengths_and_sequence_discontinuity_fail_before_payload_allocation() {
     encoded.extend_from_slice(
         &encode_record(MutationKind::Put, 2, b"key", b"value").expect("encode sequence gap"),
     );
-    fs::write(sequence_path.join(WAL_FILE_NAME), encoded).expect("write sequence gap");
+    fs::write(sequence_path.join(wal_file_name(INITIAL_WAL_ID)), encoded)
+        .expect("write sequence gap");
     let error = LsmEngine::open(&sequence_path).expect_err("sequence gap must fail");
     assert_eq!(error.class(), ErrorClass::Corruption);
     assert!(error.to_string().contains("expected 1"));
@@ -382,7 +384,7 @@ fn fresh_wal_header(root: &std::path::Path) -> Vec<u8> {
     let path = root.join(format!("header-source-{}", unique_suffix(root)));
     let engine = LsmEngine::create_new(&path).expect("create header source");
     drop(engine);
-    fs::read(path.join(WAL_FILE_NAME)).expect("read fresh WAL header")
+    fs::read(path.join(wal_file_name(INITIAL_WAL_ID))).expect("read fresh WAL header")
 }
 
 fn unique_suffix(root: &std::path::Path) -> usize {

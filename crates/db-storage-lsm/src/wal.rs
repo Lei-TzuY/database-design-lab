@@ -6,13 +6,12 @@ use crc32fast::Hasher;
 use db_core::{validate_key_value, DbError, Result, MAX_KEY_BYTES, MAX_VALUE_BYTES};
 use serde::Serialize;
 
-pub(super) const WAL_FILE_NAME: &str = "wal-0000000000000001.log";
+pub(super) const INITIAL_WAL_ID: u64 = 1;
+pub(super) const INITIAL_FIRST_SEQUENCE: u64 = 1;
 pub(super) const WAL_HEADER_LEN: usize = 40;
 const WAL_HEADER_LEN_U64: u64 = WAL_HEADER_LEN as u64;
 const WAL_MAGIC: [u8; 8] = *b"DBLSMWAL";
 const WAL_FORMAT_VERSION: u16 = 1;
-const WAL_ID: u64 = 1;
-const FIRST_SEQUENCE: u64 = 1;
 
 pub(super) const RECORD_HEADER_LEN: usize = 32;
 const RECORD_HEADER_LEN_U64: u64 = RECORD_HEADER_LEN as u64;
@@ -20,6 +19,10 @@ const RECORD_MAGIC: [u8; 4] = *b"LSMR";
 const RECORD_VERSION: u8 = 1;
 const KIND_PUT: u8 = 1;
 const KIND_DELETE: u8 = 2;
+
+pub(super) fn file_name(wal_id: u64) -> String {
+    format!("wal-{wal_id:016}.log")
+}
 
 /// Description of an incomplete final WAL record that open can discard safely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -32,16 +35,20 @@ pub struct RecoveredWalTail {
     pub required_bytes: Option<u64>,
 }
 
-/// Read-only structural summary of the active write-ahead log.
+/// Read-only structural summary of the authoritative write-ahead log segment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WalVerification {
     /// WAL format version.
     pub format_version: u16,
+    /// Canonical WAL segment id encoded in both the file name and header.
+    pub wal_id: u64,
+    /// Sequence required for the first mutation in this segment.
+    pub first_sequence: u64,
     /// Physical bytes observed.
     pub file_bytes: u64,
     /// Prefix ending after the last complete valid record.
     pub valid_bytes: u64,
-    /// Number of complete mutation records.
+    /// Number of complete mutation records in this segment.
     pub record_count: u64,
     /// Sequence required for the next mutation.
     pub next_sequence: u64,
@@ -83,6 +90,8 @@ pub(super) struct Mutation {
 
 pub(super) struct Wal {
     file: File,
+    wal_id: u64,
+    first_sequence: u64,
     next_sequence: u64,
     record_count: u64,
     recovered_tail: Option<RecoveredWalTail>,
@@ -92,6 +101,8 @@ impl std::fmt::Debug for Wal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Wal")
+            .field("wal_id", &self.wal_id)
+            .field("first_sequence", &self.first_sequence)
             .field("next_sequence", &self.next_sequence)
             .field("record_count", &self.record_count)
             .field("recovered_tail", &self.recovered_tail)
@@ -100,25 +111,38 @@ impl std::fmt::Debug for Wal {
 }
 
 impl Wal {
-    pub(super) fn create_new(path: &Path) -> Result<Self> {
+    pub(super) fn create_new(path: &Path, wal_id: u64, first_sequence: u64) -> Result<Self> {
+        if wal_id == 0 || first_sequence == 0 {
+            return Err(corruption(
+                0,
+                "WAL id and first sequence must both be nonzero",
+            ));
+        }
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(path)?;
-        file.write_all(&encode_wal_header())?;
+        file.write_all(&encode_wal_header(wal_id, first_sequence))?;
         file.sync_all()?;
         Ok(Self {
             file,
-            next_sequence: FIRST_SEQUENCE,
+            wal_id,
+            first_sequence,
+            next_sequence: first_sequence,
             record_count: 0,
             recovered_tail: None,
         })
     }
 
-    pub(super) fn open(path: &Path, apply: impl FnMut(Mutation) -> Result<()>) -> Result<Self> {
+    pub(super) fn open(
+        path: &Path,
+        expected_wal_id: u64,
+        expected_first_sequence: u64,
+        apply: impl FnMut(Mutation) -> Result<()>,
+    ) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        let scan = scan_file(&mut file, apply)?;
+        let scan = scan_file(&mut file, expected_wal_id, expected_first_sequence, apply)?;
         if scan.recoverable_tail.is_some() {
             file.set_len(scan.valid_bytes)?;
             file.sync_all()?;
@@ -126,6 +150,8 @@ impl Wal {
         file.seek(SeekFrom::End(0))?;
         Ok(Self {
             file,
+            wal_id: expected_wal_id,
+            first_sequence: expected_first_sequence,
             next_sequence: scan.next_sequence,
             record_count: scan.record_count,
             recovered_tail: scan.recoverable_tail,
@@ -134,10 +160,15 @@ impl Wal {
 
     pub(super) fn verify(
         path: &Path,
+        expected_wal_id: u64,
+        expected_first_sequence: u64,
         apply: impl FnMut(Mutation) -> Result<()>,
     ) -> Result<WalVerification> {
         let mut file = File::open(path)?;
-        Ok(scan_file(&mut file, apply)?.verification())
+        Ok(
+            scan_file(&mut file, expected_wal_id, expected_first_sequence, apply)?
+                .verification(expected_wal_id, expected_first_sequence),
+        )
     }
 
     pub(super) fn append(&mut self, kind: MutationKind, key: &[u8], value: &[u8]) -> Result<u64> {
@@ -163,6 +194,18 @@ impl Wal {
         self.recovered_tail.as_ref()
     }
 
+    pub(super) const fn wal_id(&self) -> u64 {
+        self.wal_id
+    }
+
+    pub(super) const fn first_sequence(&self) -> u64 {
+        self.first_sequence
+    }
+
+    pub(super) const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
     pub(super) const fn record_count(&self) -> u64 {
         self.record_count
     }
@@ -177,9 +220,11 @@ struct ScanResult {
 }
 
 impl ScanResult {
-    fn verification(&self) -> WalVerification {
+    fn verification(&self, wal_id: u64, first_sequence: u64) -> WalVerification {
         WalVerification {
             format_version: WAL_FORMAT_VERSION,
+            wal_id,
+            first_sequence,
             file_bytes: self.file_bytes,
             valid_bytes: self.valid_bytes,
             record_count: self.record_count,
@@ -198,7 +243,12 @@ struct RecordMetadata {
     expected_record_crc: u32,
 }
 
-fn scan_file(file: &mut File, mut apply: impl FnMut(Mutation) -> Result<()>) -> Result<ScanResult> {
+fn scan_file(
+    file: &mut File,
+    expected_wal_id: u64,
+    expected_first_sequence: u64,
+    mut apply: impl FnMut(Mutation) -> Result<()>,
+) -> Result<ScanResult> {
     let file_bytes = file.metadata()?.len();
     if file_bytes < WAL_HEADER_LEN_U64 {
         return Err(corruption(
@@ -210,10 +260,10 @@ fn scan_file(file: &mut File, mut apply: impl FnMut(Mutation) -> Result<()>) -> 
     file.seek(SeekFrom::Start(0))?;
     let mut wal_header = [0_u8; WAL_HEADER_LEN];
     file.read_exact(&mut wal_header)?;
-    validate_wal_header(&wal_header)?;
+    validate_wal_header(&wal_header, expected_wal_id, expected_first_sequence)?;
 
     let mut offset = WAL_HEADER_LEN_U64;
-    let mut expected_sequence = FIRST_SEQUENCE;
+    let mut expected_sequence = expected_first_sequence;
     let mut record_count = 0_u64;
     while offset < file_bytes {
         let remaining = file_bytes
@@ -308,14 +358,14 @@ fn scan_file(file: &mut File, mut apply: impl FnMut(Mutation) -> Result<()>) -> 
     })
 }
 
-fn encode_wal_header() -> [u8; WAL_HEADER_LEN] {
+fn encode_wal_header(wal_id: u64, first_sequence: u64) -> [u8; WAL_HEADER_LEN] {
     let mut header = [0_u8; WAL_HEADER_LEN];
     header[..8].copy_from_slice(&WAL_MAGIC);
     header[8..10].copy_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
     header[10..12].copy_from_slice(&(WAL_HEADER_LEN as u16).to_le_bytes());
     header[12..16].copy_from_slice(&0_u32.to_le_bytes());
-    header[16..24].copy_from_slice(&WAL_ID.to_le_bytes());
-    header[24..32].copy_from_slice(&FIRST_SEQUENCE.to_le_bytes());
+    header[16..24].copy_from_slice(&wal_id.to_le_bytes());
+    header[24..32].copy_from_slice(&first_sequence.to_le_bytes());
     header[32..36].copy_from_slice(&0_u32.to_le_bytes());
     let checksum = crc32fast::hash(&header[..36]);
     header[36..40].copy_from_slice(&checksum.to_le_bytes());
@@ -369,7 +419,11 @@ pub(super) fn encode_record(
     Ok(encoded)
 }
 
-fn validate_wal_header(header: &[u8; WAL_HEADER_LEN]) -> Result<()> {
+fn validate_wal_header(
+    header: &[u8; WAL_HEADER_LEN],
+    expected_wal_id: u64,
+    expected_first_sequence: u64,
+) -> Result<()> {
     if header[..8] != WAL_MAGIC {
         return Err(corruption(0, "LSM WAL magic mismatch"));
     }
@@ -401,11 +455,27 @@ fn validate_wal_header(header: &[u8; WAL_HEADER_LEN]) -> Result<()> {
     if read_u32(&header[12..16]) != 0 {
         return Err(corruption(12, "LSM WAL has unsupported flags"));
     }
-    if read_u64(&header[16..24]) != WAL_ID {
-        return Err(corruption(16, "LSM WAL id does not match file name"));
+    let wal_id = read_u64(&header[16..24]);
+    if wal_id != expected_wal_id {
+        return Err(corruption(
+            16,
+            format!("LSM WAL id {wal_id} does not match authoritative id {expected_wal_id}"),
+        ));
     }
-    if read_u64(&header[24..32]) != FIRST_SEQUENCE {
-        return Err(corruption(24, "LSM WAL first sequence is not 1"));
+    let first_sequence = read_u64(&header[24..32]);
+    if first_sequence != expected_first_sequence {
+        return Err(corruption(
+            24,
+            format!(
+                "LSM WAL first sequence {first_sequence} does not match authoritative sequence {expected_first_sequence}"
+            ),
+        ));
+    }
+    if wal_id == 0 || first_sequence == 0 {
+        return Err(corruption(
+            16,
+            "LSM WAL id and first sequence must both be nonzero",
+        ));
     }
     if read_u32(&header[32..36]) != 0 {
         return Err(corruption(32, "LSM WAL reserved header bytes are nonzero"));

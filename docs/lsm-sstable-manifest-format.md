@@ -1,10 +1,11 @@
-# LSM SSTable and manifest publication v1
+# LSM SSTable, manifest, and WAL publication v2
 
-This document specifies the first persistent sorted-table slice of Phase 3. Mutations are still
-acknowledged by the existing single checksummed WAL before entering memory. A frozen MemTable is now
-installed as an immutable indexed SSTable through an immutable manifest snapshot and a mirrored
-`CURRENT` publication point. Bloom filters, levels, compaction, tombstone dropping, WAL segmentation,
-and WAL reclamation are deliberately outside this version.
+This document specifies persistent sorted-table publication plus crash-safe WAL segmentation and
+reclamation. Mutations are acknowledged by a checksummed WAL segment before entering memory. A frozen
+MemTable is installed as an immutable indexed SSTable through an immutable manifest snapshot and mirrored
+`CURRENT`; when that durable watermark reaches the active WAL tail, Manifest v2 can atomically switch the
+version set to a new empty WAL and reclaim older segments only after both CURRENT mirrors move. Bloom
+filters, levels, compaction, and tombstone dropping remain outside this version.
 
 All integers are unsigned little-endian. The common 4,096-byte key and 1,048,576-byte value limits
 remain authoritative. SSTables keep sequence numbers and explicit tombstones so reads can resolve
@@ -30,10 +31,10 @@ MANIFEST-0000000000000003
 ...
 ```
 
-`CURRENT` determines the authoritative manifest. Canonically named SSTables or manifests not reachable
-through the selected `CURRENT` slot are orphans from an interrupted or superseded install and are not
-opened as authoritative data. They are nevertheless included when choosing the next numeric id, so a
-later flush never overwrites an orphan whose durability outcome was ambiguous. Unknown names and
+`CURRENT` determines the authoritative manifest. That manifest determines the authoritative WAL segment.
+Canonically named SSTables, manifests, or WALs not selected by this chain are orphans from interrupted or
+superseded publication and are not opened as authoritative state. Their ids still reserve numeric space,
+so later allocation never overwrites a file whose durability outcome was ambiguous. Unknown names and
 non-regular entries fail closed.
 
 For compatibility with the earlier WAL/MemTable Phase 3 slice, an existing directory containing
@@ -70,9 +71,12 @@ three views—header/footer/manifest—to agree.
 
 ## Immutable manifest snapshots
 
-A `MANIFEST-%016d` is a complete version-set snapshot, not an append log. Its checksummed header stores
-manifest id, the version set's durable WAL sequence, table count, and descriptor-body length. Every
-SSTable descriptor is individually checksummed, and the entire manifest has a trailing CRC.
+A `MANIFEST-%016d` is a complete version-set snapshot, not an append log. Manifest v1 uses its original
+64-byte header and remains readable with implicit WAL id 1 / first sequence 1. Newly written Manifest v2
+uses an 80-byte header that stores manifest id, durable sequence, table count, descriptor-body length,
+a nonzero authoritative WAL id, and that WAL's nonzero first sequence, followed by reserved zeros and a
+header CRC. Every SSTable descriptor is individually checksummed, and the entire manifest has a trailing
+CRC.
 
 Descriptors are ordered by strictly increasing table id and durable sequence. The manifest-level durable
 sequence must equal the newest descriptor's watermark, or zero when the table set is empty. No manifest
@@ -121,22 +125,36 @@ referenced manifest corruption, canonical unreferenced orphans, published SSTabl
 and 1 MiB value flush/reopen. This is a software/process interruption model under successful OS sync
 ordering, not a claim about hardware that violates that contract.
 
-## WAL retention and reads
+## WAL rotation, mirror safety, and reads
 
-This slice intentionally does **not** reclaim the WAL. The active WAL continues to contain every mutation
-from sequence 1 onward. `durable_sequence` changes only replay application: records at or below the
-selected manifest watermark are validated while scanning the WAL but are not re-applied to MemTables;
-records above it rebuild the unflushed tail.
+Rotation is eligible only when the active WAL contains at least one record and its `next_sequence` is
+exactly `durable_sequence + 1`; this proves no unflushed mutable suffix still depends on that segment. The
+engine then creates and synchronizes a new empty canonical WAL whose first sequence is
+`durable_sequence + 1`, writes/synchronizes a new Manifest v2 naming the new WAL and unchanged SSTable
+set, and publishes that manifest through the next CURRENT generation.
+
+At this point the older CURRENT mirror may still select the previous manifest/WAL, so the old WAL is not
+yet reclaimable. The engine writes the **same new manifest id** into the other CURRENT slot at the next
+generation and synchronizes it. Only after both valid mirrors select the new manifest does it swap/drop
+the old WAL handle and best-effort remove every other canonical WAL segment. This ordering is also
+Windows-safe because no obsolete WAL is removed while its live file handle is retained.
+
+A crash before the first CURRENT update leaves the old manifest/WAL authoritative and the new files as
+canonical orphans. A crash after the first CURRENT update but before mirror completion can select either
+version, so both WALs remain present. After mirror completion, either CURRENT slot selects the same new
+manifest/WAL and old segments are redundant. A replayed frozen MemTable followed by a newer mutable tail
+specifically cannot trigger reclamation until later flushes advance the durable watermark through that
+tail.
 
 Point reads search mutable/frozen MemTables first and then authoritative SSTables newest-first. Ordered
-range scans merge sequence-tagged SSTable state and the in-memory tail, keep the newest version of each
-key, remove tombstones, and apply the common half-open bounds/limit. Compaction is required before old
-table versions or tombstones can be discarded safely.
+range scans merge sequence-tagged SSTable state and the active WAL/MemTable tail, keep the newest version
+of each key, remove tombstones, and apply the common half-open bounds/limit. Compaction is still required
+before old SSTable versions or tombstones can be discarded safely.
 
 ## Explicitly deferred
 
-The next format/protocol work is WAL segment rotation and reclamation. It must not delete a WAL prefix
-until a published version set proves the corresponding sequences are durable and recovery remains
-unambiguous. Bloom filters, leveled placement, overlap rules, compaction selection, crash-safe compaction
-publication, obsolete-file deletion, tombstone elision, block/cache design, and amplification
-instrumentation remain separate evidence milestones.
+Bloom filters, leveled placement, overlap rules, compaction selection, crash-safe compaction publication,
+obsolete SSTable/manifest deletion, tombstone elision, block/cache design, and amplification
+instrumentation remain separate evidence milestones. WAL segment rotation/reclamation is now part of the
+implemented crash-state protocol; parent-directory durability remains subject to the repository-wide
+portable-fsync caveat.

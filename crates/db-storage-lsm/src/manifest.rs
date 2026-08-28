@@ -10,9 +10,12 @@ pub(super) const CURRENT_FILE_NAME: &str = "CURRENT";
 pub(super) const CURRENT_SLOT_BYTES: usize = 4096;
 const CURRENT_FILE_BYTES: usize = CURRENT_SLOT_BYTES * 2;
 const CURRENT_MAGIC: [u8; 8] = *b"DBLSMCUR";
+const CURRENT_FORMAT_VERSION: u16 = 1;
 const MANIFEST_MAGIC: [u8; 8] = *b"DBLSMMAN";
-const FORMAT_VERSION: u16 = 1;
-const MANIFEST_HEADER_LEN: usize = 64;
+const MANIFEST_FORMAT_VERSION_V1: u16 = 1;
+const MANIFEST_FORMAT_VERSION: u16 = 2;
+const MANIFEST_HEADER_LEN_V1: usize = 64;
+const MANIFEST_HEADER_LEN: usize = 80;
 const DESCRIPTOR_PREFIX_LEN: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +23,8 @@ pub(super) struct VersionSet {
     pub(super) current_generation: u64,
     pub(super) manifest_id: u64,
     pub(super) durable_sequence: u64,
+    pub(super) wal_id: u64,
+    pub(super) wal_first_sequence: u64,
     pub(super) tables: Vec<SstableDescriptor>,
 }
 
@@ -33,11 +38,17 @@ pub(super) fn manifest_file_name(manifest_id: u64) -> String {
     format!("MANIFEST-{manifest_id:016}")
 }
 
-pub(super) fn create_initial(directory: &Path) -> Result<VersionSet> {
+pub(super) fn create_initial(
+    directory: &Path,
+    wal_id: u64,
+    wal_first_sequence: u64,
+) -> Result<VersionSet> {
     let version = VersionSet {
         current_generation: 0,
         manifest_id: 1,
         durable_sequence: 0,
+        wal_id,
+        wal_first_sequence,
         tables: Vec::new(),
     };
     write_manifest_new(directory, &version)?;
@@ -70,22 +81,45 @@ pub(super) fn install(
     new_manifest_id: u64,
     durable_sequence: u64,
     tables: Vec<SstableDescriptor>,
+    wal_id: u64,
+    wal_first_sequence: u64,
 ) -> Result<VersionSet> {
     let generation = current
         .current_generation
         .checked_add(1)
         .ok_or_else(|| corruption(0, "CURRENT generation exhausted"))?;
-    validate_table_set(durable_sequence, &tables)?;
+    validate_version_set(durable_sequence, wal_id, wal_first_sequence, &tables)?;
     let next = VersionSet {
         current_generation: generation,
         manifest_id: new_manifest_id,
         durable_sequence,
+        wal_id,
+        wal_first_sequence,
         tables,
     };
     write_manifest_new(directory, &next)?;
+    write_current_slot(directory, generation, new_manifest_id)?;
+    Ok(next)
+}
 
+/// Publishes the same immutable manifest into the other CURRENT mirror at generation + 1.
+///
+/// WAL reclamation uses this after a WAL-reference-changing manifest publication so that both valid
+/// CURRENT slots depend on the new WAL before the old segment is removed.
+pub(super) fn mirror_current(directory: &Path, current: &VersionSet) -> Result<VersionSet> {
+    let generation = current
+        .current_generation
+        .checked_add(1)
+        .ok_or_else(|| corruption(0, "CURRENT generation exhausted while mirroring"))?;
+    write_current_slot(directory, generation, current.manifest_id)?;
+    let mut mirrored = current.clone();
+    mirrored.current_generation = generation;
+    Ok(mirrored)
+}
+
+fn write_current_slot(directory: &Path, generation: u64, manifest_id: u64) -> Result<()> {
     let slot_id = usize::try_from(generation % 2).expect("modulo two fits usize");
-    let slot = encode_current_slot(slot_id, generation, new_manifest_id);
+    let slot = encode_current_slot(slot_id, generation, manifest_id);
     let mut current_file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -95,7 +129,7 @@ pub(super) fn install(
     ))?;
     current_file.write_all(&slot)?;
     current_file.sync_data()?;
-    Ok(next)
+    Ok(())
 }
 
 fn read_current(path: &Path) -> Result<CurrentSlot> {
@@ -149,7 +183,7 @@ fn encode_current_slot(
 ) -> [u8; CURRENT_SLOT_BYTES] {
     let mut bytes = [0_u8; CURRENT_SLOT_BYTES];
     bytes[0..8].copy_from_slice(&CURRENT_MAGIC);
-    bytes[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    bytes[8..10].copy_from_slice(&CURRENT_FORMAT_VERSION.to_le_bytes());
     bytes[10..12].copy_from_slice(&(slot_id as u16).to_le_bytes());
     bytes[16..24].copy_from_slice(&generation.to_le_bytes());
     bytes[24..32].copy_from_slice(&manifest_id.to_le_bytes());
@@ -164,11 +198,11 @@ fn parse_current_slot(bytes: &[u8], physical_slot: usize) -> Result<CurrentSlot>
         return Err(corruption(base, "invalid CURRENT slot magic/length"));
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
-    if version != FORMAT_VERSION {
+    if version != CURRENT_FORMAT_VERSION {
         return Err(DbError::UnsupportedVersion {
             format: "LSM CURRENT",
             found: u64::from(version),
-            supported: u64::from(FORMAT_VERSION),
+            supported: u64::from(CURRENT_FORMAT_VERSION),
         });
     }
     let slot_id = u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice"));
@@ -207,7 +241,12 @@ fn parse_current_slot(bytes: &[u8], physical_slot: usize) -> Result<CurrentSlot>
 }
 
 fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
-    validate_table_set(version.durable_sequence, &version.tables)?;
+    validate_version_set(
+        version.durable_sequence,
+        version.wal_id,
+        version.wal_first_sequence,
+        &version.tables,
+    )?;
     let mut body = Vec::new();
     for descriptor in &version.tables {
         body.extend_from_slice(&encode_descriptor(descriptor)?);
@@ -218,7 +257,7 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
     bytes.extend_from_slice(&body);
 
     bytes[0..8].copy_from_slice(&MANIFEST_MAGIC);
-    bytes[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    bytes[8..10].copy_from_slice(&MANIFEST_FORMAT_VERSION.to_le_bytes());
     bytes[10..12].copy_from_slice(&(MANIFEST_HEADER_LEN as u16).to_le_bytes());
     bytes[16..24].copy_from_slice(&version.manifest_id.to_le_bytes());
     bytes[24..32].copy_from_slice(&version.durable_sequence.to_le_bytes());
@@ -228,8 +267,10 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
             .to_le_bytes(),
     );
     bytes[40..48].copy_from_slice(&body_len.to_le_bytes());
-    let header_crc = crc32fast::hash(&bytes[..60]);
-    bytes[60..64].copy_from_slice(&header_crc.to_le_bytes());
+    bytes[48..56].copy_from_slice(&version.wal_id.to_le_bytes());
+    bytes[56..64].copy_from_slice(&version.wal_first_sequence.to_le_bytes());
+    let header_crc = crc32fast::hash(&bytes[..76]);
+    bytes[76..80].copy_from_slice(&header_crc.to_le_bytes());
     let file_crc = crc32fast::hash(&bytes);
     bytes.extend_from_slice(&file_crc.to_le_bytes());
 
@@ -243,31 +284,58 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
 fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
     let path = directory.join(manifest_file_name(manifest_id));
     let bytes = fs::read(&path)?;
-    if bytes.len() < MANIFEST_HEADER_LEN + 4 {
+    if bytes.len() < MANIFEST_HEADER_LEN_V1 + 4 {
         return Err(corruption(0, "truncated manifest"));
     }
     if bytes[0..8] != MANIFEST_MAGIC {
         return Err(corruption(0, "invalid manifest magic"));
     }
-    let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
-    if version != FORMAT_VERSION {
-        return Err(DbError::UnsupportedVersion {
-            format: "LSM manifest",
-            found: u64::from(version),
-            supported: u64::from(FORMAT_VERSION),
-        });
-    }
-    if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
-        != MANIFEST_HEADER_LEN
-        || bytes[12..16] != [0; 4]
-        || bytes[48..60].iter().any(|byte| *byte != 0)
-    {
-        return Err(corruption(10, "invalid manifest header fields"));
-    }
-    let expected_header_crc = u32::from_le_bytes(bytes[60..64].try_into().expect("fixed slice"));
-    if crc32fast::hash(&bytes[..60]) != expected_header_crc {
-        return Err(corruption(60, "manifest header checksum mismatch"));
-    }
+    let format_version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
+    let (header_len, wal_id, wal_first_sequence) = match format_version {
+        MANIFEST_FORMAT_VERSION_V1 => {
+            if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
+                != MANIFEST_HEADER_LEN_V1
+                || bytes[12..16] != [0; 4]
+                || bytes[48..60].iter().any(|byte| *byte != 0)
+            {
+                return Err(corruption(10, "invalid v1 manifest header fields"));
+            }
+            let expected_header_crc =
+                u32::from_le_bytes(bytes[60..64].try_into().expect("fixed slice"));
+            if crc32fast::hash(&bytes[..60]) != expected_header_crc {
+                return Err(corruption(60, "manifest header checksum mismatch"));
+            }
+            (MANIFEST_HEADER_LEN_V1, 1, 1)
+        }
+        MANIFEST_FORMAT_VERSION => {
+            if bytes.len() < MANIFEST_HEADER_LEN + 4
+                || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
+                    != MANIFEST_HEADER_LEN
+                || bytes[12..16] != [0; 4]
+                || bytes[64..76].iter().any(|byte| *byte != 0)
+            {
+                return Err(corruption(10, "invalid v2 manifest header fields"));
+            }
+            let expected_header_crc =
+                u32::from_le_bytes(bytes[76..80].try_into().expect("fixed slice"));
+            if crc32fast::hash(&bytes[..76]) != expected_header_crc {
+                return Err(corruption(76, "manifest header checksum mismatch"));
+            }
+            (
+                MANIFEST_HEADER_LEN,
+                u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
+                u64::from_le_bytes(bytes[56..64].try_into().expect("fixed slice")),
+            )
+        }
+        _ => {
+            return Err(DbError::UnsupportedVersion {
+                format: "LSM manifest",
+                found: u64::from(format_version),
+                supported: u64::from(MANIFEST_FORMAT_VERSION),
+            });
+        }
+    };
+
     let encoded_manifest_id = u64::from_le_bytes(bytes[16..24].try_into().expect("fixed slice"));
     if encoded_manifest_id != manifest_id {
         return Err(corruption(
@@ -284,7 +352,7 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         bytes[40..48].try_into().expect("fixed slice"),
     ))
     .map_err(|_| corruption(40, "manifest body length does not fit usize"))?;
-    let expected_len = MANIFEST_HEADER_LEN
+    let expected_len = header_len
         .checked_add(body_len)
         .and_then(|len| len.checked_add(4))
         .ok_or_else(|| corruption(40, "manifest extent arithmetic overflowed usize"))?;
@@ -304,7 +372,7 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         ));
     }
 
-    let mut offset = MANIFEST_HEADER_LEN;
+    let mut offset = header_len;
     let body_end = crc_offset;
     let mut tables = Vec::with_capacity(table_count);
     for _ in 0..table_count {
@@ -318,11 +386,13 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
             "manifest contains unexplained descriptor bytes",
         ));
     }
-    validate_table_set(durable_sequence, &tables)?;
+    validate_version_set(durable_sequence, wal_id, wal_first_sequence, &tables)?;
     Ok(VersionSet {
         current_generation: 0,
         manifest_id,
         durable_sequence,
+        wal_id,
+        wal_first_sequence,
         tables,
     })
 }
@@ -435,7 +505,27 @@ fn decode_descriptor(
     Ok((descriptor, descriptor_end))
 }
 
-fn validate_table_set(durable_sequence: u64, tables: &[SstableDescriptor]) -> Result<()> {
+fn validate_version_set(
+    durable_sequence: u64,
+    wal_id: u64,
+    wal_first_sequence: u64,
+    tables: &[SstableDescriptor],
+) -> Result<()> {
+    if wal_id == 0 || wal_first_sequence == 0 {
+        return Err(corruption(
+            0,
+            "manifest WAL id and first sequence must both be nonzero",
+        ));
+    }
+    if wal_first_sequence > durable_sequence.saturating_add(1) {
+        return Err(corruption(
+            0,
+            format!(
+                "manifest WAL first sequence {wal_first_sequence} is beyond durable sequence {durable_sequence} + 1"
+            ),
+        ));
+    }
+
     let mut previous_table_id = 0_u64;
     let mut previous_durable = 0_u64;
     for descriptor in tables {
