@@ -77,7 +77,7 @@ pub(super) fn load(directory: &Path) -> Result<VersionSet> {
     Ok(version)
 }
 
-pub(super) fn install(
+pub(super) fn prepare_install(
     directory: &Path,
     current: &VersionSet,
     new_manifest_id: u64,
@@ -100,7 +100,32 @@ pub(super) fn install(
         tables,
     };
     write_manifest_new(directory, &next)?;
-    write_current_slot(directory, generation, new_manifest_id)?;
+    Ok(next)
+}
+
+pub(super) fn publish_prepared(directory: &Path, prepared: &VersionSet) -> Result<()> {
+    write_current_slot(directory, prepared.current_generation, prepared.manifest_id)
+}
+
+pub(super) fn install(
+    directory: &Path,
+    current: &VersionSet,
+    new_manifest_id: u64,
+    durable_sequence: u64,
+    tables: Vec<SstableDescriptor>,
+    wal_id: u64,
+    wal_first_sequence: u64,
+) -> Result<VersionSet> {
+    let next = prepare_install(
+        directory,
+        current,
+        new_manifest_id,
+        durable_sequence,
+        tables,
+        wal_id,
+        wal_first_sequence,
+    )?;
+    publish_prepared(directory, &next)?;
     Ok(next)
 }
 

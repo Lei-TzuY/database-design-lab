@@ -39,6 +39,30 @@ pub const MUTABLE_MEMTABLE_BYTES_LIMIT: usize = 64 * 1024;
 
 const LEVEL0_COMPACTION_TRIGGER: usize = 4;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionWriteKind {
+    L1Sstable,
+    Manifest,
+    FirstCurrent,
+    MirrorCurrent,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionFaultMode {
+    BeforeWrite,
+    TornWrite,
+    AfterSync,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactionFaultSpec {
+    kind: CompactionWriteKind,
+    mode: CompactionFaultMode,
+}
+
 /// Current WAL/MemTable/SSTable structure counts, not performance instrumentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LsmStats {
@@ -86,6 +110,10 @@ pub struct LsmEngine {
     next_manifest_id: u64,
     next_wal_id: u64,
     poisoned: bool,
+    #[cfg(test)]
+    compaction_fault_spec: Option<CompactionFaultSpec>,
+    #[cfg(test)]
+    compaction_fault_trace: Vec<CompactionWriteKind>,
 }
 
 impl std::fmt::Debug for LsmEngine {
@@ -144,6 +172,10 @@ impl LsmEngine {
             next_manifest_id: 2,
             next_wal_id: 2,
             poisoned: false,
+            #[cfg(test)]
+            compaction_fault_spec: None,
+            #[cfg(test)]
+            compaction_fault_trace: Vec::new(),
         })
     }
 
@@ -206,6 +238,10 @@ impl LsmEngine {
             next_wal_id: checked_next_id(layout.max_wal_id, "WAL")?,
             version,
             poisoned: false,
+            #[cfg(test)]
+            compaction_fault_spec: None,
+            #[cfg(test)]
+            compaction_fault_trace: Vec::new(),
         })
     }
 
@@ -450,9 +486,19 @@ impl LsmEngine {
         let next_table_id = checked_next_id(table_id, "SSTable")?;
         let next_manifest_id = checked_next_id(manifest_id, "manifest")?;
         let durable_sequence = self.version.durable_sequence;
+        #[cfg(test)]
+        self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
         let table =
             SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
-        let compacted = manifest::install(
+        #[cfg(test)]
+        self.compaction_after_file_write_for_test(
+            CompactionWriteKind::L1Sstable,
+            &self.path.join(sstable_file_name(table_id)),
+        )?;
+
+        #[cfg(test)]
+        self.compaction_before_write_for_test(CompactionWriteKind::Manifest)?;
+        let compacted = manifest::prepare_install(
             &self.path,
             &self.version,
             manifest_id,
@@ -461,7 +507,29 @@ impl LsmEngine {
             self.version.wal_id,
             self.version.wal_first_sequence,
         )?;
+        #[cfg(test)]
+        self.compaction_after_file_write_for_test(
+            CompactionWriteKind::Manifest,
+            &self.path.join(manifest::manifest_file_name(manifest_id)),
+        )?;
+
+        #[cfg(test)]
+        self.compaction_before_write_for_test(CompactionWriteKind::FirstCurrent)?;
+        manifest::publish_prepared(&self.path, &compacted)?;
+        #[cfg(test)]
+        self.compaction_after_current_write_for_test(
+            CompactionWriteKind::FirstCurrent,
+            compacted.current_generation,
+        )?;
+
+        #[cfg(test)]
+        self.compaction_before_write_for_test(CompactionWriteKind::MirrorCurrent)?;
         let mirrored = manifest::mirror_current(&self.path, &compacted)?;
+        #[cfg(test)]
+        self.compaction_after_current_write_for_test(
+            CompactionWriteKind::MirrorCurrent,
+            mirrored.current_generation,
+        )?;
         let active_table_id = table.descriptor().table_id;
         let active_manifest_id = mirrored.manifest_id;
 
@@ -473,6 +541,97 @@ impl LsmEngine {
         self.reclaim_obsolete_sstables(active_table_id);
         self.reclaim_obsolete_manifests(active_manifest_id);
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn begin_compaction_fault_trace_for_test(&mut self) {
+        self.compaction_fault_spec = None;
+        self.compaction_fault_trace.clear();
+    }
+
+    #[cfg(test)]
+    fn inject_compaction_fault_for_test(
+        &mut self,
+        kind: CompactionWriteKind,
+        mode: CompactionFaultMode,
+    ) {
+        self.compaction_fault_spec = Some(CompactionFaultSpec { kind, mode });
+        self.compaction_fault_trace.clear();
+    }
+
+    #[cfg(test)]
+    fn compaction_fault_trace_for_test(&self) -> &[CompactionWriteKind] {
+        &self.compaction_fault_trace
+    }
+
+    #[cfg(test)]
+    fn compaction_before_write_for_test(&mut self, kind: CompactionWriteKind) -> Result<()> {
+        self.compaction_fault_trace.push(kind);
+        if self.compaction_fault_spec
+            == Some(CompactionFaultSpec {
+                kind,
+                mode: CompactionFaultMode::BeforeWrite,
+            })
+        {
+            return Err(injected_compaction_fault(
+                kind,
+                CompactionFaultMode::BeforeWrite,
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn compaction_after_file_write_for_test(
+        &self,
+        kind: CompactionWriteKind,
+        path: &Path,
+    ) -> Result<()> {
+        let Some(spec) = self.compaction_fault_spec.filter(|spec| spec.kind == kind) else {
+            return Ok(());
+        };
+        match spec.mode {
+            CompactionFaultMode::BeforeWrite => Ok(()),
+            CompactionFaultMode::TornWrite => {
+                let bytes = fs::metadata(path)?.len();
+                let torn_len = (bytes / 2).max(1);
+                let file = fs::OpenOptions::new().write(true).open(path)?;
+                file.set_len(torn_len)?;
+                file.sync_all()?;
+                Err(injected_compaction_fault(kind, spec.mode))
+            }
+            CompactionFaultMode::AfterSync => Err(injected_compaction_fault(kind, spec.mode)),
+        }
+    }
+
+    #[cfg(test)]
+    fn compaction_after_current_write_for_test(
+        &self,
+        kind: CompactionWriteKind,
+        generation: u64,
+    ) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let Some(spec) = self.compaction_fault_spec.filter(|spec| spec.kind == kind) else {
+            return Ok(());
+        };
+        match spec.mode {
+            CompactionFaultMode::BeforeWrite => Ok(()),
+            CompactionFaultMode::TornWrite => {
+                let slot_id = usize::try_from(generation % 2).expect("modulo two fits usize");
+                let offset = u64::try_from(slot_id * manifest::CURRENT_SLOT_BYTES)
+                    .expect("CURRENT slot offset fits u64");
+                let mut file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(self.path.join(CURRENT_FILE_NAME))?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&vec![0xa5; manifest::CURRENT_SLOT_BYTES / 2])?;
+                file.sync_data()?;
+                Err(injected_compaction_fault(kind, spec.mode))
+            }
+            CompactionFaultMode::AfterSync => Err(injected_compaction_fault(kind, spec.mode)),
+        }
     }
 
     fn reclaim_obsolete_sstables(&self, active_table_id: u64) {
@@ -781,6 +940,16 @@ fn corruption(reason: impl Into<String>) -> DbError {
     }
 }
 
+#[cfg(test)]
+fn injected_compaction_fault(kind: CompactionWriteKind, mode: CompactionFaultMode) -> DbError {
+    io::Error::other(format!(
+        "injected LSM compaction durable-write fault at {kind:?} with mode {mode:?}"
+    ))
+    .into()
+}
+
+#[cfg(test)]
+mod compaction_fault_tests;
 #[cfg(test)]
 mod compaction_tests;
 #[cfg(test)]
