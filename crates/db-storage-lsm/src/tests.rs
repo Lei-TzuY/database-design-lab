@@ -110,7 +110,10 @@ fn frozen_memtables_preserve_newest_values_tombstones_and_ordered_ranges() {
             .put(b"b", &vec![0x22; large])
             .expect("oracle put b")
     );
-    assert_eq!(engine.stats().expect("stats").immutable_memtables, 1);
+    let first_flush = engine.stats().expect("stats after first flush");
+    assert_eq!(first_flush.immutable_memtables, 0);
+    assert_eq!(first_flush.sstables, 1);
+    assert!(first_flush.durable_sequence > 0);
     assert_eq!(
         engine.put(b"a", &vec![0x33; large]).expect("put a newest"),
         reference
@@ -133,7 +136,9 @@ fn frozen_memtables_preserve_newest_values_tombstones_and_ordered_ranges() {
     );
 
     let before = engine.stats().expect("stats before reopen");
-    assert!(before.immutable_memtables >= 2);
+    assert_eq!(before.immutable_memtables, 0);
+    assert!(before.sstables >= 2);
+    assert!(before.durable_sequence > 0);
     let expected = reference
         .range_scan(b"a", Some(b"e"), 16)
         .expect("oracle range");

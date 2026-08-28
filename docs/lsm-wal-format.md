@@ -1,10 +1,10 @@
 # LSM WAL and MemTable foundation v1
 
-This document specifies only the Phase 3 behavior implemented today: one checksummed write-ahead log,
-one ordered mutable MemTable, and zero or more ordered immutable MemTables reconstructed in memory.
-There are no SSTables, manifests, Bloom filters, levels, compaction, background flushes, or WAL
-reclamation yet. Consequently this engine is executable correctness evidence, but not yet a candidate
-for B+ tree versus LSM performance claims.
+This document specifies the WAL and in-memory half of Phase 3. The engine now also has persistent
+indexed SSTables, immutable manifest snapshots, mirrored `CURRENT`, and synchronous flush publication;
+those bytes and crash states are specified separately in `docs/lsm-sstable-manifest-format.md`.
+Bloom filters, WAL rotation/reclamation, levels, and compaction remain deferred. Consequently the engine
+is executable correctness evidence, but not yet a candidate for B+ tree versus LSM performance claims.
 
 All encoded integers are unsigned little-endian. Keys and values follow the common 4,096-byte and
 1,048,576-byte limits. Empty keys and PUT values are valid; a DELETE is distinguished by record kind,
@@ -12,22 +12,22 @@ not by an empty value.
 
 ## Directory layout
 
-An engine path is a directory containing exactly one regular file:
+The active WAL remains the fixed regular file:
 
 ```text
 wal-0000000000000001.log
 ```
 
-Opening an existing empty directory, an unknown entry, a non-regular WAL entry, or a missing WAL fails
-closed. `create_new` atomically reserves the directory name and rejects every existing path. If initial
-WAL creation fails, the reserved but incomplete directory remains invalid rather than being guessed at
-or silently reinitialized. The implementation synchronizes the initial WAL contents, but does not use a
-platform-specific parent-directory sync; a system crash immediately after creation may therefore lose
-the directory entry.
+New engines also contain `CURRENT` and at least one immutable manifest snapshot; published flushes add
+canonical SSTable/manifest files as specified in `docs/lsm-sstable-manifest-format.md`. An exact legacy
+WAL-only directory from the earlier Phase 3 slice remains readable and replays from sequence one; partial
+version-set layouts do not receive that compatibility treatment. Unknown entries and non-regular files
+still fail closed. `create_new` reserves the directory name and rejects every existing path. The
+implementation synchronizes file contents but does not use a portable parent-directory sync protocol.
 
-The fixed file name and WAL id deliberately leave no implied segment-rotation protocol. WAL numbering,
-SSTable naming, temporary-file handling, and manifest publication will be specified together when real
-flush/install behavior exists.
+The fixed WAL file name/id still deliberately defines no segment rotation or reclamation protocol. The
+single WAL retains all complete mutation records even after their sequences are represented by published
+SSTables.
 
 ## WAL header
 
@@ -107,14 +107,16 @@ estimate first. This is a structure threshold, not a measured allocator byte cou
 amplification metric. Replaying the ordered WAL with the same fixed threshold reconstructs the same
 boundaries.
 
-Immutable here means no later mutation changes that in-memory table. It does **not** mean persisted:
-every table still depends on the unreclaimed WAL after restart. There is no background worker or
-concurrent mutation contract; one caller and one process must serialize access.
+Immutable here means no later mutation changes that in-memory table. Frozen tables are now flushed
+synchronously and retired only after SSTable + manifest + CURRENT publication succeeds. The unreclaimed
+WAL remains a redundant recovery source and supplies every sequence above the selected manifest durable
+watermark. There is no background worker or concurrent mutation contract; one caller and one process
+must serialize access.
 
 ## Explicitly deferred
 
-The following require another focused design plus executable evidence: immutable SSTable bytes and
-indexes, block checksums, manifest/CURRENT formats, atomic version-set installation, flush crash states,
-WAL rotation/reclamation, Bloom filters, levels, tombstone dropping rules, compaction, read/write/space
-amplification instrumentation, and performance comparisons. Unknown directory entries are rejected
-precisely because none of those formats has been declared yet.
+The following still require focused design plus executable evidence: WAL segment rotation/reclamation,
+Bloom filters, block/cache layout, levels and overlap policy, tombstone dropping rules, compaction and
+obsolete-file deletion, compaction fault injection, read/write/space amplification instrumentation, and
+performance comparisons. SSTable/manifest/CURRENT bytes and first-stage flush crash states are now
+specified in `docs/lsm-sstable-manifest-format.md`.

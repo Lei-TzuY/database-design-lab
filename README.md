@@ -16,7 +16,7 @@ constraints—not a list of products we pretend to have built.
 ## Implemented baseline
 
 The workspace currently contains six crates with executable behavior. The B+ tree is a complete common
-persistent point/range engine; the LSM work has begun with an explicitly bounded WAL/MemTable stage:
+persistent point/range engine; the LSM now has a WAL/MemTable plus crash-published SSTable/manifest stage:
 
 | Crate | Implemented role |
 | --- | --- |
@@ -24,7 +24,7 @@ persistent point/range engine; the LSM work has begun with an explicitly bounded
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` foundation with its own versioned/checksummed WAL, synced PUT/tombstone records, deterministic recovery, ordered mutable/immutable MemTables, and half-open range scans; no SSTables or compaction yet |
+| `db-storage-lsm` | Common persistent `KvEngine` with its own checksummed WAL, ordered MemTables, indexed/checksummed immutable SSTables, immutable manifest snapshots, mirrored `CURRENT` publication, WAL-tail replay, tombstones, and half-open range scans; no Bloom filters, WAL reclamation, levels, or compaction yet |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -48,12 +48,14 @@ error may expose the new state. Torn recycled orphans remain unreachable and are
 overwriteable by a later mutation. Physical file compaction/truncation and arbitrary device/cache
 power-loss modeling remain deferred.
 
-The LSM foundation is not an adapter around `db-storage-log`: it owns a distinct WAL format and keeps
+The LSM is not an adapter around `db-storage-log`: it owns a distinct WAL format and keeps
 sequence-tagged values/tombstones in an ordered mutable MemTable that freezes at a documented 64 KiB
-resident estimate. Reads search immutable tables newest-first, ranges resolve the newest sequence per
-key, and reopen deterministically reconstructs those table boundaries from the WAL. Because immutable
-tables are not yet flushed to SSTables and the WAL is never reclaimed, this is correctness/recovery
-evidence—not an LSM performance baseline and not yet a fair B+ tree comparison participant.
+resident estimate. A frozen table is synchronously encoded as an indexed/checksummed immutable SSTable,
+then referenced by a checksummed immutable manifest snapshot, and only then published through the
+inactive slot of an 8 KiB mirrored `CURRENT` file. Reopen validates the selected manifest/SSTables and
+replays only WAL sequences above the manifest's durable watermark. The WAL deliberately retains its
+complete history in this slice, and there are no Bloom filters, levels, or compaction, so this remains
+correctness/recovery evidence—not yet a fair B+ tree performance comparison participant.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
@@ -61,8 +63,8 @@ and a bounded half-open ordered range API `[start, end)`, with `end = None` mean
 in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
 does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
 serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
-multi-process writers, LSM SSTables/compaction, replication, SQL, MVCC, Raft, graph, time-series, and
-columnar execution are not implemented.
+multi-process writers, LSM Bloom filters/levels/compaction/WAL reclamation, replication, SQL, MVCC,
+Raft, graph, time-series, and columnar execution are not implemented.
 
 ## Run the laboratory
 
