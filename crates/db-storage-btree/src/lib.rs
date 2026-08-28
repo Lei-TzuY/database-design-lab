@@ -6,8 +6,9 @@
 //! overflow chains for keys through 4 KiB and values through 1 MiB. Mutations synchronize key/value
 //! overflow pages and replacement tree pages before atomically publishing a new root. The tree now
 //! implements the common `KvEngine` point contract plus bounded half-open ordered scans by walking
-//! internal children in key order; physical file compaction and exhaustive mutation-write fault
-//! injection remain deferred.
+//! internal children in key order. Deterministic mutation fault tests inject pre-write, torn-half-
+//! write, and post-sync errors across appended/recycled data pages plus allocation/root superblocks;
+//! physical file compaction and exhaustive device/syscall failure modeling remain deferred.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};

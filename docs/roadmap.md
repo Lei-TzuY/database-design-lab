@@ -66,8 +66,11 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
   descriptors or checksummed overflow blobs in leaves and internal exact-minimum separators; trait-level
   capabilities/reopen match the common contract, and deterministic differential tests cover empty/binary
   keys, the 4 KiB/1 MiB size limits, overwrite, delete, and repeated reopen against the memory oracle.
-- [ ] Add torn-page/update fault injection and deterministic crash-state regressions beyond the
-  unpublished-shadow-page protocol before performance work.
+- [x] Add deterministic mutation fault injection beyond the unpublished-shadow-page protocol. The
+  pager records durable write classes and tests pre-write, synchronized half-write, and post-sync
+  reported failures across appended/recycled overflow, leaf, and internal pages plus allocation/root
+  superblocks. Reopen is constrained to the complete old or complete new tree; tests also cover final
+  root clearing and prove torn recycled orphans can be overwritten safely by a later mutation.
 
 ## Phase 3 — LSM engine
 

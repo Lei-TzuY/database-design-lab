@@ -4,9 +4,10 @@ Format v1 uses immutable checksummed 4,096-byte pages plus mirrored metadata. Th
 layer now defines binary leaf/internal cells, point lookup, copy-on-write insertion/update/deletion,
 root/non-root split propagation, deletion redistribution/merge, root contraction, reachability-derived
 page reuse, checksummed overflow chains for keys through 4 KiB and values through 1 MiB, the
-common point-operation `KvEngine` contract, and bounded half-open ordered range scans. Physical file
-compaction and exhaustive mutation-write fault injection remain deferred. All integers are unsigned
-little-endian unless stated otherwise.
+common point-operation `KvEngine` contract, bounded half-open ordered range scans, and a deterministic
+mutation fault matrix over durable data/metadata write classes. Physical file compaction and exhaustive
+device/syscall failure modeling remain deferred. All integers are unsigned little-endian unless stated
+otherwise.
 
 ## Commit model
 
@@ -60,11 +61,34 @@ A crash before the final root publication leaves the old root authoritative. Ove
 already committed during the earlier steps are
 valid but unreachable copy-on-write history. A torn new-root superblock falls back to the prior valid
 metadata generation, which still names the old root. A crash after the new root metadata is durable
-finds every referenced replacement page already synchronized. This protocol therefore avoids an
-in-place torn-page update problem; it does **not** reclaim unreachable historical pages yet.
+finds every referenced replacement page already synchronized. This protocol therefore avoids repairing a torn reachable page in place. Committed pages from an
+unpublished attempt remain outside the authoritative root and become candidates for the same
+reachability-derived reuse mechanism as older COW history.
 
 The deterministic test suite also constructs a committed-but-unpublished shadow page and verifies that
 reopen continues to return the value reachable through the older root.
+
+## Deterministic mutation fault matrix
+
+The test-only pager injector records durable write events and can fail one selected event in three
+controlled modes: before any bytes are written, after writing and synchronizing half of the 4 KiB image,
+or after writing and synchronizing the complete image but before reporting success to the caller. The
+last mode models an ambiguous acknowledgement: durable state may have advanced even though the API
+returns an I/O error and poisons the live handle. Production builds do not carry the injector state.
+
+| Durable write class | Representative coverage | Reopen invariant after injected error |
+| --- | --- | --- |
+| Appended data page | overflow, leaf, internal | old logical root remains authoritative; a partial tail is truncated, while a fully committed unpublished page is merely unreachable |
+| Allocation superblock | page-count publication | a torn copy falls back to the prior mirror; a fully synchronized copy may commit extra unreachable allocation history, but not a new logical root |
+| Recycled data page | overflow, leaf, internal | old root never references the orphan; even a torn recycled image is later proven safe to overwrite completely and reuse |
+| Final root superblock | root install or root clear | before/torn write reopens the old tree; only a complete synchronized root image followed by an injected error may reopen the complete new tree |
+
+The matrix runs real file writes, `sync_data`, handle poisoning, drop, and reopen. It also covers deleting
+the final key, where the only logical publication is `root = 0`: pre-write/torn metadata faults preserve
+the key, while a post-sync reported error reopens the fully empty tree. These tests establish the legal
+software fault states around the engine's durable-write protocol; they are not a claim that every
+filesystem, controller cache, storage device, or power-loss behavior honors the operating-system sync
+contract.
 
 ## Reachability-derived page reuse
 

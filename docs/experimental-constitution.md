@@ -93,8 +93,13 @@ append I/O error is an ambiguous outcome and poisons the handle until reopen.
 
 Crash consistency is demonstrated through fault injection or prefix/corruption fixtures, never by the
 mere presence of a log or checksum. The B+ tree defines its legal COW/root-publication crash states in
-its page-format specification; exhaustive mutation-write fault injection remains required. Future LSM
-engines must likewise define and test each state transition.
+its page-format specification and exercises a deterministic durable-write matrix: appended/recycled
+overflow, leaf, and internal pages plus allocation/root superblocks are failed before write, after a
+synchronized half write, and after a complete synchronized write whose acknowledgement is forced to
+fail. Reopen must expose the complete old tree or complete new tree, and the live handle is poisoned
+after every injected write error. This is a software fault model under the stated sync contract, not an
+exhaustive model of device/controller/power-loss behavior. Future LSM engines must likewise define and
+test each state transition.
 
 ## 6. Metrics definitions
 
