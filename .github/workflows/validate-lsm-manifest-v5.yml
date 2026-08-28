@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply Manifest v5 hardening
-        run: python .github/scripts/apply_lsm_manifest_v5.py
+        run: |
+          python .github/scripts/apply_lsm_manifest_v5.py
+          python .github/scripts/fix_lsm_manifest_v5_fixture.py
       - name: Validate
         run: |
           cargo fmt --all
