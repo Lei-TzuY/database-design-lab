@@ -12,7 +12,7 @@ mod memtable;
 mod sstable;
 mod wal;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -29,7 +29,7 @@ use serde::Serialize;
 use manifest::{VersionSet, CURRENT_FILE_NAME};
 use memtable::{MemTableSet, VersionedEntry};
 use sstable::{file_name as sstable_file_name, SsTable};
-use wal::{MutationKind, Wal, WAL_FILE_NAME};
+use wal::{file_name as wal_file_name, MutationKind, Wal, INITIAL_FIRST_SEQUENCE, INITIAL_WAL_ID};
 pub use wal::{RecoveredWalTail, WalVerification};
 
 /// Deterministic threshold used to freeze the current mutable MemTable.
@@ -38,8 +38,12 @@ pub const MUTABLE_MEMTABLE_BYTES_LIMIT: usize = 64 * 1024;
 /// Current WAL/MemTable/SSTable structure counts, not performance instrumentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LsmStats {
-    /// Complete mutation records retained in the WAL, including already-flushed history.
+    /// Complete mutation records retained in the authoritative active WAL segment.
     pub wal_records: u64,
+    /// Authoritative WAL segment id selected by the manifest.
+    pub active_wal_id: u64,
+    /// First sequence encoded by the authoritative active WAL segment.
+    pub active_wal_first_sequence: u64,
     /// Latest entries (including tombstones) in the active mutable table.
     pub mutable_entries: usize,
     /// Frozen in-memory tables not yet published as SSTables.
@@ -72,6 +76,7 @@ pub struct LsmEngine {
     version: VersionSet,
     next_table_id: u64,
     next_manifest_id: u64,
+    next_wal_id: u64,
     poisoned: bool,
 }
 
@@ -115,8 +120,12 @@ impl LsmEngine {
     }
 
     fn initialize_new(path: PathBuf) -> Result<Self> {
-        let wal = Wal::create_new(&path.join(WAL_FILE_NAME))?;
-        let version = manifest::create_initial(&path)?;
+        let wal = Wal::create_new(
+            &path.join(wal_file_name(INITIAL_WAL_ID)),
+            INITIAL_WAL_ID,
+            INITIAL_FIRST_SEQUENCE,
+        )?;
+        let version = manifest::create_initial(&path, INITIAL_WAL_ID, INITIAL_FIRST_SEQUENCE)?;
         Ok(Self {
             path,
             wal: Some(wal),
@@ -125,6 +134,7 @@ impl LsmEngine {
             version,
             next_table_id: 1,
             next_manifest_id: 2,
+            next_wal_id: 2,
             poisoned: false,
         })
     }
@@ -138,6 +148,8 @@ impl LsmEngine {
                 current_generation: 0,
                 manifest_id: 0,
                 durable_sequence: 0,
+                wal_id: INITIAL_WAL_ID,
+                wal_first_sequence: INITIAL_FIRST_SEQUENCE,
                 tables: Vec::new(),
             }
         };
@@ -149,18 +161,30 @@ impl LsmEngine {
             )?);
         }
 
+        if !layout.wal_ids.contains(&version.wal_id) {
+            return Err(corruption(format!(
+                "manifest references missing WAL segment {}",
+                version.wal_id
+            )));
+        }
+        let wal_path = path.join(wal_file_name(version.wal_id));
         let mut memtables = MemTableSet::new(MUTABLE_MEMTABLE_BYTES_LIMIT)?;
         let durable_sequence = version.durable_sequence;
-        let wal = Wal::open(&layout.wal_path, |mutation| {
-            if mutation.sequence > durable_sequence {
-                memtables.apply(mutation.sequence, mutation.key, mutation.value)?;
-            }
-            Ok(())
-        })?;
-        if durable_sequence > wal.record_count() {
+        let wal = Wal::open(
+            &wal_path,
+            version.wal_id,
+            version.wal_first_sequence,
+            |mutation| {
+                if mutation.sequence > durable_sequence {
+                    memtables.apply(mutation.sequence, mutation.key, mutation.value)?;
+                }
+                Ok(())
+            },
+        )?;
+        if durable_sequence >= wal.next_sequence() {
             return Err(corruption(format!(
-                "manifest durable sequence {durable_sequence} exceeds WAL record count {}",
-                wal.record_count()
+                "manifest durable sequence {durable_sequence} is not below WAL next sequence {}",
+                wal.next_sequence()
             )));
         }
 
@@ -171,6 +195,7 @@ impl LsmEngine {
             tables,
             next_table_id: checked_next_id(layout.max_table_id, "SSTable")?,
             next_manifest_id: checked_next_id(layout.max_manifest_id, "manifest")?,
+            next_wal_id: checked_next_id(layout.max_wal_id, "WAL")?,
             version,
             poisoned: false,
         })
@@ -187,6 +212,8 @@ impl LsmEngine {
                 current_generation: 0,
                 manifest_id: 0,
                 durable_sequence: 0,
+                wal_id: INITIAL_WAL_ID,
+                wal_first_sequence: INITIAL_FIRST_SEQUENCE,
                 tables: Vec::new(),
             }
         };
@@ -201,14 +228,26 @@ impl LsmEngine {
                 .ok_or_else(|| corruption("SSTable verification entry count overflowed u64"))?;
         }
 
+        if !layout.wal_ids.contains(&version.wal_id) {
+            return Err(corruption(format!(
+                "manifest references missing WAL segment {}",
+                version.wal_id
+            )));
+        }
+        let wal_path = path.join(wal_file_name(version.wal_id));
         let mut memtables = MemTableSet::new(MUTABLE_MEMTABLE_BYTES_LIMIT)?;
         let durable_sequence = version.durable_sequence;
-        let wal = Wal::verify(&layout.wal_path, |mutation| {
-            if mutation.sequence > durable_sequence {
-                memtables.apply(mutation.sequence, mutation.key, mutation.value)?;
-            }
-            Ok(())
-        })?;
+        let wal = Wal::verify(
+            &wal_path,
+            version.wal_id,
+            version.wal_first_sequence,
+            |mutation| {
+                if mutation.sequence > durable_sequence {
+                    memtables.apply(mutation.sequence, mutation.key, mutation.value)?;
+                }
+                Ok(())
+            },
+        )?;
         if durable_sequence >= wal.next_sequence {
             return Err(corruption(format!(
                 "manifest durable sequence {durable_sequence} is not below WAL next sequence {}",
@@ -218,6 +257,8 @@ impl LsmEngine {
         Ok(VerificationReport {
             memtables: LsmStats {
                 wal_records: wal.record_count,
+                active_wal_id: wal.wal_id,
+                active_wal_first_sequence: wal.first_sequence,
                 mutable_entries: memtables.mutable_entries(),
                 immutable_memtables: memtables.immutable_count(),
                 immutable_entries: memtables.immutable_entries(),
@@ -252,6 +293,8 @@ impl LsmEngine {
         })?;
         Ok(LsmStats {
             wal_records: wal.record_count(),
+            active_wal_id: wal.wal_id(),
+            active_wal_first_sequence: wal.first_sequence(),
             mutable_entries: self.memtables.mutable_entries(),
             immutable_memtables: self.memtables.immutable_count(),
             immutable_entries: self.memtables.immutable_entries(),
@@ -313,7 +356,9 @@ impl LsmEngine {
     fn flush_frozen_memtables(&mut self) -> Result<()> {
         while let Some((entries, durable_sequence)) = self.memtables.oldest_immutable_snapshot()? {
             if self.version.manifest_id == 0 {
-                self.version = manifest::create_initial(&self.path)?;
+                let wal = self.wal.as_ref().ok_or(DbError::Poisoned)?;
+                self.version =
+                    manifest::create_initial(&self.path, wal.wal_id(), wal.first_sequence())?;
                 self.next_manifest_id = 2;
             }
             let table_id = self.next_table_id;
@@ -334,6 +379,8 @@ impl LsmEngine {
                 manifest_id,
                 durable_sequence,
                 descriptors,
+                self.version.wal_id,
+                self.version.wal_first_sequence,
             )?;
 
             self.tables.push(table);
@@ -342,7 +389,67 @@ impl LsmEngine {
             self.next_manifest_id = next_manifest_id;
             self.memtables.retire_oldest_immutable()?;
         }
+        self.maybe_rotate_wal()?;
         Ok(())
+    }
+
+    fn maybe_rotate_wal(&mut self) -> Result<()> {
+        let Some(first_sequence) = self.version.durable_sequence.checked_add(1) else {
+            return Ok(());
+        };
+        let wal = self.wal.as_ref().ok_or(DbError::Poisoned)?;
+        if wal.record_count() == 0
+            || wal.next_sequence() != first_sequence
+            || wal.first_sequence() == first_sequence
+        {
+            return Ok(());
+        }
+
+        let old_wal_id = wal.wal_id();
+        let new_wal_id = self.next_wal_id;
+        let new_manifest_id = self.next_manifest_id;
+        let following_wal_id = checked_next_id(new_wal_id, "WAL")?;
+        let following_manifest_id = checked_next_id(new_manifest_id, "manifest")?;
+        let new_wal = Wal::create_new(
+            &self.path.join(wal_file_name(new_wal_id)),
+            new_wal_id,
+            first_sequence,
+        )?;
+        let rotated = manifest::install(
+            &self.path,
+            &self.version,
+            new_manifest_id,
+            self.version.durable_sequence,
+            self.version.tables.clone(),
+            new_wal_id,
+            first_sequence,
+        )?;
+        let mirrored = manifest::mirror_current(&self.path, &rotated)?;
+
+        let old_wal = self.wal.replace(new_wal).ok_or(DbError::Poisoned)?;
+        self.version = mirrored;
+        self.next_wal_id = following_wal_id;
+        self.next_manifest_id = following_manifest_id;
+        drop(old_wal);
+        self.reclaim_obsolete_wals(new_wal_id);
+        debug_assert_ne!(old_wal_id, new_wal_id);
+        Ok(())
+    }
+
+    fn reclaim_obsolete_wals(&self, active_wal_id: u64) {
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            let Some(wal_id) = parse_numbered_name(&text, "wal-", ".log") else {
+                continue;
+            };
+            if wal_id != active_wal_id {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 
     fn ensure_usable(&self) -> Result<()> {
@@ -357,7 +464,7 @@ impl LsmEngine {
 impl KvEngine for LsmEngine {
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            name: "lsm-sstable-manifest-v1",
+            name: "lsm-segmented-wal-v2",
             logical_model: LogicalModel::KeyValue,
             storage_architecture: StorageArchitecture::LsmTree,
             concurrency: ConcurrencyMode::CallerSerialized,
@@ -443,7 +550,8 @@ impl KvEngine for LsmEngine {
 }
 
 struct Layout {
-    wal_path: PathBuf,
+    wal_ids: BTreeSet<u64>,
+    max_wal_id: u64,
     max_table_id: u64,
     max_manifest_id: u64,
     has_version_set: bool,
@@ -455,10 +563,10 @@ fn validate_layout(path: &Path) -> Result<Layout> {
         return Err(corruption("LSM engine path is not a directory"));
     }
 
-    let wal_name = OsStr::new(WAL_FILE_NAME);
     let current_name = OsStr::new(CURRENT_FILE_NAME);
-    let mut found_wal = false;
+    let mut wal_ids = BTreeSet::new();
     let mut found_current = false;
+    let mut max_wal_id = 0_u64;
     let mut max_table_id = 0_u64;
     let mut max_manifest_id = 0_u64;
 
@@ -467,18 +575,11 @@ fn validate_layout(path: &Path) -> Result<Layout> {
         let file_type = entry.file_type()?;
         if !file_type.is_file() {
             return Err(corruption(format!(
-                "LSM v1 directory entry is not a regular file: {}",
+                "LSM directory entry is not a regular file: {}",
                 entry.file_name().to_string_lossy()
             )));
         }
         let name = entry.file_name();
-        if name == wal_name {
-            if found_wal {
-                return Err(corruption("LSM directory contains duplicate WAL entries"));
-            }
-            found_wal = true;
-            continue;
-        }
         if name == current_name {
             if found_current {
                 return Err(corruption(
@@ -489,6 +590,11 @@ fn validate_layout(path: &Path) -> Result<Layout> {
             continue;
         }
         let text = name.to_string_lossy();
+        if let Some(id) = parse_numbered_name(&text, "wal-", ".log") {
+            wal_ids.insert(id);
+            max_wal_id = max_wal_id.max(id);
+            continue;
+        }
         if let Some(id) = parse_numbered_name(&text, "MANIFEST-", "") {
             max_manifest_id = max_manifest_id.max(id);
             continue;
@@ -497,22 +603,24 @@ fn validate_layout(path: &Path) -> Result<Layout> {
             max_table_id = max_table_id.max(id);
             continue;
         }
-        return Err(corruption(format!(
-            "unknown file in LSM v1 directory: {text}"
-        )));
+        return Err(corruption(format!("unknown file in LSM directory: {text}")));
     }
 
-    if !found_wal {
-        return Err(corruption(format!(
-            "LSM directory is missing required {WAL_FILE_NAME}"
-        )));
+    if wal_ids.is_empty() {
+        return Err(corruption(
+            "LSM directory contains no canonical WAL segment",
+        ));
     }
     let has_version_set = match (found_current, max_manifest_id != 0) {
         (true, true) => true,
-        (false, false) if max_table_id == 0 => false,
+        (false, false)
+            if max_table_id == 0 && wal_ids.len() == 1 && wal_ids.contains(&INITIAL_WAL_ID) =>
+        {
+            false
+        }
         (false, false) => {
             return Err(corruption(
-                "WAL-only legacy layout cannot contain SSTable files",
+                "legacy WAL-only layout must contain exactly wal-0000000000000001.log",
             ));
         }
         (false, true) => {
@@ -528,7 +636,8 @@ fn validate_layout(path: &Path) -> Result<Layout> {
     };
 
     Ok(Layout {
-        wal_path: path.join(WAL_FILE_NAME),
+        wal_ids,
+        max_wal_id,
         max_table_id,
         max_manifest_id,
         has_version_set,
@@ -561,3 +670,5 @@ fn corruption(reason: impl Into<String>) -> DbError {
 mod sstable_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wal_rotation_tests;

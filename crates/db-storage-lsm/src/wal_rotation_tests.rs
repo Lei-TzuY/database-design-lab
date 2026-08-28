@@ -4,7 +4,9 @@ use db_core::KvEngine;
 use tempfile::tempdir;
 
 use super::manifest::{CURRENT_FILE_NAME, CURRENT_SLOT_BYTES};
-use super::wal::{file_name as wal_file_name, MutationKind, Wal, INITIAL_FIRST_SEQUENCE, INITIAL_WAL_ID};
+use super::wal::{
+    file_name as wal_file_name, MutationKind, Wal, INITIAL_FIRST_SEQUENCE, INITIAL_WAL_ID,
+};
 use super::{LsmEngine, MUTABLE_MEMTABLE_BYTES_LIMIT};
 
 fn large_value(byte: u8) -> Vec<u8> {
@@ -44,7 +46,10 @@ fn fully_flushed_segment_rotates_and_reclaims_only_after_both_current_mirrors_mo
     assert_eq!(read_u64(&slot1[24..32]), 3);
 
     let manifest = fs::read(path.join("MANIFEST-0000000000000003")).expect("read rotated manifest");
-    assert_eq!(u16::from_le_bytes(manifest[8..10].try_into().expect("version")), 2);
+    assert_eq!(
+        u16::from_le_bytes(manifest[8..10].try_into().expect("version")),
+        2
+    );
     assert_eq!(read_u64(&manifest[48..56]), 2);
     assert_eq!(read_u64(&manifest[56..64]), 3);
 
@@ -82,8 +87,16 @@ fn replayed_frozen_prefix_does_not_reclaim_wal_while_newer_mutable_tail_depends_
     drop(wal);
 
     let mut engine = LsmEngine::open(&path).expect("open exact legacy WAL-only layout");
-    assert_eq!(engine.stats().expect("legacy replay stats").immutable_memtables, 1);
-    engine.put(b"tail-2", b"four").expect("flush replayed frozen prefix");
+    assert_eq!(
+        engine
+            .stats()
+            .expect("legacy replay stats")
+            .immutable_memtables,
+        1
+    );
+    engine
+        .put(b"tail-2", b"four")
+        .expect("flush replayed frozen prefix");
 
     let after_prefix_flush = engine.stats().expect("stats after prefix flush");
     assert_eq!(after_prefix_flush.durable_sequence, 2);
@@ -91,7 +104,10 @@ fn replayed_frozen_prefix_does_not_reclaim_wal_while_newer_mutable_tail_depends_
     assert_eq!(after_prefix_flush.active_wal_first_sequence, 1);
     assert_eq!(after_prefix_flush.wal_records, 4);
     assert!(path.join(wal_file_name(1)).exists());
-    assert_eq!(engine.get(b"tail").expect("tail survives"), Some(b"three".to_vec()));
+    assert_eq!(
+        engine.get(b"tail").expect("tail survives"),
+        Some(b"three".to_vec())
+    );
     assert_eq!(
         engine.get(b"tail-2").expect("second tail survives"),
         Some(b"four".to_vec())
@@ -99,10 +115,17 @@ fn replayed_frozen_prefix_does_not_reclaim_wal_while_newer_mutable_tail_depends_
     engine.reopen().expect("reopen with retained WAL tail");
     assert_eq!(engine.get(b"a").expect("get a"), Some(first));
     assert_eq!(engine.get(b"b").expect("get b"), Some(second));
-    assert_eq!(engine.get(b"tail").expect("get tail"), Some(b"three".to_vec()));
+    assert_eq!(
+        engine.get(b"tail").expect("get tail"),
+        Some(b"three".to_vec())
+    );
 
-    engine.put(b"c", &large_value(0x33)).expect("grow mutable tail c");
-    engine.put(b"d", &large_value(0x34)).expect("freeze tail and catch durable watermark up");
+    engine
+        .put(b"c", &large_value(0x33))
+        .expect("grow mutable tail c");
+    engine
+        .put(b"d", &large_value(0x34))
+        .expect("freeze tail and catch durable watermark up");
     let after_catchup = engine.stats().expect("stats after catchup rotation");
     assert_eq!(after_catchup.active_wal_id, 2);
     assert_eq!(after_catchup.active_wal_first_sequence, 7);
@@ -110,7 +133,10 @@ fn replayed_frozen_prefix_does_not_reclaim_wal_while_newer_mutable_tail_depends_
     assert!(!path.join(wal_file_name(1)).exists());
     assert!(path.join(wal_file_name(2)).exists());
     engine.reopen().expect("reopen after catchup rotation");
-    assert_eq!(engine.get(b"tail-2").expect("get tail-2"), Some(b"four".to_vec()));
+    assert_eq!(
+        engine.get(b"tail-2").expect("get tail-2"),
+        Some(b"four".to_vec())
+    );
 }
 
 #[test]
@@ -125,8 +151,12 @@ fn canonical_orphan_wal_is_ignored_then_reclaimed_and_next_id_skips_it() {
 
     let mut reopened = LsmEngine::open(&path).expect("ignore unreferenced canonical WAL");
     reopened.put(b"a", &large_value(0x51)).expect("put a");
-    reopened.put(b"b", &large_value(0x52)).expect("put b and rotate");
-    let stats = reopened.stats().expect("stats after orphan-skipping rotation");
+    reopened
+        .put(b"b", &large_value(0x52))
+        .expect("put b and rotate");
+    let stats = reopened
+        .stats()
+        .expect("stats after orphan-skipping rotation");
     assert_eq!(stats.active_wal_id, 100);
     assert_eq!(stats.active_wal_first_sequence, 3);
     assert!(path.join(wal_file_name(100)).exists());

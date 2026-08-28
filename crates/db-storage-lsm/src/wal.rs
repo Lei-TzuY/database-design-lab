@@ -8,7 +8,6 @@ use serde::Serialize;
 
 pub(super) const INITIAL_WAL_ID: u64 = 1;
 pub(super) const INITIAL_FIRST_SEQUENCE: u64 = 1;
-pub(super) const WAL_FILE_NAME: &str = "wal-0000000000000001.log";
 pub(super) const WAL_HEADER_LEN: usize = 40;
 const WAL_HEADER_LEN_U64: u64 = WAL_HEADER_LEN as u64;
 const WAL_MAGIC: [u8; 8] = *b"DBLSMWAL";
@@ -143,12 +142,7 @@ impl Wal {
         apply: impl FnMut(Mutation) -> Result<()>,
     ) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        let scan = scan_file(
-            &mut file,
-            expected_wal_id,
-            expected_first_sequence,
-            apply,
-        )?;
+        let scan = scan_file(&mut file, expected_wal_id, expected_first_sequence, apply)?;
         if scan.recoverable_tail.is_some() {
             file.set_len(scan.valid_bytes)?;
             file.sync_all()?;
@@ -171,13 +165,10 @@ impl Wal {
         apply: impl FnMut(Mutation) -> Result<()>,
     ) -> Result<WalVerification> {
         let mut file = File::open(path)?;
-        Ok(scan_file(
-            &mut file,
-            expected_wal_id,
-            expected_first_sequence,
-            apply,
-        )?
-        .verification(expected_wal_id, expected_first_sequence))
+        Ok(
+            scan_file(&mut file, expected_wal_id, expected_first_sequence, apply)?
+                .verification(expected_wal_id, expected_first_sequence),
+        )
     }
 
     pub(super) fn append(&mut self, kind: MutationKind, key: &[u8], value: &[u8]) -> Result<u64> {
