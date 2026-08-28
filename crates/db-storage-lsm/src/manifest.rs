@@ -14,7 +14,8 @@ const CURRENT_FORMAT_VERSION: u16 = 1;
 const MANIFEST_MAGIC: [u8; 8] = *b"DBLSMMAN";
 const MANIFEST_FORMAT_VERSION_V1: u16 = 1;
 const MANIFEST_FORMAT_VERSION_V2: u16 = 2;
-const MANIFEST_FORMAT_VERSION: u16 = 3;
+const MANIFEST_FORMAT_VERSION_V3: u16 = 3;
+const MANIFEST_FORMAT_VERSION: u16 = 4;
 const MANIFEST_HEADER_LEN_V1: usize = 64;
 const MANIFEST_HEADER_LEN: usize = 80;
 const LEGACY_DESCRIPTOR_PREFIX_LEN: usize = 40;
@@ -25,6 +26,15 @@ pub(super) struct VersionSet {
     pub(super) current_generation: u64,
     pub(super) manifest_id: u64,
     pub(super) durable_sequence: u64,
+    pub(super) tombstone_gc_sequence: u64,
+    pub(super) wal_id: u64,
+    pub(super) wal_first_sequence: u64,
+    pub(super) tables: Vec<SstableDescriptor>,
+}
+
+pub(super) struct ManifestState {
+    pub(super) durable_sequence: u64,
+    pub(super) tombstone_gc_sequence: u64,
     pub(super) wal_id: u64,
     pub(super) wal_first_sequence: u64,
     pub(super) tables: Vec<SstableDescriptor>,
@@ -49,6 +59,7 @@ pub(super) fn create_initial(
         current_generation: 0,
         manifest_id: 1,
         durable_sequence: 0,
+        tombstone_gc_sequence: 0,
         wal_id,
         wal_first_sequence,
         tables: Vec::new(),
@@ -81,20 +92,43 @@ pub(super) fn prepare_install(
     directory: &Path,
     current: &VersionSet,
     new_manifest_id: u64,
-    durable_sequence: u64,
-    tables: Vec<SstableDescriptor>,
-    wal_id: u64,
-    wal_first_sequence: u64,
+    state: ManifestState,
 ) -> Result<VersionSet> {
+    let ManifestState {
+        durable_sequence,
+        tombstone_gc_sequence,
+        wal_id,
+        wal_first_sequence,
+        tables,
+    } = state;
+    if durable_sequence < current.durable_sequence {
+        return Err(corruption(
+            24,
+            "manifest install would move the durable sequence backward",
+        ));
+    }
+    if tombstone_gc_sequence < current.tombstone_gc_sequence {
+        return Err(corruption(
+            64,
+            "manifest install would move the tombstone GC sequence backward",
+        ));
+    }
     let generation = current
         .current_generation
         .checked_add(1)
         .ok_or_else(|| corruption(0, "CURRENT generation exhausted"))?;
-    validate_version_set(durable_sequence, wal_id, wal_first_sequence, &tables)?;
+    validate_version_set(
+        durable_sequence,
+        tombstone_gc_sequence,
+        wal_id,
+        wal_first_sequence,
+        &tables,
+    )?;
     let next = VersionSet {
         current_generation: generation,
         manifest_id: new_manifest_id,
         durable_sequence,
+        tombstone_gc_sequence,
         wal_id,
         wal_first_sequence,
         tables,
@@ -111,20 +145,9 @@ pub(super) fn install(
     directory: &Path,
     current: &VersionSet,
     new_manifest_id: u64,
-    durable_sequence: u64,
-    tables: Vec<SstableDescriptor>,
-    wal_id: u64,
-    wal_first_sequence: u64,
+    state: ManifestState,
 ) -> Result<VersionSet> {
-    let next = prepare_install(
-        directory,
-        current,
-        new_manifest_id,
-        durable_sequence,
-        tables,
-        wal_id,
-        wal_first_sequence,
-    )?;
+    let next = prepare_install(directory, current, new_manifest_id, state)?;
     publish_prepared(directory, &next)?;
     Ok(next)
 }
@@ -270,6 +293,7 @@ fn parse_current_slot(bytes: &[u8], physical_slot: usize) -> Result<CurrentSlot>
 fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
     validate_version_set(
         version.durable_sequence,
+        version.tombstone_gc_sequence,
         version.wal_id,
         version.wal_first_sequence,
         &version.tables,
@@ -296,6 +320,7 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
     bytes[40..48].copy_from_slice(&body_len.to_le_bytes());
     bytes[48..56].copy_from_slice(&version.wal_id.to_le_bytes());
     bytes[56..64].copy_from_slice(&version.wal_first_sequence.to_le_bytes());
+    bytes[64..72].copy_from_slice(&version.tombstone_gc_sequence.to_le_bytes());
     let header_crc = crc32fast::hash(&bytes[..76]);
     bytes[76..80].copy_from_slice(&header_crc.to_le_bytes());
     let file_crc = crc32fast::hash(&bytes);
@@ -318,7 +343,7 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         return Err(corruption(0, "invalid manifest magic"));
     }
     let format_version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
-    let (header_len, wal_id, wal_first_sequence) = match format_version {
+    let (header_len, wal_id, wal_first_sequence, tombstone_gc_sequence) = match format_version {
         MANIFEST_FORMAT_VERSION_V1 => {
             if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
                 != MANIFEST_HEADER_LEN_V1
@@ -332,9 +357,9 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
             if crc32fast::hash(&bytes[..60]) != expected_header_crc {
                 return Err(corruption(60, "manifest header checksum mismatch"));
             }
-            (MANIFEST_HEADER_LEN_V1, 1, 1)
+            (MANIFEST_HEADER_LEN_V1, 1, 1, 0)
         }
-        MANIFEST_FORMAT_VERSION_V2 | MANIFEST_FORMAT_VERSION => {
+        MANIFEST_FORMAT_VERSION_V2 | MANIFEST_FORMAT_VERSION_V3 => {
             if bytes.len() < MANIFEST_HEADER_LEN + 4
                 || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
                     != MANIFEST_HEADER_LEN
@@ -352,6 +377,28 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
                 MANIFEST_HEADER_LEN,
                 u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
                 u64::from_le_bytes(bytes[56..64].try_into().expect("fixed slice")),
+                0,
+            )
+        }
+        MANIFEST_FORMAT_VERSION => {
+            if bytes.len() < MANIFEST_HEADER_LEN + 4
+                || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
+                    != MANIFEST_HEADER_LEN
+                || bytes[12..16] != [0; 4]
+                || bytes[72..76].iter().any(|byte| *byte != 0)
+            {
+                return Err(corruption(10, "invalid v4 manifest header fields"));
+            }
+            let expected_header_crc =
+                u32::from_le_bytes(bytes[76..80].try_into().expect("fixed slice"));
+            if crc32fast::hash(&bytes[..76]) != expected_header_crc {
+                return Err(corruption(76, "manifest header checksum mismatch"));
+            }
+            (
+                MANIFEST_HEADER_LEN,
+                u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
+                u64::from_le_bytes(bytes[56..64].try_into().expect("fixed slice")),
+                u64::from_le_bytes(bytes[64..72].try_into().expect("fixed slice")),
             )
         }
         _ => {
@@ -413,11 +460,18 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
             "manifest contains unexplained descriptor bytes",
         ));
     }
-    validate_version_set(durable_sequence, wal_id, wal_first_sequence, &tables)?;
+    validate_version_set(
+        durable_sequence,
+        tombstone_gc_sequence,
+        wal_id,
+        wal_first_sequence,
+        &tables,
+    )?;
     Ok(VersionSet {
         current_generation: 0,
         manifest_id,
         durable_sequence,
+        tombstone_gc_sequence,
         wal_id,
         wal_first_sequence,
         tables,
@@ -585,10 +639,19 @@ fn decode_descriptor(
 
 fn validate_version_set(
     durable_sequence: u64,
+    tombstone_gc_sequence: u64,
     wal_id: u64,
     wal_first_sequence: u64,
     tables: &[SstableDescriptor],
 ) -> Result<()> {
+    if tombstone_gc_sequence > durable_sequence {
+        return Err(corruption(
+            64,
+            format!(
+                "manifest tombstone GC sequence {tombstone_gc_sequence} exceeds durable sequence {durable_sequence}"
+            ),
+        ));
+    }
     if wal_id == 0 || wal_first_sequence == 0 {
         return Err(corruption(
             0,
@@ -641,7 +704,16 @@ fn validate_version_set(
         previous_durable = descriptor.durable_sequence;
     }
     let expected = tables.last().map_or(0, |table| table.durable_sequence);
-    if durable_sequence != expected {
+    if tables.is_empty() {
+        if durable_sequence != tombstone_gc_sequence {
+            return Err(corruption(
+                24,
+                format!(
+                    "table-less manifest durable sequence {durable_sequence} is not fully covered by tombstone GC sequence {tombstone_gc_sequence}"
+                ),
+            ));
+        }
+    } else if durable_sequence != expected {
         return Err(corruption(
             0,
             format!(

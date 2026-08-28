@@ -100,16 +100,23 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   Tests cover authoritative SSTable/manifest corruption, latest-CURRENT-slot fallback with WAL replay,
   unreferenced canonical orphans, mutable WAL tails, and maximum-value flush/reopen.
 - [x] Add an explicit L0/L1 overlap policy and crash-published compaction. Manifest v3 records levels;
-  flushes enter overlapping L0 and four L0 tables trigger a full-set rewrite into one L1 run. The output
-  SSTable and manifest are synchronized and published through both CURRENT mirrors before obsolete
-  SSTables/manifests are eligible for deletion. Tests cover reopen, mirror fallback after cleanup, retained
-  tombstones, and newer L0 state overriding L1.
-- [ ] Prove and implement safe tombstone dropping; compaction v3 deliberately retains deletion markers.
+  flushes enter overlapping L0 and four L0 tables trigger a full-set rewrite into at most one L1 run.
+  Any output SSTable and the manifest are synchronized and published through both CURRENT mirrors before
+  obsolete SSTables/manifests are eligible for deletion. Tests cover reopen, mirror fallback after cleanup, and
+  newer L0 state overriding L1; tombstone elision is established by the following milestone.
+- [x] Prove and implement safe tombstone dropping for the current serialized, snapshot-free full-set
+  compactor. Manifest v4 records a GC watermark, permits a GC-covered table-less durable version, carries
+  the watermark through later flush/WAL rotation, and validates legacy v1–v3 manifests with an implicit
+  zero watermark. Tests cover physical elision, reinsertion, fully deleted reopen/refill, corrupt
+  watermarks, and old/new crash publication.
 - [x] Add deterministic compaction durable-write fault injection. The harness records replacement-L1,
   Manifest, first-CURRENT, and mirror-CURRENT publication classes and injects before-write, synchronized
   torn-output, and post-sync reported failures at each class. Every case poisons the live handle, reopens,
   verifies all logical keys, and requires exactly the complete four-L0 input version or complete one-L1
   compacted version; torn immutable files remain unreferenced and torn CURRENT slots fail by checksum.
+  A second matrix covers table-less compaction and requires either all four tombstone L0 inputs or the
+  complete zero-SSTable GC version, including the retained-WAL state when rotation is skipped after a
+  reported compaction failure.
 - [ ] Add deterministic compaction differential tests and read/write/space-amplification instrumentation
   validation.
 
