@@ -558,4 +558,6 @@ fn corruption(reason: impl Into<String>) -> DbError {
 }
 
 #[cfg(test)]
+mod sstable_tests;
+#[cfg(test)]
 mod tests;

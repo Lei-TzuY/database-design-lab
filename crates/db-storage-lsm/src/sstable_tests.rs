@@ -18,11 +18,13 @@ fn flip_byte(path: &Path, offset: u64) {
         .write(true)
         .open(path)
         .expect("open file to corrupt");
-    file.seek(SeekFrom::Start(offset)).expect("seek corruption byte");
+    file.seek(SeekFrom::Start(offset))
+        .expect("seek corruption byte");
     let mut byte = [0_u8; 1];
     file.read_exact(&mut byte).expect("read corruption byte");
     byte[0] ^= 0x5a;
-    file.seek(SeekFrom::Start(offset)).expect("rewind corruption byte");
+    file.seek(SeekFrom::Start(offset))
+        .expect("rewind corruption byte");
     file.write_all(&byte).expect("write corruption byte");
     file.sync_all().expect("sync corruption byte");
 }
@@ -50,7 +52,9 @@ fn published_sstable_plus_wal_tail_reopens_without_duplicate_application() {
     assert_eq!(before.wal_records, 3);
     assert_eq!(before.mutable_entries, 1);
 
-    engine.reopen().expect("reopen published SSTable plus WAL tail");
+    engine
+        .reopen()
+        .expect("reopen published SSTable plus WAL tail");
     assert_eq!(engine.stats().expect("stats after reopen"), before);
     assert_eq!(engine.get(b"a").expect("get a"), Some(first));
     assert_eq!(engine.get(b"b").expect("get b"), Some(second));
@@ -84,7 +88,9 @@ fn referenced_sstable_corruption_fails_closed_even_with_full_wal_history() {
     {
         let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
         engine.put(b"a", &large_value(0x31)).expect("put a");
-        engine.put(b"b", &large_value(0x32)).expect("put b and flush");
+        engine
+            .put(b"b", &large_value(0x32))
+            .expect("put b and flush");
         assert_eq!(engine.stats().expect("stats").sstables, 1);
     }
 
@@ -104,7 +110,9 @@ fn torn_latest_current_slot_falls_back_and_wal_replays_complete_state() {
     {
         let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
         engine.put(b"a", &first).expect("put a");
-        engine.put(b"b", &second).expect("put b and publish first SSTable");
+        engine
+            .put(b"b", &second)
+            .expect("put b and publish first SSTable");
         assert_eq!(engine.stats().expect("published stats").durable_sequence, 2);
     }
 
@@ -119,8 +127,14 @@ fn torn_latest_current_slot_falls_back_and_wal_replays_complete_state() {
     assert_eq!(stats.sstables, 0);
     assert_eq!(stats.durable_sequence, 0);
     assert_eq!(stats.wal_records, 2);
-    assert_eq!(reopened.get(b"a").expect("get a after fallback"), Some(first));
-    assert_eq!(reopened.get(b"b").expect("get b after fallback"), Some(second));
+    assert_eq!(
+        reopened.get(b"a").expect("get a after fallback"),
+        Some(first)
+    );
+    assert_eq!(
+        reopened.get(b"b").expect("get b after fallback"),
+        Some(second)
+    );
 }
 
 #[test]
@@ -130,7 +144,9 @@ fn authoritative_manifest_corruption_fails_closed() {
     {
         let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
         engine.put(b"a", &large_value(0x51)).expect("put a");
-        engine.put(b"b", &large_value(0x52)).expect("put b and flush");
+        engine
+            .put(b"b", &large_value(0x52))
+            .expect("put b and flush");
     }
 
     flip_byte(&numbered_file(&path, "MANIFEST-", "", 2), 70);
@@ -152,8 +168,11 @@ fn canonical_orphans_are_ignored_and_ids_skip_past_them() {
 
     fs::write(numbered_file(&path, "sst-", ".sst", 99), b"orphan sstable")
         .expect("write orphan SSTable");
-    fs::write(numbered_file(&path, "MANIFEST-", "", 99), b"orphan manifest")
-        .expect("write orphan manifest");
+    fs::write(
+        numbered_file(&path, "MANIFEST-", "", 99),
+        b"orphan manifest",
+    )
+    .expect("write orphan manifest");
 
     let mut reopened = LsmEngine::open(&path).expect("ignore unreferenced canonical orphans");
     assert_eq!(reopened.get(b"a").expect("get a"), Some(first));
