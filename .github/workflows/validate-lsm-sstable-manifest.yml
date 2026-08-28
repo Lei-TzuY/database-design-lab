@@ -20,15 +20,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Wire dedicated regressions
-        run: python .github/scripts/fix_lsm_sstable_manifest.py
+      - name: Apply final slice updates
+        run: |
+          python .github/scripts/fix_lsm_sstable_manifest.py
+          python .github/scripts/update_lsm_sstable_docs.py
       - name: Validate
         run: |
           cargo fmt --all
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-features --locked
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-      - name: Commit validated implementation
+      - name: Commit validated slice
         shell: bash
         run: |
           if git diff --quiet; then
@@ -36,6 +38,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/sstable_tests.rs
-          git commit -m "test(lsm): add SSTable manifest recovery regressions"
+          git add README.md docs/roadmap.md docs/lsm-wal-format.md crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/sstable_tests.rs
+          git commit -m "docs(lsm): record SSTable manifest publication"
           git push origin HEAD:feat/lsm-sstable-manifest
