@@ -15,9 +15,11 @@ const MANIFEST_MAGIC: [u8; 8] = *b"DBLSMMAN";
 const MANIFEST_FORMAT_VERSION_V1: u16 = 1;
 const MANIFEST_FORMAT_VERSION_V2: u16 = 2;
 const MANIFEST_FORMAT_VERSION_V3: u16 = 3;
-const MANIFEST_FORMAT_VERSION: u16 = 4;
+const MANIFEST_FORMAT_VERSION_V4: u16 = 4;
+const MANIFEST_FORMAT_VERSION: u16 = 5;
 const MANIFEST_HEADER_LEN_V1: usize = 64;
-const MANIFEST_HEADER_LEN: usize = 80;
+const MANIFEST_HEADER_LEN_V4: usize = 80;
+const MANIFEST_HEADER_LEN: usize = 88;
 const LEGACY_DESCRIPTOR_PREFIX_LEN: usize = 40;
 const DESCRIPTOR_PREFIX_LEN: usize = 48;
 
@@ -27,6 +29,7 @@ pub(super) struct VersionSet {
     pub(super) manifest_id: u64,
     pub(super) durable_sequence: u64,
     pub(super) tombstone_gc_sequence: u64,
+    pub(super) table_id_high_watermark: u64,
     pub(super) wal_id: u64,
     pub(super) wal_first_sequence: u64,
     pub(super) tables: Vec<SstableDescriptor>,
@@ -60,6 +63,7 @@ pub(super) fn create_initial(
         manifest_id: 1,
         durable_sequence: 0,
         tombstone_gc_sequence: 0,
+        table_id_high_watermark: 0,
         wal_id,
         wal_first_sequence,
         tables: Vec::new(),
@@ -117,9 +121,15 @@ pub(super) fn prepare_install(
         .current_generation
         .checked_add(1)
         .ok_or_else(|| corruption(0, "CURRENT generation exhausted"))?;
+    let table_id_high_watermark = tables
+        .iter()
+        .fold(current.table_id_high_watermark, |high, descriptor| {
+            high.max(descriptor.table_id)
+        });
     validate_version_set(
         durable_sequence,
         tombstone_gc_sequence,
+        table_id_high_watermark,
         wal_id,
         wal_first_sequence,
         &tables,
@@ -129,6 +139,7 @@ pub(super) fn prepare_install(
         manifest_id: new_manifest_id,
         durable_sequence,
         tombstone_gc_sequence,
+        table_id_high_watermark,
         wal_id,
         wal_first_sequence,
         tables,
@@ -294,6 +305,7 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
     validate_version_set(
         version.durable_sequence,
         version.tombstone_gc_sequence,
+        version.table_id_high_watermark,
         version.wal_id,
         version.wal_first_sequence,
         &version.tables,
@@ -321,8 +333,9 @@ fn write_manifest_new(directory: &Path, version: &VersionSet) -> Result<()> {
     bytes[48..56].copy_from_slice(&version.wal_id.to_le_bytes());
     bytes[56..64].copy_from_slice(&version.wal_first_sequence.to_le_bytes());
     bytes[64..72].copy_from_slice(&version.tombstone_gc_sequence.to_le_bytes());
-    let header_crc = crc32fast::hash(&bytes[..76]);
-    bytes[76..80].copy_from_slice(&header_crc.to_le_bytes());
+    bytes[72..80].copy_from_slice(&version.table_id_high_watermark.to_le_bytes());
+    let header_crc = crc32fast::hash(&bytes[..84]);
+    bytes[84..88].copy_from_slice(&header_crc.to_le_bytes());
     let file_crc = crc32fast::hash(&bytes);
     bytes.extend_from_slice(&file_crc.to_le_bytes());
 
@@ -343,7 +356,13 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         return Err(corruption(0, "invalid manifest magic"));
     }
     let format_version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
-    let (header_len, wal_id, wal_first_sequence, tombstone_gc_sequence) = match format_version {
+    let (
+        header_len,
+        wal_id,
+        wal_first_sequence,
+        tombstone_gc_sequence,
+        encoded_table_id_high_watermark,
+    ) = match format_version {
         MANIFEST_FORMAT_VERSION_V1 => {
             if u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
                 != MANIFEST_HEADER_LEN_V1
@@ -357,12 +376,12 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
             if crc32fast::hash(&bytes[..60]) != expected_header_crc {
                 return Err(corruption(60, "manifest header checksum mismatch"));
             }
-            (MANIFEST_HEADER_LEN_V1, 1, 1, 0)
+            (MANIFEST_HEADER_LEN_V1, 1, 1, 0, None)
         }
         MANIFEST_FORMAT_VERSION_V2 | MANIFEST_FORMAT_VERSION_V3 => {
-            if bytes.len() < MANIFEST_HEADER_LEN + 4
+            if bytes.len() < MANIFEST_HEADER_LEN_V4 + 4
                 || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
-                    != MANIFEST_HEADER_LEN
+                    != MANIFEST_HEADER_LEN_V4
                 || bytes[12..16] != [0; 4]
                 || bytes[64..76].iter().any(|byte| *byte != 0)
             {
@@ -374,16 +393,17 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
                 return Err(corruption(76, "manifest header checksum mismatch"));
             }
             (
-                MANIFEST_HEADER_LEN,
+                MANIFEST_HEADER_LEN_V4,
                 u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
                 u64::from_le_bytes(bytes[56..64].try_into().expect("fixed slice")),
                 0,
+                None,
             )
         }
-        MANIFEST_FORMAT_VERSION => {
-            if bytes.len() < MANIFEST_HEADER_LEN + 4
+        MANIFEST_FORMAT_VERSION_V4 => {
+            if bytes.len() < MANIFEST_HEADER_LEN_V4 + 4
                 || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
-                    != MANIFEST_HEADER_LEN
+                    != MANIFEST_HEADER_LEN_V4
                 || bytes[12..16] != [0; 4]
                 || bytes[72..76].iter().any(|byte| *byte != 0)
             {
@@ -395,10 +415,35 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
                 return Err(corruption(76, "manifest header checksum mismatch"));
             }
             (
+                MANIFEST_HEADER_LEN_V4,
+                u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
+                u64::from_le_bytes(bytes[56..64].try_into().expect("fixed slice")),
+                u64::from_le_bytes(bytes[64..72].try_into().expect("fixed slice")),
+                None,
+            )
+        }
+        MANIFEST_FORMAT_VERSION => {
+            if bytes.len() < MANIFEST_HEADER_LEN + 4
+                || u16::from_le_bytes(bytes[10..12].try_into().expect("fixed slice")) as usize
+                    != MANIFEST_HEADER_LEN
+                || bytes[12..16] != [0; 4]
+                || bytes[80..84].iter().any(|byte| *byte != 0)
+            {
+                return Err(corruption(10, "invalid v5 manifest header fields"));
+            }
+            let expected_header_crc =
+                u32::from_le_bytes(bytes[84..88].try_into().expect("fixed slice"));
+            if crc32fast::hash(&bytes[..84]) != expected_header_crc {
+                return Err(corruption(84, "manifest header checksum mismatch"));
+            }
+            (
                 MANIFEST_HEADER_LEN,
                 u64::from_le_bytes(bytes[48..56].try_into().expect("fixed slice")),
                 u64::from_le_bytes(bytes[56..64].try_into().expect("fixed slice")),
                 u64::from_le_bytes(bytes[64..72].try_into().expect("fixed slice")),
+                Some(u64::from_le_bytes(
+                    bytes[72..80].try_into().expect("fixed slice"),
+                )),
             )
         }
         _ => {
@@ -460,9 +505,22 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
             "manifest contains unexplained descriptor bytes",
         ));
     }
+    let active_table_id_high_watermark = tables
+        .iter()
+        .map(|descriptor| descriptor.table_id)
+        .max()
+        .unwrap_or(0);
+    let table_id_high_watermark = encoded_table_id_high_watermark.unwrap_or_else(|| {
+        if tables.is_empty() && durable_sequence > 0 {
+            durable_sequence.max(active_table_id_high_watermark)
+        } else {
+            active_table_id_high_watermark
+        }
+    });
     validate_version_set(
         durable_sequence,
         tombstone_gc_sequence,
+        table_id_high_watermark,
         wal_id,
         wal_first_sequence,
         &tables,
@@ -472,6 +530,7 @@ fn read_manifest(directory: &Path, manifest_id: u64) -> Result<VersionSet> {
         manifest_id,
         durable_sequence,
         tombstone_gc_sequence,
+        table_id_high_watermark,
         wal_id,
         wal_first_sequence,
         tables,
@@ -640,6 +699,7 @@ fn decode_descriptor(
 fn validate_version_set(
     durable_sequence: u64,
     tombstone_gc_sequence: u64,
+    table_id_high_watermark: u64,
     wal_id: u64,
     wal_first_sequence: u64,
     tables: &[SstableDescriptor],
@@ -650,6 +710,12 @@ fn validate_version_set(
             format!(
                 "manifest tombstone GC sequence {tombstone_gc_sequence} exceeds durable sequence {durable_sequence}"
             ),
+        ));
+    }
+    if durable_sequence > 0 && table_id_high_watermark == 0 {
+        return Err(corruption(
+            72,
+            "nonempty durable history requires a nonzero SSTable id high watermark",
         ));
     }
     if wal_id == 0 || wal_first_sequence == 0 {
@@ -702,6 +768,14 @@ fn validate_version_set(
         }
         previous_table_id = descriptor.table_id;
         previous_durable = descriptor.durable_sequence;
+    }
+    if previous_table_id > table_id_high_watermark {
+        return Err(corruption(
+            72,
+            format!(
+                "manifest SSTable id high watermark {table_id_high_watermark} is below active table id {previous_table_id}"
+            ),
+        ));
     }
     let expected = tables.last().map_or(0, |table| table.durable_sequence);
     if tables.is_empty() {

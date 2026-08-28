@@ -91,7 +91,7 @@ fn fully_flushed_segment_rotates_and_reclaims_only_after_both_current_mirrors_mo
     let manifest = fs::read(path.join("MANIFEST-0000000000000003")).expect("read rotated manifest");
     assert_eq!(
         u16::from_le_bytes(manifest[8..10].try_into().expect("version")),
-        4
+        5
     );
     assert_eq!(read_u64(&manifest[48..56]), 2);
     assert_eq!(read_u64(&manifest[56..64]), 3);

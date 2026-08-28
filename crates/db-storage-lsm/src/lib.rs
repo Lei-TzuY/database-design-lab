@@ -7,7 +7,7 @@
 //! embeds a checksummed Bloom filter for point-read rejection. Flushes enter overlapping L0; four
 //! L0 tables trigger a synchronous full-set merge into at most one non-overlapping L1 run. Because the
 //! merge covers every authoritative table and this engine has no snapshots, it elides tombstones and
-//! records that proof point in Manifest v4 before obsolete sorted-table/manifest files are reclaimed.
+//! records that proof point in Manifest v5 before obsolete sorted-table/manifest files are reclaimed.
 //! Deterministic
 //! compaction fault tests exercise pre-write, torn durable output, and post-sync reported errors at
 //! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries.
@@ -187,7 +187,7 @@ impl LsmEngine {
 
     fn open_existing(path: PathBuf) -> Result<Self> {
         let layout = validate_layout(&path)?;
-        let version = if layout.has_version_set {
+        let mut version = if layout.has_version_set {
             manifest::load(&path)?
         } else {
             VersionSet {
@@ -195,11 +195,13 @@ impl LsmEngine {
                 manifest_id: 0,
                 durable_sequence: 0,
                 tombstone_gc_sequence: 0,
+                table_id_high_watermark: 0,
                 wal_id: INITIAL_WAL_ID,
                 wal_first_sequence: INITIAL_FIRST_SEQUENCE,
                 tables: Vec::new(),
             }
         };
+        version.table_id_high_watermark = version.table_id_high_watermark.max(layout.max_table_id);
         let mut tables = Vec::with_capacity(version.tables.len());
         for descriptor in &version.tables {
             tables.push(SsTable::open(
@@ -240,7 +242,7 @@ impl LsmEngine {
             wal: Some(wal),
             memtables,
             tables,
-            next_table_id: checked_next_id(layout.max_table_id, "SSTable")?,
+            next_table_id: checked_next_id(version.table_id_high_watermark, "SSTable")?,
             next_manifest_id: checked_next_id(layout.max_manifest_id, "manifest")?,
             next_wal_id: checked_next_id(layout.max_wal_id, "WAL")?,
             version,
@@ -264,6 +266,7 @@ impl LsmEngine {
                 manifest_id: 0,
                 durable_sequence: 0,
                 tombstone_gc_sequence: 0,
+                table_id_high_watermark: 0,
                 wal_id: INITIAL_WAL_ID,
                 wal_first_sequence: INITIAL_FIRST_SEQUENCE,
                 tables: Vec::new(),
@@ -774,7 +777,7 @@ impl LsmEngine {
 impl KvEngine for LsmEngine {
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            name: "lsm-level1-tombstone-gc-v4",
+            name: "lsm-level1-tombstone-gc-v5",
             logical_model: LogicalModel::KeyValue,
             storage_architecture: StorageArchitecture::LsmTree,
             concurrency: ConcurrencyMode::CallerSerialized,
