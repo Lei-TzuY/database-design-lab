@@ -80,8 +80,11 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   remains in `docs/lsm-wal-format.md`; `docs/lsm-sstable-manifest-format.md` defines indexed/checksummed
   immutable SSTables, complete immutable manifest snapshots, mirrored 4 KiB `CURRENT` slots, durable
   sequence watermarks, canonical orphan handling, and the WAL-backed interrupted-install recovery rule.
-- [ ] Specify and implement WAL segment rotation/reclamation. The current single WAL intentionally retains
-  complete history so reclamation does not share the first SSTable/manifest publication protocol.
+- [x] Specify and implement crash-safe WAL segment rotation/reclamation. Manifest v2 binds an active WAL
+  id and first sequence; rotation occurs only when the SSTable durable watermark reaches that WAL's tail.
+  A new segment is synchronized before publication, the same new manifest is installed into both CURRENT
+  mirrors before old WAL deletion, legacy Manifest v1 remains readable, and canonical orphan WAL ids are
+  skipped rather than overwritten.
 - [x] Implement an independent versioned/checksummed WAL with synchronized PUT/tombstone records,
   fail-closed bounded replay, canonical incomplete-tail recovery, and ordered mutable/immutable
   MemTables. Fixed-seed differential tests cover reopen after every operation; deterministic tests

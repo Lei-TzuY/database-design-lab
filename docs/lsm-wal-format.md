@@ -1,10 +1,11 @@
 # LSM WAL and MemTable foundation v1
 
-This document specifies the WAL and in-memory half of Phase 3. The engine now also has persistent
-indexed SSTables, immutable manifest snapshots, mirrored `CURRENT`, and synchronous flush publication;
-those bytes and crash states are specified separately in `docs/lsm-sstable-manifest-format.md`.
-Bloom filters, WAL rotation/reclamation, levels, and compaction remain deferred. Consequently the engine
-is executable correctness evidence, but not yet a candidate for B+ tree versus LSM performance claims.
+This document specifies the WAL and in-memory half of Phase 3. The WAL byte format remains version 1,
+but WALs are now canonical numbered segments selected by Manifest v2. Indexed SSTables, immutable
+manifest snapshots, mirrored `CURRENT`, flush publication, and the cross-file rotation/reclamation
+protocol are specified with `docs/lsm-sstable-manifest-format.md`. Bloom filters, levels, and compaction
+remain deferred. Consequently the engine is executable correctness evidence, but not yet a candidate for
+B+ tree versus LSM performance claims.
 
 All encoded integers are unsigned little-endian. Keys and values follow the common 4,096-byte and
 1,048,576-byte limits. Empty keys and PUT values are valid; a DELETE is distinguished by record kind,
@@ -12,22 +13,18 @@ not by an empty value.
 
 ## Directory layout
 
-The active WAL remains the fixed regular file:
+WAL files use the canonical name `wal-%016d.log`. A new engine starts with WAL id 1 and first sequence
+1; later rotations allocate ids above every canonical WAL id observed in the directory, including
+unreferenced crash orphans. Manifest v2 identifies exactly one authoritative WAL by id and first sequence.
+Canonical non-authoritative WALs may exist after an interrupted rotation and are ignored for replay while
+still reserving their numeric ids.
 
-```text
-wal-0000000000000001.log
-```
-
-New engines also contain `CURRENT` and at least one immutable manifest snapshot; published flushes add
-canonical SSTable/manifest files as specified in `docs/lsm-sstable-manifest-format.md`. An exact legacy
-WAL-only directory from the earlier Phase 3 slice remains readable and replays from sequence one; partial
-version-set layouts do not receive that compatibility treatment. Unknown entries and non-regular files
-still fail closed. `create_new` reserves the directory name and rejects every existing path. The
-implementation synchronizes file contents but does not use a portable parent-directory sync protocol.
-
-The fixed WAL file name/id still deliberately defines no segment rotation or reclamation protocol. The
-single WAL retains all complete mutation records even after their sequences are represented by published
-SSTables.
+New engines also contain `CURRENT` and an immutable manifest snapshot; published flushes add canonical
+SSTable/manifest files as specified in `docs/lsm-sstable-manifest-format.md`. An exact legacy WAL-only
+directory containing only `wal-0000000000000001.log` remains readable with implicit WAL id/first sequence
+1. Partial version-set layouts do not receive that compatibility treatment. Unknown entries and
+non-regular files still fail closed. `create_new` reserves the directory name and rejects every existing
+path. File contents are synchronized, but there is still no portable parent-directory fsync claim.
 
 ## WAL header
 
@@ -39,8 +36,8 @@ The active WAL begins with a 40-byte header. The CRC is IEEE CRC-32.
 | 8 | 2 | format version | `1` |
 | 10 | 2 | header length | `40` |
 | 12 | 4 | flags | zero |
-| 16 | 8 | WAL id | `1`, matching the fixed file name |
-| 24 | 8 | first sequence | `1` |
+| 16 | 8 | WAL id | nonzero and exactly the manifest-selected/canonical filename id |
+| 24 | 8 | first sequence | nonzero and exactly the manifest-selected first sequence |
 | 32 | 4 | reserved | zero |
 | 36 | 4 | header CRC-32 | checksum of bytes 0–35 |
 
@@ -49,7 +46,8 @@ Unknown versions, flags, ids, nonzero reserved fields, bad checksums, and trunca
 ## Mutation record
 
 Each complete mutation consists of a 32-byte header followed immediately by `key || value`. DELETE has
-no value bytes. Sequence numbers are contiguous and start at one.
+no value bytes. Sequence numbers are globally contiguous within a segment beginning at the first sequence
+declared by its validated WAL header/manifest binding.
 
 | Offset | Bytes | Meaning | v1 validation |
 | ---: | ---: | --- | --- |
@@ -107,16 +105,17 @@ estimate first. This is a structure threshold, not a measured allocator byte cou
 amplification metric. Replaying the ordered WAL with the same fixed threshold reconstructs the same
 boundaries.
 
-Immutable here means no later mutation changes that in-memory table. Frozen tables are now flushed
-synchronously and retired only after SSTable + manifest + CURRENT publication succeeds. The unreclaimed
-WAL remains a redundant recovery source and supplies every sequence above the selected manifest durable
-watermark. There is no background worker or concurrent mutation contract; one caller and one process
-must serialize access.
+Immutable here means no later mutation changes that in-memory table. Frozen tables are flushed
+synchronously and retired only after SSTable + manifest + CURRENT publication succeeds. If a newer
+mutable suffix still exists in the active WAL, that WAL remains authoritative and cannot be reclaimed.
+Only when the manifest durable watermark reaches the segment tail may rotation publish a new empty WAL
+at `durable_sequence + 1`; reclamation then waits until both CURRENT mirrors name the new manifest. There
+is no background worker or concurrent mutation contract; one caller and one process must serialize access.
 
 ## Explicitly deferred
 
-The following still require focused design plus executable evidence: WAL segment rotation/reclamation,
-Bloom filters, block/cache layout, levels and overlap policy, tombstone dropping rules, compaction and
-obsolete-file deletion, compaction fault injection, read/write/space amplification instrumentation, and
-performance comparisons. SSTable/manifest/CURRENT bytes and first-stage flush crash states are now
-specified in `docs/lsm-sstable-manifest-format.md`.
+The following still require focused design plus executable evidence: Bloom filters, block/cache layout,
+levels and overlap policy, tombstone dropping rules, compaction and obsolete-SSTable/manifest deletion,
+compaction fault injection, read/write/space amplification instrumentation, and performance comparisons.
+SSTable/Manifest v2/CURRENT bytes, flush crash states, and WAL rotation/reclamation are specified in
+`docs/lsm-sstable-manifest-format.md`.

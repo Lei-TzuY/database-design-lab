@@ -24,7 +24,7 @@ persistent point/range engine; the LSM now has a WAL/MemTable plus crash-publish
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` with its own checksummed WAL, ordered MemTables, indexed/checksummed immutable SSTables, immutable manifest snapshots, mirrored `CURRENT` publication, WAL-tail replay, tombstones, and half-open range scans; no Bloom filters, WAL reclamation, levels, or compaction yet |
+| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, immutable manifest snapshots, mirrored `CURRENT` publication, crash-safe WAL rotation/reclamation, tombstones, and half-open range scans; no Bloom filters, levels, or compaction yet |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -52,10 +52,13 @@ The LSM is not an adapter around `db-storage-log`: it owns a distinct WAL format
 sequence-tagged values/tombstones in an ordered mutable MemTable that freezes at a documented 64 KiB
 resident estimate. A frozen table is synchronously encoded as an indexed/checksummed immutable SSTable,
 then referenced by a checksummed immutable manifest snapshot, and only then published through the
-inactive slot of an 8 KiB mirrored `CURRENT` file. Reopen validates the selected manifest/SSTables and
-replays only WAL sequences above the manifest's durable watermark. The WAL deliberately retains its
-complete history in this slice, and there are no Bloom filters, levels, or compaction, so this remains
-correctness/recovery evidence—not yet a fair B+ tree performance comparison participant.
+inactive slot of an 8 KiB mirrored `CURRENT` file. Manifest v2 also binds the authoritative WAL segment
+id and first sequence. When the published SSTable watermark reaches the active WAL tail, the engine
+creates and synchronizes a new empty WAL, publishes a new manifest that names it, mirrors that same
+manifest into the other `CURRENT` slot, and only then removes obsolete WAL segments. Reopen therefore
+needs only the manifest-selected WAL suffix while both CURRENT mirrors remain valid after reclamation.
+There are still no Bloom filters, levels, or compaction, so this remains correctness/recovery evidence—not
+yet a fair B+ tree performance comparison participant.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
@@ -63,8 +66,8 @@ and a bounded half-open ordered range API `[start, end)`, with `end = None` mean
 in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
 does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
 serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
-multi-process writers, LSM Bloom filters/levels/compaction/WAL reclamation, replication, SQL, MVCC,
-Raft, graph, time-series, and columnar execution are not implemented.
+multi-process writers, LSM Bloom filters/levels/compaction, replication, SQL, MVCC, Raft, graph,
+time-series, and columnar execution are not implemented.
 
 ## Run the laboratory
 
@@ -107,13 +110,17 @@ but incomplete final append is discarded by truncating back to its starting offs
 the repair. A checksum failure, absurd length, unknown record kind/version, sequence discontinuity, or
 unrecognized tail fails closed. `verify` reports a recoverable partial tail without modifying it.
 
-The LSM foundation stores its own WAL in an engine directory. Its header and each PUT/DELETE record
-carry independent magic/version fields, bounded little-endian lengths, contiguous sequence numbers,
-and header/full-record CRC-32 checksums. `write_all` and `sync_data` complete before a mutation enters
-the MemTable or returns. Reopen replays complete records and truncates only a structurally canonical
-incomplete final record; unknown directory entries, invalid headers, sequence gaps, absurd lengths,
-unexplained tails, and complete checksum failures fail closed. No SSTable or manifest commit guarantee
-is claimed because those formats do not exist yet.
+The LSM stores each WAL segment as `wal-%016d.log`; its checksummed header binds the segment id and
+first sequence, while every PUT/DELETE record retains contiguous global sequence numbers and independent
+header/full-record CRC-32 checksums. `write_all` and `sync_data` complete before a mutation enters the
+MemTable or returns. Reopen selects the WAL named by the authoritative manifest, validates its header
+identity, replays complete records above the manifest durable watermark, and truncates only a structurally
+canonical incomplete final record. Frozen MemTables become synchronized immutable SSTables before a new
+immutable manifest is published through mirrored `CURRENT`. WAL reclamation is a second publication
+step: a new empty segment is synchronized, Manifest v2 names its id/first sequence, both CURRENT mirrors
+are moved to that same manifest, the old WAL handle is closed, and only then are obsolete canonical WAL
+segments removed. Unknown entries, identity mismatches, sequence gaps, absurd lengths, unexplained tails,
+and complete checksum failures fail closed.
 
 The B+ tree pager uses a different commit unit. Two checksummed 4 KiB superblocks alternate metadata
 generations. A newly allocated immutable page is synchronized before `page_count + 1` is written to
@@ -139,7 +146,8 @@ directory-entry durability for initial file creation, protection against lying s
 cryptographic integrity. An I/O error during a persistent commit has an ambiguous outcome; the live
 handle is poisoned and must be reopened. See [the append-log format](docs/on-disk-format.md),
 [the B+ tree page format](docs/btree-page-format.md),
-[the LSM WAL/MemTable format](docs/lsm-wal-format.md), and
+[the LSM WAL/MemTable format](docs/lsm-wal-format.md),
+[the LSM SSTable/manifest format](docs/lsm-sstable-manifest-format.md), and
 [the experimental constitution](docs/experimental-constitution.md) for exact fault models.
 
 ## Experimental discipline
@@ -152,8 +160,10 @@ handle is poisoned and must be reopened. See [the append-log format](docs/on-dis
 - [B+ tree page format](docs/btree-page-format.md): mirrored superblocks, slotted pages, copy-on-write
   insert/delete publication, key/value overflow chains, split/rebalance behavior, validation, and current
   crash-state limits.
-- [LSM WAL/MemTable foundation](docs/lsm-wal-format.md): directory/WAL bytes, replay and tail policy,
-  deterministic MemTable freezing, and explicitly deferred SSTable/manifest behavior.
+- [LSM WAL/MemTable format](docs/lsm-wal-format.md): segmented WAL bytes, sequence identity, replay/tail
+  recovery, deterministic MemTable freezing, and reclamation boundary.
+- [LSM SSTable/manifest format](docs/lsm-sstable-manifest-format.md): immutable sorted tables, Manifest v2
+  WAL binding, mirrored CURRENT publication, WAL rotation/reclamation, and recovery states.
 - [Roadmap](docs/roadmap.md): evidence-linked completed items and deliberately deferred phases.
 
 GitHub Actions runs formatting, Clippy with warnings denied, tests, and rustdoc on stable Rust, checks
