@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply mutation fault integration
-        run: python .github/scripts/integrate_btree_fault_matrix.py
+        run: |
+          python .github/scripts/integrate_btree_fault_matrix.py
+          python .github/scripts/fix_btree_fault_matrix.py
       - name: Validate
         run: |
           cargo fmt --all
