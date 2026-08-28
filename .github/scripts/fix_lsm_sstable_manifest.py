@@ -57,6 +57,23 @@ if old_layout_tail not in text:
 text = text.replace(old_layout_tail, new_layout_tail, 1)
 lib.write_text(text)
 
+memtable = Path("crates/db-storage-lsm/src/memtable.rs")
+text = memtable.read_text()
+entry_marker = '''pub(super) struct VersionedEntry {\n    pub(super) sequence: u64,\n    pub(super) value: Option<Vec<u8>>,\n}\n'''
+if entry_marker not in text:
+    raise SystemExit("missing VersionedEntry marker")
+text = text.replace(
+    entry_marker,
+    entry_marker + '''\ntype FrozenSnapshot = (BTreeMap<Vec<u8>, VersionedEntry>, u64);\n''',
+    1,
+)
+text = text.replace(
+    '''    ) -> Result<Option<(BTreeMap<Vec<u8>, VersionedEntry>, u64)>> {''',
+    '''    ) -> Result<Option<FrozenSnapshot>> {''',
+    1,
+)
+memtable.write_text(text)
+
 # Existing frozen-MemTable regression now expects synchronous flush publication.
 tests = Path("crates/db-storage-lsm/src/tests.rs")
 text = tests.read_text()
