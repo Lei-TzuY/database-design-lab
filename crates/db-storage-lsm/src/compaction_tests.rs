@@ -1,8 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use db_core::KvEngine;
+use db_core::{KvEngine, MAX_KEY_BYTES};
 use tempfile::tempdir;
 
 use super::manifest::{CURRENT_FILE_NAME, CURRENT_SLOT_BYTES};
@@ -24,6 +24,46 @@ fn canonical_count(path: &Path, prefix: &str, suffix: &str) -> usize {
         .count()
 }
 
+fn only_manifest(path: &Path) -> PathBuf {
+    let mut manifests = fs::read_dir(path)
+        .expect("read engine directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("MANIFEST-"));
+    let manifest = manifests.next().expect("one authoritative manifest").path();
+    assert!(
+        manifests.next().is_none(),
+        "obsolete manifests were reclaimed"
+    );
+    manifest
+}
+
+fn rewrite_manifest_checksums(bytes: &mut [u8]) {
+    let header_crc = crc32fast::hash(&bytes[..76]);
+    bytes[76..80].copy_from_slice(&header_crc.to_le_bytes());
+    let file_crc_offset = bytes.len() - 4;
+    let file_crc = crc32fast::hash(&bytes[..file_crc_offset]);
+    bytes[file_crc_offset..].copy_from_slice(&file_crc.to_le_bytes());
+}
+
+fn rewrite_manifest_as_v3(path: &Path) {
+    let manifest_path = only_manifest(path);
+    let mut bytes = fs::read(&manifest_path).expect("read v4 manifest fixture");
+    assert_eq!(
+        u16::from_le_bytes(bytes[8..10].try_into().expect("manifest version")),
+        4
+    );
+    assert_eq!(bytes[64..72], [0; 8]);
+    bytes[8..10].copy_from_slice(&3_u16.to_le_bytes());
+    rewrite_manifest_checksums(&mut bytes);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(manifest_path)
+        .expect("open manifest fixture for downgrade");
+    file.write_all(&bytes).expect("write Manifest v3 fixture");
+    file.sync_all().expect("sync Manifest v3 fixture");
+}
+
 fn populate_four_flushes(engine: &mut LsmEngine) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut expected = Vec::new();
     for index in 0_u8..8 {
@@ -37,19 +77,19 @@ fn populate_four_flushes(engine: &mut LsmEngine) -> Vec<(Vec<u8>, Vec<u8>)> {
 
 fn rewrite_single_table_manifest_as_v2(path: &Path, manifest_id: u64) {
     let manifest_path = path.join(format!("MANIFEST-{manifest_id:016}"));
-    let source = fs::read(&manifest_path).expect("read v3 manifest fixture");
+    let source = fs::read(&manifest_path).expect("read v4 manifest fixture");
     assert_eq!(
         u16::from_le_bytes(source[8..10].try_into().expect("manifest version")),
-        3
+        4
     );
     assert_eq!(
         u64::from_le_bytes(source[32..40].try_into().expect("table count")),
         1
     );
     assert_eq!(
-        u32::from_le_bytes(source[112..116].try_into().expect("v3 level")),
+        u32::from_le_bytes(source[112..116].try_into().expect("v4 level")),
         0,
-        "only an L0 v3 descriptor can be represented by legacy Manifest v2"
+        "only an L0 v4 descriptor can be represented by legacy Manifest v2"
     );
     assert_eq!(source[116..120], [0; 4]);
 
@@ -111,6 +151,7 @@ fn four_overlapping_l0_flush_slots_compact_to_one_l1_and_reopen() {
     assert_eq!(stats.level1_sstables, 1);
     assert_eq!(stats.sstable_entries, 8);
     assert_eq!(stats.durable_sequence, 8);
+    assert_eq!(stats.tombstone_gc_sequence, 8);
     assert_eq!(stats.wal_records, 0);
     assert_eq!(canonical_count(&path, "sst-", ".sst"), 1);
     assert_eq!(canonical_count(&path, "MANIFEST-", ""), 1);
@@ -134,7 +175,7 @@ fn four_overlapping_l0_flush_slots_compact_to_one_l1_and_reopen() {
 }
 
 #[test]
-fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
+fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v4_compaction() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     {
@@ -143,7 +184,7 @@ fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
         engine
             .put(b"legacy-b", &large_value(0x62))
             .expect("flush first L0 and rotate WAL");
-        let stats = engine.stats().expect("v3 source stats");
+        let stats = engine.stats().expect("v4 source stats");
         assert_eq!(stats.level0_sstables, 1);
         assert_eq!(stats.level1_sstables, 0);
         assert_eq!(stats.active_wal_id, 2);
@@ -171,12 +212,13 @@ fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
             .put(&key, &large_value(0x70 + index))
             .expect("build three additional L0 tables");
     }
-    let upgraded = reopened.stats().expect("v3 upgraded stats");
+    let upgraded = reopened.stats().expect("v4 upgraded stats");
     assert_eq!(upgraded.level0_sstables, 0);
     assert_eq!(upgraded.level1_sstables, 1);
     assert_eq!(upgraded.sstables, 1);
-    reopened.reopen().expect("reopen upgraded v3 L1");
-    assert_eq!(reopened.stats().expect("reopened v3 stats"), upgraded);
+    assert_eq!(upgraded.tombstone_gc_sequence, upgraded.durable_sequence);
+    reopened.reopen().expect("reopen upgraded v4 L1");
+    assert_eq!(reopened.stats().expect("reopened v4 stats"), upgraded);
     assert_eq!(
         reopened.get(b"legacy-a").expect("read migrated a"),
         Some(large_value(0x61))
@@ -184,7 +226,7 @@ fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
 }
 
 #[test]
-fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
+fn full_set_compaction_drops_tombstone_and_new_l0_can_reinsert() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
@@ -209,15 +251,24 @@ fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
         .put(b"g-fill", &large_value(0x38))
         .expect("flush fourth L0 and compact");
 
-    let tombstone = engine
-        .current_entry(b"victim")
-        .expect("read compacted entry")
-        .expect("tombstone must remain represented");
-    assert_eq!(tombstone.sequence, 3);
-    assert_eq!(tombstone.value, None);
+    assert_eq!(
+        engine
+            .current_entry(b"victim")
+            .expect("read compacted entry"),
+        None,
+        "full-set compaction must physically elide the authoritative tombstone"
+    );
     assert_eq!(engine.get(b"victim").expect("deleted victim"), None);
-    assert_eq!(engine.stats().expect("L1 stats").level1_sstables, 1);
-    engine.reopen().expect("reopen tombstone L1");
+    let compacted = engine.stats().expect("L1 stats");
+    assert_eq!(compacted.level1_sstables, 1);
+    assert_eq!(compacted.sstable_entries, 7);
+    assert_eq!(compacted.durable_sequence, 9);
+    assert_eq!(compacted.tombstone_gc_sequence, 9);
+    engine.reopen().expect("reopen tombstone-elided L1");
+    assert_eq!(
+        engine.current_entry(b"victim").expect("reopened entry"),
+        None
+    );
     assert_eq!(engine.get(b"victim").expect("reopened tombstone"), None);
 
     engine.put(b"victim", b"revived").expect("revive victim");
@@ -228,6 +279,7 @@ fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
     let stats = engine.stats().expect("mixed-level stats");
     assert_eq!(stats.level0_sstables, 1);
     assert_eq!(stats.level1_sstables, 1);
+    assert_eq!(stats.tombstone_gc_sequence, 9);
     assert_eq!(
         engine.get(b"victim").expect("newest L0 wins"),
         Some(b"revived".to_vec())
@@ -237,6 +289,173 @@ fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
         engine.get(b"victim").expect("reopened newest L0"),
         Some(b"revived".to_vec())
     );
+}
+
+#[test]
+fn all_tombstone_compaction_publishes_tableless_durable_state() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    let mut first_key = None;
+
+    for batch in 0_u8..4 {
+        for index in 0_u8..16 {
+            let mut key = vec![0_u8; MAX_KEY_BYTES];
+            key[0] = batch;
+            key[1] = index;
+            first_key.get_or_insert_with(|| key.clone());
+            assert_eq!(engine.delete(&key).expect("delete missing key"), None);
+        }
+    }
+
+    let stats = engine.stats().expect("table-less compacted stats");
+    assert_eq!(stats.durable_sequence, 64);
+    assert_eq!(stats.tombstone_gc_sequence, 64);
+    assert_eq!(stats.sstables, 0);
+    assert_eq!(stats.level0_sstables, 0);
+    assert_eq!(stats.level1_sstables, 0);
+    assert_eq!(stats.sstable_entries, 0);
+    assert_eq!(stats.wal_records, 0);
+    assert_eq!(stats.active_wal_first_sequence, 65);
+    assert_eq!(canonical_count(&path, "sst-", ".sst"), 0);
+    assert_eq!(canonical_count(&path, "MANIFEST-", ""), 1);
+
+    let manifest = fs::read(only_manifest(&path)).expect("read table-less manifest");
+    assert_eq!(
+        u16::from_le_bytes(manifest[8..10].try_into().expect("manifest version")),
+        4
+    );
+    assert_eq!(
+        u64::from_le_bytes(manifest[24..32].try_into().expect("durable")),
+        64
+    );
+    assert_eq!(
+        u64::from_le_bytes(manifest[32..40].try_into().expect("tables")),
+        0
+    );
+    assert_eq!(
+        u64::from_le_bytes(manifest[64..72].try_into().expect("GC sequence")),
+        64
+    );
+
+    engine.reopen().expect("reopen table-less compacted state");
+    assert_eq!(engine.stats().expect("reopened stats"), stats);
+    assert_eq!(
+        engine
+            .get(first_key.as_deref().expect("first key"))
+            .expect("get deleted key"),
+        None
+    );
+    assert_eq!(
+        LsmEngine::verify(&path)
+            .expect("verify table-less state")
+            .memtables,
+        stats
+    );
+
+    engine
+        .put(b"live-a", &large_value(0x91))
+        .expect("put after empty compaction");
+    engine
+        .put(b"live-b", &large_value(0x92))
+        .expect("flush after empty compaction");
+    let refilled = engine.stats().expect("refilled stats");
+    assert_eq!(refilled.sstables, 1);
+    assert_eq!(refilled.level0_sstables, 1);
+    assert_eq!(refilled.durable_sequence, 66);
+    assert_eq!(refilled.tombstone_gc_sequence, 64);
+    engine.reopen().expect("reopen refilled state");
+    assert_eq!(
+        engine.get(b"live-a").expect("get refilled key"),
+        Some(large_value(0x91))
+    );
+}
+
+#[test]
+fn manifest_v3_reopens_and_upgrades_to_v4_on_next_install() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    {
+        let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+        engine.put(b"legacy-a", &large_value(0xa1)).expect("put a");
+        engine
+            .put(b"legacy-b", &large_value(0xa2))
+            .expect("flush first L0");
+    }
+    rewrite_manifest_as_v3(&path);
+
+    let mut reopened = LsmEngine::open(&path).expect("open legacy Manifest v3");
+    assert_eq!(
+        reopened
+            .stats()
+            .expect("legacy v3 stats")
+            .tombstone_gc_sequence,
+        0
+    );
+    reopened
+        .put(b"new-a", &large_value(0xa3))
+        .expect("put new a");
+    reopened
+        .put(b"new-b", &large_value(0xa4))
+        .expect("publish Manifest v4");
+    let manifest = fs::read(only_manifest(&path)).expect("read upgraded manifest");
+    assert_eq!(
+        u16::from_le_bytes(manifest[8..10].try_into().expect("manifest version")),
+        4
+    );
+    reopened.reopen().expect("reopen upgraded Manifest v4");
+    assert_eq!(
+        reopened.get(b"legacy-a").expect("get legacy key"),
+        Some(large_value(0xa1))
+    );
+    assert_eq!(
+        reopened.get(b"new-b").expect("get new key"),
+        Some(large_value(0xa4))
+    );
+}
+
+#[test]
+fn manifest_v4_rejects_unproven_gc_tableless_watermarks_and_reserved_bytes() {
+    let live_directory = tempdir().expect("temporary live directory");
+    let live_path = live_directory.path().join("engine");
+    let mut live = LsmEngine::create_new(&live_path).expect("create live LSM");
+    populate_four_flushes(&mut live);
+    drop(live);
+    let live_manifest = only_manifest(&live_path);
+    let original = fs::read(&live_manifest).expect("read live manifest");
+    let mut invalid_gc = original.clone();
+    invalid_gc[64..72].copy_from_slice(&9_u64.to_le_bytes());
+    rewrite_manifest_checksums(&mut invalid_gc);
+    fs::write(&live_manifest, invalid_gc).expect("write invalid GC watermark");
+    let error = LsmEngine::open(&live_path).expect_err("GC beyond durable sequence must fail");
+    assert!(error.to_string().contains("GC sequence"), "{error}");
+
+    let mut invalid_reserved = original;
+    invalid_reserved[72] = 1;
+    rewrite_manifest_checksums(&mut invalid_reserved);
+    fs::write(&live_manifest, invalid_reserved).expect("write nonzero v4 reserved byte");
+    let error = LsmEngine::open(&live_path).expect_err("nonzero v4 reserved byte must fail");
+    assert!(error.to_string().contains("invalid v4 manifest"), "{error}");
+
+    let empty_directory = tempdir().expect("temporary empty directory");
+    let empty_path = empty_directory.path().join("engine");
+    let mut empty = LsmEngine::create_new(&empty_path).expect("create empty LSM");
+    for batch in 0_u8..4 {
+        for index in 0_u8..16 {
+            let mut key = vec![0_u8; MAX_KEY_BYTES];
+            key[0] = batch;
+            key[1] = index;
+            empty.delete(&key).expect("build tombstone-only inputs");
+        }
+    }
+    drop(empty);
+    let empty_manifest = only_manifest(&empty_path);
+    let mut bytes = fs::read(&empty_manifest).expect("read table-less manifest");
+    bytes[64..72].copy_from_slice(&0_u64.to_le_bytes());
+    rewrite_manifest_checksums(&mut bytes);
+    fs::write(&empty_manifest, bytes).expect("write unproven table-less watermark");
+    let error = LsmEngine::open(&empty_path).expect_err("table-less watermark must be GC-covered");
+    assert!(error.to_string().contains("table-less manifest"), "{error}");
 }
 
 #[test]

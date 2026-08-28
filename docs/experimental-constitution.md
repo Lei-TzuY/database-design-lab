@@ -153,8 +153,9 @@ claim.
 ## 9. Current non-goals
 
 The current baseline does not implement SQL, relational schemas, transactions, MVCC, 2PL, OCC,
-multi-process concurrency, file locking, an ordered append-log access path, LSM SSTables/manifests,
-LSM compaction or WAL reclamation, physical B+ tree file compaction, Bloom filters, replication,
-sharding, consensus, graph traversal, time-series retention, columnar execution, online format
-migration, encryption, or production operations. These are intentionally deferred rather than
-represented by placeholders.
+multi-process concurrency, file locking, an ordered append-log access path, generalized multi-run or
+multi-level LSM compaction, snapshots, replication-aware tombstone retention, a disk block cache,
+physical B+ tree file compaction, validated amplification instrumentation, replication, sharding,
+consensus, graph traversal, time-series retention, columnar execution, online format migration,
+encryption, or production operations. These are intentionally deferred rather than represented by
+placeholders.

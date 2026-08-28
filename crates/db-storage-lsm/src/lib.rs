@@ -5,8 +5,10 @@
 //! synchronized, and only then is the new version set published through one slot of mirrored `CURRENT`.
 //! WAL segments rotate only after published SSTables cover their complete sequence range. SSTable v2
 //! embeds a checksummed Bloom filter for point-read rejection. Flushes enter overlapping L0; four
-//! L0 tables trigger a synchronous full-set merge into one non-overlapping L1 run, published through
-//! mirrored CURRENT before obsolete sorted-table/manifest files are reclaimed. Deterministic
+//! L0 tables trigger a synchronous full-set merge into at most one non-overlapping L1 run. Because the
+//! merge covers every authoritative table and this engine has no snapshots, it elides tombstones and
+//! records that proof point in Manifest v4 before obsolete sorted-table/manifest files are reclaimed.
+//! Deterministic
 //! compaction fault tests exercise pre-write, torn durable output, and post-sync reported errors at
 //! the replacement L1 SSTable, Manifest, first CURRENT, and mirror CURRENT boundaries.
 
@@ -90,6 +92,8 @@ pub struct LsmStats {
     pub sstable_entries: u64,
     /// Highest WAL sequence represented by the authoritative SSTable version set.
     pub durable_sequence: u64,
+    /// Highest full-set compaction sequence through which tombstones were safely elided.
+    pub tombstone_gc_sequence: u64,
 }
 
 /// Read-only verification result for the implemented LSM directory state.
@@ -190,6 +194,7 @@ impl LsmEngine {
                 current_generation: 0,
                 manifest_id: 0,
                 durable_sequence: 0,
+                tombstone_gc_sequence: 0,
                 wal_id: INITIAL_WAL_ID,
                 wal_first_sequence: INITIAL_FIRST_SEQUENCE,
                 tables: Vec::new(),
@@ -258,6 +263,7 @@ impl LsmEngine {
                 current_generation: 0,
                 manifest_id: 0,
                 durable_sequence: 0,
+                tombstone_gc_sequence: 0,
                 wal_id: INITIAL_WAL_ID,
                 wal_first_sequence: INITIAL_FIRST_SEQUENCE,
                 tables: Vec::new(),
@@ -321,6 +327,7 @@ impl LsmEngine {
                     .count(),
                 sstable_entries,
                 durable_sequence,
+                tombstone_gc_sequence: version.tombstone_gc_sequence,
             },
             wal,
         })
@@ -369,6 +376,7 @@ impl LsmEngine {
                 .count(),
             sstable_entries,
             durable_sequence: self.version.durable_sequence,
+            tombstone_gc_sequence: self.version.tombstone_gc_sequence,
         })
     }
 
@@ -445,10 +453,13 @@ impl LsmEngine {
                 &self.path,
                 &self.version,
                 manifest_id,
-                durable_sequence,
-                descriptors,
-                self.version.wal_id,
-                self.version.wal_first_sequence,
+                manifest::ManifestState {
+                    durable_sequence,
+                    tombstone_gc_sequence: self.version.tombstone_gc_sequence,
+                    wal_id: self.version.wal_id,
+                    wal_first_sequence: self.version.wal_first_sequence,
+                    tables: descriptors,
+                },
             )?;
 
             self.tables.push(table);
@@ -483,20 +494,36 @@ impl LsmEngine {
             ));
         }
 
-        let table_id = self.next_table_id;
         let manifest_id = self.next_manifest_id;
-        let next_table_id = checked_next_id(table_id, "SSTable")?;
         let next_manifest_id = checked_next_id(manifest_id, "manifest")?;
         let durable_sequence = self.version.durable_sequence;
-        #[cfg(test)]
-        self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
-        let table =
-            SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
-        #[cfg(test)]
-        self.compaction_after_file_write_for_test(
-            CompactionWriteKind::L1Sstable,
-            &self.path.join(sstable_file_name(table_id)),
-        )?;
+        if merged
+            .values()
+            .any(|entry| entry.sequence > durable_sequence)
+        {
+            return Err(corruption(
+                "full-set compaction input exceeds the manifest durable sequence",
+            ));
+        }
+        merged.retain(|_, entry| entry.value.is_some());
+
+        let (table, descriptors, next_table_id) = if merged.is_empty() {
+            (None, Vec::new(), self.next_table_id)
+        } else {
+            let table_id = self.next_table_id;
+            let next_table_id = checked_next_id(table_id, "SSTable")?;
+            #[cfg(test)]
+            self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
+            let table =
+                SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
+            #[cfg(test)]
+            self.compaction_after_file_write_for_test(
+                CompactionWriteKind::L1Sstable,
+                &self.path.join(sstable_file_name(table_id)),
+            )?;
+            let descriptor = table.descriptor().clone();
+            (Some(table), vec![descriptor], next_table_id)
+        };
 
         #[cfg(test)]
         self.compaction_before_write_for_test(CompactionWriteKind::Manifest)?;
@@ -504,10 +531,13 @@ impl LsmEngine {
             &self.path,
             &self.version,
             manifest_id,
-            durable_sequence,
-            vec![table.descriptor().clone()],
-            self.version.wal_id,
-            self.version.wal_first_sequence,
+            manifest::ManifestState {
+                durable_sequence,
+                tombstone_gc_sequence: durable_sequence,
+                wal_id: self.version.wal_id,
+                wal_first_sequence: self.version.wal_first_sequence,
+                tables: descriptors,
+            },
         )?;
         #[cfg(test)]
         self.compaction_after_file_write_for_test(
@@ -532,10 +562,11 @@ impl LsmEngine {
             CompactionWriteKind::MirrorCurrent,
             mirrored.current_generation,
         )?;
-        let active_table_id = table.descriptor().table_id;
+        let active_table_id = table.as_ref().map(|table| table.descriptor().table_id);
         let active_manifest_id = mirrored.manifest_id;
 
-        let old_tables = std::mem::replace(&mut self.tables, vec![table]);
+        let new_tables = table.into_iter().collect();
+        let old_tables = std::mem::replace(&mut self.tables, new_tables);
         self.version = mirrored;
         self.next_table_id = next_table_id;
         self.next_manifest_id = next_manifest_id;
@@ -636,7 +667,7 @@ impl LsmEngine {
         }
     }
 
-    fn reclaim_obsolete_sstables(&self, active_table_id: u64) {
+    fn reclaim_obsolete_sstables(&self, active_table_id: Option<u64>) {
         let Ok(entries) = fs::read_dir(&self.path) else {
             return;
         };
@@ -646,7 +677,7 @@ impl LsmEngine {
             let Some(table_id) = parse_numbered_name(&text, "sst-", ".sst") else {
                 continue;
             };
-            if table_id != active_table_id {
+            if Some(table_id) != active_table_id {
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -694,10 +725,13 @@ impl LsmEngine {
             &self.path,
             &self.version,
             new_manifest_id,
-            self.version.durable_sequence,
-            self.version.tables.clone(),
-            new_wal_id,
-            first_sequence,
+            manifest::ManifestState {
+                durable_sequence: self.version.durable_sequence,
+                tombstone_gc_sequence: self.version.tombstone_gc_sequence,
+                wal_id: new_wal_id,
+                wal_first_sequence: first_sequence,
+                tables: self.version.tables.clone(),
+            },
         )?;
         let mirrored = manifest::mirror_current(&self.path, &rotated)?;
 
@@ -740,7 +774,7 @@ impl LsmEngine {
 impl KvEngine for LsmEngine {
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            name: "lsm-level1-compaction-v3",
+            name: "lsm-level1-tombstone-gc-v4",
             logical_model: LogicalModel::KeyValue,
             storage_architecture: StorageArchitecture::LsmTree,
             concurrency: ConcurrencyMode::CallerSerialized,
