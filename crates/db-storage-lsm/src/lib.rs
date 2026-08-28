@@ -510,9 +510,16 @@ impl LsmEngine {
 
         #[cfg(test)]
         self.compaction_before_write_for_test(CompactionWriteKind::Manifest)?;
+        let observed_table_id_high_watermark = table_id
+            .checked_sub(1)
+            .ok_or_else(|| corruption("next SSTable id unexpectedly reached zero"))?;
+        let mut compaction_base = self.version.clone();
+        compaction_base.table_id_high_watermark = compaction_base
+            .table_id_high_watermark
+            .max(observed_table_id_high_watermark);
         let compacted = manifest::prepare_install(
             &self.path,
-            &self.version,
+            &compaction_base,
             manifest_id,
             durable_sequence,
             descriptors,

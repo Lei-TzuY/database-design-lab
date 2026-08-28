@@ -312,3 +312,69 @@ fn empty_output_compaction_fault_matrix_reopens_old_or_durable_empty_checkpoint(
         }
     }
 }
+
+#[test]
+fn durable_empty_retry_preserves_observed_orphan_id_floor_across_cleanup() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    build_three_tombstone_l0(&path);
+
+    {
+        let mut engine = LsmEngine::open(&path).expect("open three-L0 baseline");
+        engine.inject_compaction_fault_for_test(
+            CompactionWriteKind::Manifest,
+            CompactionFaultMode::BeforeWrite,
+        );
+        for index in 48_u64..63 {
+            assert_eq!(
+                engine
+                    .delete(&tombstone_key(index))
+                    .expect("pre-trigger delete"),
+                None
+            );
+        }
+        assert!(matches!(
+            engine.delete(&tombstone_key(63)),
+            Err(DbError::Io(_))
+        ));
+    }
+
+    assert_eq!(canonical_count(&path, "sst-", ".sst"), 4);
+    let orphan = path.join("sst-0000000000000099.sst");
+    fs::write(&orphan, b"ambiguous crash orphan").expect("write canonical orphan id 99");
+
+    let mut reopened = LsmEngine::open(&path).expect("open four-L0 state plus orphan 99");
+    reopened
+        .put(b"tail", b"v")
+        .expect("retry empty compaction while retaining a WAL tail");
+    let checkpoint = reopened.stats().expect("retry checkpoint stats");
+    assert_eq!(checkpoint.durable_sequence, 64);
+    assert_eq!(checkpoint.sstables, 0);
+    assert_eq!(checkpoint.mutable_entries, 1);
+    assert_eq!(canonical_count(&path, "sst-", ".sst"), 0);
+    assert!(
+        !orphan.exists(),
+        "cleanup may remove orphan 99 only after persisting its id floor"
+    );
+
+    reopened.reopen().expect("reopen after orphan cleanup");
+    reopened
+        .put(b"fill-a", &large_value(0x71))
+        .expect("put first post-checkpoint filler");
+    reopened
+        .put(b"fill-b", &large_value(0x72))
+        .expect("flush post-checkpoint table");
+    assert!(
+        path.join("sst-0000000000000100.sst").exists(),
+        "table allocation must continue above the removed ambiguous orphan id"
+    );
+    assert_eq!(
+        reopened.get(b"tail").expect("read WAL-tail value"),
+        Some(b"v".to_vec())
+    );
+    reopened.reopen().expect("reopen table 100");
+    assert_eq!(
+        reopened.get(b"tail").expect("read persisted tail"),
+        Some(b"v".to_vec())
+    );
+}
