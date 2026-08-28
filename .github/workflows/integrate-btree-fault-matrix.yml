@@ -20,10 +20,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply mutation fault integration
+      - name: Apply mutation fault integration and docs
         run: |
-          python .github/scripts/integrate_btree_fault_matrix.py
-          python .github/scripts/fix_btree_fault_matrix.py
+          if ! grep -q 'enum DurableWriteKind' crates/db-storage-btree/src/lib.rs; then
+            python .github/scripts/integrate_btree_fault_matrix.py
+            python .github/scripts/fix_btree_fault_matrix.py
+          fi
+          python .github/scripts/update_btree_fault_docs.py
       - name: Validate
         run: |
           cargo fmt --all
@@ -38,6 +41,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-storage-btree/src/lib.rs crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/reuse.rs crates/db-storage-btree/src/tree/fault.rs
-          git commit -m "test(btree): add mutation fault matrix"
+          git add README.md crates/db-storage-btree/src/lib.rs crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/reuse.rs crates/db-storage-btree/src/tree/fault.rs docs/btree-page-format.md docs/design-space.md docs/experimental-constitution.md docs/roadmap.md
+          git commit -m "docs(btree): record mutation fault evidence"
           git push origin HEAD:feat/btree-mutation-fault-matrix
