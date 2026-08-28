@@ -76,18 +76,24 @@ Do not create a B+ tree crate until its first PR includes executable pager/page 
 
 Begin only after the B+ tree and common ordered semantics are trustworthy.
 
-- [ ] Complete the WAL/SSTable/manifest format family and atomic version-set transitions. WAL v1 and
-  its single-file directory policy are specified in `docs/lsm-wal-format.md`; SSTable, manifest,
-  CURRENT, flush-install, and WAL-reclamation formats remain deliberately unspecified until their
-  implementation PR.
+- [x] Specify and implement WAL/SSTable/manifest persistence through atomic flush installation. WAL v1
+  remains in `docs/lsm-wal-format.md`; `docs/lsm-sstable-manifest-format.md` defines indexed/checksummed
+  immutable SSTables, complete immutable manifest snapshots, mirrored 4 KiB `CURRENT` slots, durable
+  sequence watermarks, canonical orphan handling, and the WAL-backed interrupted-install recovery rule.
+- [ ] Specify and implement WAL segment rotation/reclamation. The current single WAL intentionally retains
+  complete history so reclamation does not share the first SSTable/manifest publication protocol.
 - [x] Implement an independent versioned/checksummed WAL with synchronized PUT/tombstone records,
   fail-closed bounded replay, canonical incomplete-tail recovery, and ordered mutable/immutable
   MemTables. Fixed-seed differential tests cover reopen after every operation; deterministic tests
   cover freeze/read precedence, ordered ranges, 4 KiB/1 MiB bounds, structural WAL prefixes, bit flips,
   absurd lengths, sequence gaps, tombstones, and undeclared directory entries.
-- [ ] Implement immutable sorted tables with indexes and checksums.
+- [x] Implement immutable sorted tables with complete indexes, per-record/index/header/footer checksums,
+  whole-file checksum validation, full 4 KiB-key/1 MiB-value support, and manifest-bound key/extent metadata.
 - [ ] Add Bloom filters with measured false-positive configuration.
-- [ ] Implement tombstone-aware reads, levels, compaction, and crash-safe manifest recovery.
+- [x] Implement tombstone-aware multi-SSTable point/range reads plus crash-safe flush manifest recovery.
+  Tests cover authoritative SSTable/manifest corruption, latest-CURRENT-slot fallback with WAL replay,
+  unreferenced canonical orphans, mutable WAL tails, and maximum-value flush/reopen.
+- [ ] Add levels, overlap policy, compaction, obsolete-file deletion, and safe tombstone dropping.
 - [ ] Add compaction fault injection, deterministic differential tests, and instrumentation validation.
 
 ## Phase 4 — Fair B+ tree versus LSM experiments
