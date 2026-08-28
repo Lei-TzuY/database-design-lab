@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use db_core::{DbError, Result, MAX_KEY_BYTES, MAX_VALUE_BYTES};
 
+use crate::bloom::BloomFilter;
 use crate::memtable::VersionedEntry;
 
 pub(super) const SSTABLE_HEADER_LEN: usize = 64;
@@ -14,7 +15,8 @@ const INDEX_PREFIX_LEN: usize = 24;
 const SSTABLE_MAGIC: [u8; 8] = *b"DBLSMSST";
 const SSTABLE_FOOTER_MAGIC: [u8; 8] = *b"DBLSMEND";
 const RECORD_MAGIC: [u8; 4] = *b"SSTR";
-const FORMAT_VERSION: u16 = 1;
+const LEGACY_FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 const RECORD_VERSION: u8 = 1;
 const INDEX_VERSION: u8 = 1;
 const KIND_PUT: u8 = 1;
@@ -70,6 +72,7 @@ pub(super) struct SsTable {
     descriptor: SstableDescriptor,
     bytes: Vec<u8>,
     index: Vec<IndexEntry>,
+    bloom: Option<BloomFilter>,
 }
 
 impl SsTable {
@@ -79,12 +82,53 @@ impl SsTable {
         durable_sequence: u64,
         entries: &BTreeMap<Vec<u8>, VersionedEntry>,
     ) -> Result<Self> {
+        Self::create_new_with_format(
+            directory,
+            table_id,
+            durable_sequence,
+            entries,
+            FORMAT_VERSION,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_legacy_v1_for_test(
+        directory: &Path,
+        table_id: u64,
+        durable_sequence: u64,
+        entries: &BTreeMap<Vec<u8>, VersionedEntry>,
+    ) -> Result<Self> {
+        Self::create_new_with_format(
+            directory,
+            table_id,
+            durable_sequence,
+            entries,
+            LEGACY_FORMAT_VERSION,
+        )
+    }
+
+    fn create_new_with_format(
+        directory: &Path,
+        table_id: u64,
+        durable_sequence: u64,
+        entries: &BTreeMap<Vec<u8>, VersionedEntry>,
+        format_version: u16,
+    ) -> Result<Self> {
         if entries.is_empty() {
             return Err(corruption(0, "cannot create an empty SSTable"));
+        }
+        if format_version != LEGACY_FORMAT_VERSION && format_version != FORMAT_VERSION {
+            return Err(corruption(0, "cannot create unsupported SSTable format"));
         }
         let entry_count = u64::try_from(entries.len())
             .map_err(|_| corruption(0, "SSTable entry count does not fit u64"))?;
         let mut bytes = vec![0_u8; SSTABLE_HEADER_LEN];
+        if format_version == FORMAT_VERSION {
+            let bloom = BloomFilter::build(entries.keys().map(Vec::as_slice), entries.len())?;
+            bytes.extend_from_slice(&bloom.encode()?);
+        }
+        let data_offset = u64::try_from(bytes.len())
+            .map_err(|_| corruption(0, "SSTable data offset does not fit u64"))?;
         let mut record_offsets = Vec::with_capacity(entries.len());
 
         for (key, entry) in entries {
@@ -110,10 +154,18 @@ impl SsTable {
             0,
         );
 
-        let header = encode_header(table_id, entry_count, index_offset, footer_offset);
+        let header = encode_header(
+            format_version,
+            table_id,
+            entry_count,
+            data_offset,
+            index_offset,
+            footer_offset,
+        );
         bytes[..SSTABLE_HEADER_LEN].copy_from_slice(&header);
         let whole_crc = crc32fast::hash(&bytes[..usize_from_u64(footer_offset, 0)?]);
         let footer = encode_footer(
+            format_version,
             table_id,
             entry_count,
             index_offset,
@@ -187,7 +239,8 @@ impl SsTable {
             ));
         }
         let footer = parse_footer(&bytes[footer_start..footer_end], header.footer_offset)?;
-        if footer.table_id != header.table_id
+        if footer.format_version != header.format_version
+            || footer.table_id != header.table_id
             || footer.entry_count != header.entry_count
             || footer.index_offset != header.index_offset
             || footer.footer_offset != header.footer_offset
@@ -208,12 +261,31 @@ impl SsTable {
 
         let data_start = usize_from_u64(header.data_offset, 0)?;
         let index_start = usize_from_u64(header.index_offset, 0)?;
-        if data_start != SSTABLE_HEADER_LEN
-            || index_start > footer_start
-            || index_start < data_start
-        {
+        if index_start > footer_start || index_start < data_start {
             return Err(corruption(0, "invalid SSTable data/index extent ordering"));
         }
+        let bloom = match header.format_version {
+            LEGACY_FORMAT_VERSION => {
+                if data_start != SSTABLE_HEADER_LEN {
+                    return Err(corruption(
+                        32,
+                        "legacy SSTable v1 data must begin immediately after the header",
+                    ));
+                }
+                None
+            }
+            FORMAT_VERSION => {
+                if data_start <= SSTABLE_HEADER_LEN {
+                    return Err(corruption(32, "SSTable v2 is missing its Bloom section"));
+                }
+                Some(BloomFilter::decode(
+                    &bytes[SSTABLE_HEADER_LEN..data_start],
+                    SSTABLE_HEADER_LEN as u64,
+                    header.entry_count,
+                )?)
+            }
+            _ => unreachable!("header version validated before extent parsing"),
+        };
 
         let expected_count = usize_from_u64(header.entry_count, 0)?;
         let mut records = Vec::with_capacity(expected_count);
@@ -299,12 +371,22 @@ impl SsTable {
                 "SSTable entry sequence exceeds durable watermark",
             ));
         }
+        if bloom
+            .as_ref()
+            .is_some_and(|filter| index.iter().any(|entry| !filter.may_contain(&entry.key)))
+        {
+            return Err(corruption(
+                SSTABLE_HEADER_LEN as u64,
+                "SSTable Bloom filter has a false negative for an indexed key",
+            ));
+        }
 
         Ok(Self {
             path: path.to_path_buf(),
             descriptor,
             bytes,
             index,
+            bloom,
         })
     }
 
@@ -313,6 +395,15 @@ impl SsTable {
     }
 
     pub(super) fn get(&self, key: &[u8]) -> Result<Option<VersionedEntry>> {
+        if key < self.descriptor.smallest_key.as_slice()
+            || key > self.descriptor.largest_key.as_slice()
+            || self
+                .bloom
+                .as_ref()
+                .is_some_and(|filter| !filter.may_contain(key))
+        {
+            return Ok(None);
+        }
         let index = match self
             .index
             .binary_search_by(|entry| entry.key.as_slice().cmp(key))
@@ -351,6 +442,20 @@ impl SsTable {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn bloom_may_contain(&self, key: &[u8]) -> Option<bool> {
+        self.bloom.as_ref().map(|filter| filter.may_contain(key))
+    }
+
+    #[cfg(test)]
+    pub(super) fn format_version(&self) -> u16 {
+        if self.bloom.is_some() {
+            FORMAT_VERSION
+        } else {
+            LEGACY_FORMAT_VERSION
+        }
+    }
+
     #[allow(dead_code)]
     pub(super) fn path(&self) -> &Path {
         &self.path
@@ -359,6 +464,7 @@ impl SsTable {
 
 #[derive(Debug, Clone, Copy)]
 struct Header {
+    format_version: u16,
     table_id: u64,
     entry_count: u64,
     data_offset: u64,
@@ -368,6 +474,7 @@ struct Header {
 
 #[derive(Debug, Clone, Copy)]
 struct Footer {
+    format_version: u16,
     table_id: u64,
     entry_count: u64,
     index_offset: u64,
@@ -381,18 +488,20 @@ pub(super) fn file_name(table_id: u64) -> String {
 }
 
 fn encode_header(
+    format_version: u16,
     table_id: u64,
     entry_count: u64,
+    data_offset: u64,
     index_offset: u64,
     footer_offset: u64,
 ) -> [u8; 64] {
     let mut header = [0_u8; 64];
     header[0..8].copy_from_slice(&SSTABLE_MAGIC);
-    header[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    header[8..10].copy_from_slice(&format_version.to_le_bytes());
     header[10..12].copy_from_slice(&(SSTABLE_HEADER_LEN as u16).to_le_bytes());
     header[16..24].copy_from_slice(&table_id.to_le_bytes());
     header[24..32].copy_from_slice(&entry_count.to_le_bytes());
-    header[32..40].copy_from_slice(&(SSTABLE_HEADER_LEN as u64).to_le_bytes());
+    header[32..40].copy_from_slice(&data_offset.to_le_bytes());
     header[40..48].copy_from_slice(&index_offset.to_le_bytes());
     header[48..56].copy_from_slice(&footer_offset.to_le_bytes());
     let checksum = crc32fast::hash(&header[..60]);
@@ -408,7 +517,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
         return Err(corruption(0, "invalid SSTable magic"));
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
-    if version != FORMAT_VERSION {
+    if version != LEGACY_FORMAT_VERSION && version != FORMAT_VERSION {
         return Err(DbError::UnsupportedVersion {
             format: "LSM SSTable",
             found: u64::from(version),
@@ -428,6 +537,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
         return Err(corruption(60, "SSTable header checksum mismatch"));
     }
     Ok(Header {
+        format_version: version,
         table_id: u64::from_le_bytes(bytes[16..24].try_into().expect("fixed slice")),
         entry_count: u64::from_le_bytes(bytes[24..32].try_into().expect("fixed slice")),
         data_offset: u64::from_le_bytes(bytes[32..40].try_into().expect("fixed slice")),
@@ -437,6 +547,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
 }
 
 fn encode_footer(
+    format_version: u16,
     table_id: u64,
     entry_count: u64,
     index_offset: u64,
@@ -446,7 +557,7 @@ fn encode_footer(
 ) -> [u8; 64] {
     let mut footer = [0_u8; 64];
     footer[0..8].copy_from_slice(&SSTABLE_FOOTER_MAGIC);
-    footer[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    footer[8..10].copy_from_slice(&format_version.to_le_bytes());
     footer[10..12].copy_from_slice(&(SSTABLE_FOOTER_LEN as u16).to_le_bytes());
     footer[16..24].copy_from_slice(&table_id.to_le_bytes());
     footer[24..32].copy_from_slice(&entry_count.to_le_bytes());
@@ -464,7 +575,7 @@ fn parse_footer(bytes: &[u8], offset: u64) -> Result<Footer> {
         return Err(corruption(offset, "invalid SSTable footer"));
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("fixed slice"));
-    if version != FORMAT_VERSION {
+    if version != LEGACY_FORMAT_VERSION && version != FORMAT_VERSION {
         return Err(DbError::UnsupportedVersion {
             format: "LSM SSTable",
             found: u64::from(version),
@@ -482,6 +593,7 @@ fn parse_footer(bytes: &[u8], offset: u64) -> Result<Footer> {
         return Err(corruption(offset + 60, "SSTable footer checksum mismatch"));
     }
     Ok(Footer {
+        format_version: version,
         table_id: u64::from_le_bytes(bytes[16..24].try_into().expect("fixed slice")),
         entry_count: u64::from_le_bytes(bytes[24..32].try_into().expect("fixed slice")),
         index_offset: u64::from_le_bytes(bytes[32..40].try_into().expect("fixed slice")),

@@ -27,7 +27,10 @@ impl BloomFilter {
         let key_count = u64::try_from(key_count)
             .map_err(|_| corruption(0, "Bloom key count does not fit u64"))?;
         if key_count == 0 {
-            return Err(corruption(0, "Bloom filter cannot describe an empty SSTable"));
+            return Err(corruption(
+                0,
+                "Bloom filter cannot describe an empty SSTable",
+            ));
         }
         let bit_count = canonical_bit_count(key_count)?;
         let byte_count = usize::try_from(bit_count / 8)
@@ -72,13 +75,19 @@ impl BloomFilter {
             });
         }
         if usize::from(read_u16(&bytes[10..12])) != FILTER_HEADER_LEN {
-            return Err(corruption(offset + 10, "Bloom header length is not canonical"));
+            return Err(corruption(
+                offset + 10,
+                "Bloom header length is not canonical",
+            ));
         }
         if bytes[12] != HASH_ALGORITHM_FNV64_DOUBLE {
             return Err(corruption(offset + 12, "unknown Bloom hash algorithm"));
         }
         if bytes[13] != HASH_PROBES {
-            return Err(corruption(offset + 13, "Bloom probe count is not canonical"));
+            return Err(corruption(
+                offset + 13,
+                "Bloom probe count is not canonical",
+            ));
         }
         if read_u16(&bytes[14..16]) != 0 {
             return Err(corruption(offset + 14, "Bloom flags are nonzero"));
@@ -118,7 +127,10 @@ impl BloomFilter {
             .checked_add(FILTER_TRAILER_LEN)
             .ok_or_else(|| corruption(offset, "Bloom section extent overflowed usize"))?;
         if bytes.len() != expected_len {
-            return Err(corruption(offset, "Bloom section is not an exact canonical extent"));
+            return Err(corruption(
+                offset,
+                "Bloom section is not an exact canonical extent",
+            ));
         }
         let expected_crc = read_u32(&bytes[payload_end..expected_len]);
         if crc32fast::hash(&bytes[..payload_end]) != expected_crc {
@@ -167,10 +179,12 @@ impl BloomFilter {
         })
     }
 
+    #[cfg(test)]
     pub(super) const fn bit_count(&self) -> u64 {
         self.bit_count
     }
 
+    #[cfg(test)]
     pub(super) const fn key_count(&self) -> u64 {
         self.key_count
     }
@@ -201,11 +215,8 @@ fn canonical_bit_count(key_count: u64) -> Result<u64> {
 fn probe_positions(key: &[u8], bit_count: u64) -> impl Iterator<Item = u64> + '_ {
     let first = hash64(key, HASH_SEED_ONE);
     let second = hash64(key, HASH_SEED_TWO) | 1;
-    (0..HASH_PROBES).map(move |probe| {
-        first
-            .wrapping_add(u64::from(probe).wrapping_mul(second))
-            % bit_count
-    })
+    (0..HASH_PROBES)
+        .map(move |probe| first.wrapping_add(u64::from(probe).wrapping_mul(second)) % bit_count)
 }
 
 fn hash64(bytes: &[u8], seed: u64) -> u64 {
@@ -264,7 +275,10 @@ mod tests {
         assert_eq!(filter.key_count(), KEYS as u64);
         assert_eq!(filter.bit_count(), 100_000);
         for present in &keys {
-            assert!(filter.may_contain(present), "Bloom filter produced a false negative");
+            assert!(
+                filter.may_contain(present),
+                "Bloom filter produced a false negative"
+            );
         }
 
         let encoded = filter.encode().expect("encode Bloom filter");
