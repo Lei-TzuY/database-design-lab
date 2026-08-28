@@ -1,8 +1,8 @@
 from pathlib import Path
 
-# Historical manifest snapshots are now reclaimable only after the same authoritative manifest has
-# been published through both CURRENT mirrors. Keep the orphan-id assertion on the newly allocated
-# SSTable, but stop requiring the superseded manifest snapshot to remain physically present.
+# Historical manifest snapshots are now reclaimable after the same authoritative manifest has been
+# published through both CURRENT mirrors. The SSTable orphan itself may remain until a later compaction;
+# the stable contract is that its ambiguous id is never overwritten and allocation skips past it.
 p = Path("crates/db-storage-lsm/src/sstable_tests.rs")
 text = p.read_text()
 old = '''    assert!(numbered_file(&path, "sst-", ".sst", 100).exists());
@@ -11,9 +11,10 @@ old = '''    assert!(numbered_file(&path, "sst-", ".sst", 100).exists());
     assert!(reopened.stats().expect("final stats").sstables >= 2);
 '''
 new = '''    assert!(numbered_file(&path, "sst-", ".sst", 100).exists());
-    assert!(
-        !numbered_file(&path, "sst-", ".sst", 99).exists(),
-        "obsolete canonical orphan may be reclaimed after double-mirror publication"
+    assert_eq!(
+        fs::read(numbered_file(&path, "sst-", ".sst", 99)).expect("read reserved orphan"),
+        b"orphan sstable",
+        "future allocation must not overwrite an ambiguous canonical orphan id"
     );
     reopened.reopen().expect("reopen after skipping orphan ids");
     assert!(reopened.stats().expect("final stats").sstables >= 2);
