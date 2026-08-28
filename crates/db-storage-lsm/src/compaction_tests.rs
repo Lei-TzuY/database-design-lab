@@ -35,6 +35,69 @@ fn populate_four_flushes(engine: &mut LsmEngine) -> Vec<(Vec<u8>, Vec<u8>)> {
     expected
 }
 
+fn rewrite_single_table_manifest_as_v2(path: &Path, manifest_id: u64) {
+    let manifest_path = path.join(format!("MANIFEST-{manifest_id:016}"));
+    let source = fs::read(&manifest_path).expect("read v3 manifest fixture");
+    assert_eq!(
+        u16::from_le_bytes(source[8..10].try_into().expect("manifest version")),
+        3
+    );
+    assert_eq!(
+        u64::from_le_bytes(source[32..40].try_into().expect("table count")),
+        1
+    );
+    assert_eq!(
+        u32::from_le_bytes(source[112..116].try_into().expect("v3 level")),
+        0,
+        "only an L0 v3 descriptor can be represented by legacy Manifest v2"
+    );
+    assert_eq!(source[116..120], [0; 4]);
+
+    let smallest_len = usize::try_from(u32::from_le_bytes(
+        source[120..124].try_into().expect("smallest length"),
+    ))
+    .expect("smallest length fits usize");
+    let largest_len = usize::try_from(u32::from_le_bytes(
+        source[124..128].try_into().expect("largest length"),
+    ))
+    .expect("largest length fits usize");
+    let keys_end = 128 + smallest_len + largest_len;
+    assert!(keys_end + 8 <= source.len());
+
+    let mut descriptor = Vec::new();
+    descriptor.extend_from_slice(&source[80..112]);
+    descriptor.extend_from_slice(&source[120..124]);
+    descriptor.extend_from_slice(&source[124..128]);
+    descriptor.extend_from_slice(&source[128..keys_end]);
+    let descriptor_crc = crc32fast::hash(&descriptor);
+    descriptor.extend_from_slice(&descriptor_crc.to_le_bytes());
+
+    let mut legacy = vec![0_u8; 80];
+    legacy[0..8].copy_from_slice(b"DBLSMMAN");
+    legacy[8..10].copy_from_slice(&2_u16.to_le_bytes());
+    legacy[10..12].copy_from_slice(&80_u16.to_le_bytes());
+    legacy[16..40].copy_from_slice(&source[16..40]);
+    legacy[40..48].copy_from_slice(
+        &u64::try_from(descriptor.len())
+            .expect("descriptor length fits u64")
+            .to_le_bytes(),
+    );
+    legacy[48..64].copy_from_slice(&source[48..64]);
+    let header_crc = crc32fast::hash(&legacy[..76]);
+    legacy[76..80].copy_from_slice(&header_crc.to_le_bytes());
+    legacy.extend_from_slice(&descriptor);
+    let file_crc = crc32fast::hash(&legacy);
+    legacy.extend_from_slice(&file_crc.to_le_bytes());
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&manifest_path)
+        .expect("open manifest fixture for downgrade");
+    file.write_all(&legacy).expect("write Manifest v2 fixture");
+    file.sync_all().expect("sync Manifest v2 fixture");
+}
+
 #[test]
 fn four_overlapping_l0_flush_slots_compact_to_one_l1_and_reopen() {
     let directory = tempdir().expect("temporary directory");
@@ -68,6 +131,56 @@ fn four_overlapping_l0_flush_slots_compact_to_one_l1_and_reopen() {
     }
     let verified = LsmEngine::verify(&path).expect("verify compacted engine");
     assert_eq!(verified.memtables, stats);
+}
+
+#[test]
+fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    {
+        let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+        engine.put(b"legacy-a", &large_value(0x61)).expect("put a");
+        engine
+            .put(b"legacy-b", &large_value(0x62))
+            .expect("flush first L0 and rotate WAL");
+        let stats = engine.stats().expect("v3 source stats");
+        assert_eq!(stats.level0_sstables, 1);
+        assert_eq!(stats.level1_sstables, 0);
+        assert_eq!(stats.active_wal_id, 2);
+    }
+
+    assert_eq!(canonical_count(&path, "MANIFEST-", ""), 1);
+    rewrite_single_table_manifest_as_v2(&path, 3);
+
+    let mut reopened = LsmEngine::open(&path).expect("open Manifest v2 descriptor as implicit L0");
+    let legacy = reopened.stats().expect("legacy v2 stats");
+    assert_eq!(legacy.level0_sstables, 1);
+    assert_eq!(legacy.level1_sstables, 0);
+    assert_eq!(
+        reopened.get(b"legacy-a").expect("read legacy a"),
+        Some(large_value(0x61))
+    );
+    assert_eq!(
+        reopened.get(b"legacy-b").expect("read legacy b"),
+        Some(large_value(0x62))
+    );
+
+    for index in 0_u8..6 {
+        let key = format!("upgrade-{index}").into_bytes();
+        reopened
+            .put(&key, &large_value(0x70 + index))
+            .expect("build three additional L0 tables");
+    }
+    let upgraded = reopened.stats().expect("v3 upgraded stats");
+    assert_eq!(upgraded.level0_sstables, 0);
+    assert_eq!(upgraded.level1_sstables, 1);
+    assert_eq!(upgraded.sstables, 1);
+    reopened.reopen().expect("reopen upgraded v3 L1");
+    assert_eq!(reopened.stats().expect("reopened v3 stats"), upgraded);
+    assert_eq!(
+        reopened.get(b"legacy-a").expect("read migrated a"),
+        Some(large_value(0x61))
+    );
 }
 
 #[test]
