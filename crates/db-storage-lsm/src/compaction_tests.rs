@@ -37,10 +37,10 @@ fn populate_four_flushes(engine: &mut LsmEngine) -> Vec<(Vec<u8>, Vec<u8>)> {
 
 fn rewrite_single_table_manifest_as_v2(path: &Path, manifest_id: u64) {
     let manifest_path = path.join(format!("MANIFEST-{manifest_id:016}"));
-    let source = fs::read(&manifest_path).expect("read v3 manifest fixture");
+    let source = fs::read(&manifest_path).expect("read v4 manifest fixture");
     assert_eq!(
         u16::from_le_bytes(source[8..10].try_into().expect("manifest version")),
-        3
+        4
     );
     assert_eq!(
         u64::from_le_bytes(source[32..40].try_into().expect("table count")),
@@ -49,7 +49,7 @@ fn rewrite_single_table_manifest_as_v2(path: &Path, manifest_id: u64) {
     assert_eq!(
         u32::from_le_bytes(source[112..116].try_into().expect("v3 level")),
         0,
-        "only an L0 v3 descriptor can be represented by legacy Manifest v2"
+        "only an L0 v4 descriptor can be represented by legacy Manifest v2"
     );
     assert_eq!(source[116..120], [0; 4]);
 
@@ -134,7 +134,7 @@ fn four_overlapping_l0_flush_slots_compact_to_one_l1_and_reopen() {
 }
 
 #[test]
-fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
+fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v4_compaction() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     {
@@ -143,7 +143,7 @@ fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
         engine
             .put(b"legacy-b", &large_value(0x62))
             .expect("flush first L0 and rotate WAL");
-        let stats = engine.stats().expect("v3 source stats");
+        let stats = engine.stats().expect("v4 source stats");
         assert_eq!(stats.level0_sstables, 1);
         assert_eq!(stats.level1_sstables, 0);
         assert_eq!(stats.active_wal_id, 2);
@@ -171,12 +171,12 @@ fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
             .put(&key, &large_value(0x70 + index))
             .expect("build three additional L0 tables");
     }
-    let upgraded = reopened.stats().expect("v3 upgraded stats");
+    let upgraded = reopened.stats().expect("v4 upgraded stats");
     assert_eq!(upgraded.level0_sstables, 0);
     assert_eq!(upgraded.level1_sstables, 1);
     assert_eq!(upgraded.sstables, 1);
-    reopened.reopen().expect("reopen upgraded v3 L1");
-    assert_eq!(reopened.stats().expect("reopened v3 stats"), upgraded);
+    reopened.reopen().expect("reopen upgraded v4 L1");
+    assert_eq!(reopened.stats().expect("reopened v4 stats"), upgraded);
     assert_eq!(
         reopened.get(b"legacy-a").expect("read migrated a"),
         Some(large_value(0x61))
@@ -184,7 +184,7 @@ fn manifest_v2_descriptor_reopens_as_l0_and_upgrades_through_v3_compaction() {
 }
 
 #[test]
-fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
+fn compaction_elides_safe_tombstone_and_new_l0_can_override_l1() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
@@ -209,14 +209,17 @@ fn compaction_keeps_newest_tombstone_and_new_l0_can_override_l1() {
         .put(b"g-fill", &large_value(0x38))
         .expect("flush fourth L0 and compact");
 
-    let tombstone = engine
-        .current_entry(b"victim")
-        .expect("read compacted entry")
-        .expect("tombstone must remain represented");
-    assert_eq!(tombstone.sequence, 3);
-    assert_eq!(tombstone.value, None);
+    assert_eq!(
+        engine
+            .current_entry(b"victim")
+            .expect("read compacted entry"),
+        None,
+        "full-set compaction must physically elide the obsolete tombstone"
+    );
     assert_eq!(engine.get(b"victim").expect("deleted victim"), None);
-    assert_eq!(engine.stats().expect("L1 stats").level1_sstables, 1);
+    let compacted = engine.stats().expect("L1 stats");
+    assert_eq!(compacted.level1_sstables, 1);
+    assert_eq!(compacted.sstable_entries, 7);
     engine.reopen().expect("reopen tombstone L1");
     assert_eq!(engine.get(b"victim").expect("reopened tombstone"), None);
 

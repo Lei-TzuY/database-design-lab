@@ -192,6 +192,7 @@ impl LsmEngine {
                 durable_sequence: 0,
                 wal_id: INITIAL_WAL_ID,
                 wal_first_sequence: INITIAL_FIRST_SEQUENCE,
+                table_id_high_watermark: 0,
                 tables: Vec::new(),
             }
         };
@@ -235,7 +236,10 @@ impl LsmEngine {
             wal: Some(wal),
             memtables,
             tables,
-            next_table_id: checked_next_id(layout.max_table_id, "SSTable")?,
+            next_table_id: checked_next_id(
+                layout.max_table_id.max(version.table_id_high_watermark),
+                "SSTable",
+            )?,
             next_manifest_id: checked_next_id(layout.max_manifest_id, "manifest")?,
             next_wal_id: checked_next_id(layout.max_wal_id, "WAL")?,
             version,
@@ -260,6 +264,7 @@ impl LsmEngine {
                 durable_sequence: 0,
                 wal_id: INITIAL_WAL_ID,
                 wal_first_sequence: INITIAL_FIRST_SEQUENCE,
+                table_id_high_watermark: 0,
                 tables: Vec::new(),
             }
         };
@@ -477,26 +482,31 @@ impl LsmEngine {
         for table in &self.tables {
             table.overlay_range(b"", None, &mut merged)?;
         }
-        if merged.is_empty() {
-            return Err(corruption(
-                "full-set compaction unexpectedly produced no entries",
-            ));
-        }
+        merged.retain(|_, entry| entry.value.is_some());
 
         let table_id = self.next_table_id;
         let manifest_id = self.next_manifest_id;
-        let next_table_id = checked_next_id(table_id, "SSTable")?;
         let next_manifest_id = checked_next_id(manifest_id, "manifest")?;
         let durable_sequence = self.version.durable_sequence;
-        #[cfg(test)]
-        self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
-        let table =
-            SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
-        #[cfg(test)]
-        self.compaction_after_file_write_for_test(
-            CompactionWriteKind::L1Sstable,
-            &self.path.join(sstable_file_name(table_id)),
-        )?;
+        let (replacement_table, descriptors, next_table_id) = if merged.is_empty() {
+            (None, Vec::new(), table_id)
+        } else {
+            #[cfg(test)]
+            self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
+            let table =
+                SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
+            #[cfg(test)]
+            self.compaction_after_file_write_for_test(
+                CompactionWriteKind::L1Sstable,
+                &self.path.join(sstable_file_name(table_id)),
+            )?;
+            let descriptor = table.descriptor().clone();
+            (
+                Some(table),
+                vec![descriptor],
+                checked_next_id(table_id, "SSTable")?,
+            )
+        };
 
         #[cfg(test)]
         self.compaction_before_write_for_test(CompactionWriteKind::Manifest)?;
@@ -505,7 +515,7 @@ impl LsmEngine {
             &self.version,
             manifest_id,
             durable_sequence,
-            vec![table.descriptor().clone()],
+            descriptors,
             self.version.wal_id,
             self.version.wal_first_sequence,
         )?;
@@ -532,10 +542,13 @@ impl LsmEngine {
             CompactionWriteKind::MirrorCurrent,
             mirrored.current_generation,
         )?;
-        let active_table_id = table.descriptor().table_id;
+        let active_table_id = replacement_table
+            .as_ref()
+            .map(|table| table.descriptor().table_id);
         let active_manifest_id = mirrored.manifest_id;
 
-        let old_tables = std::mem::replace(&mut self.tables, vec![table]);
+        let replacement_tables = replacement_table.into_iter().collect();
+        let old_tables = std::mem::replace(&mut self.tables, replacement_tables);
         self.version = mirrored;
         self.next_table_id = next_table_id;
         self.next_manifest_id = next_manifest_id;
@@ -636,7 +649,7 @@ impl LsmEngine {
         }
     }
 
-    fn reclaim_obsolete_sstables(&self, active_table_id: u64) {
+    fn reclaim_obsolete_sstables(&self, active_table_id: Option<u64>) {
         let Ok(entries) = fs::read_dir(&self.path) else {
             return;
         };
@@ -646,7 +659,7 @@ impl LsmEngine {
             let Some(table_id) = parse_numbered_name(&text, "sst-", ".sst") else {
                 continue;
             };
-            if table_id != active_table_id {
+            if active_table_id != Some(table_id) {
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -740,7 +753,7 @@ impl LsmEngine {
 impl KvEngine for LsmEngine {
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            name: "lsm-level1-compaction-v3",
+            name: "lsm-level1-compaction-v4",
             logical_model: LogicalModel::KeyValue,
             storage_architecture: StorageArchitecture::LsmTree,
             concurrency: ConcurrencyMode::CallerSerialized,
@@ -958,5 +971,7 @@ mod compaction_tests;
 mod sstable_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tombstone_elision_tests;
 #[cfg(test)]
 mod wal_rotation_tests;
