@@ -1,4 +1,4 @@
-# LSM SSTable, manifest, WAL, and L0/L1 compaction v4
+# LSM SSTable, manifest, WAL, and L0/L1 compaction v5
 
 This document specifies persistent sorted-table publication plus crash-safe WAL segmentation and
 reclamation. Mutations are acknowledged by a checksummed WAL segment before entering memory. A frozen
@@ -6,9 +6,11 @@ MemTable is installed as an immutable indexed SSTable through an immutable manif
 `CURRENT`; when that durable watermark reaches the active WAL tail, the manifest can atomically switch
 the version set to a new empty WAL and reclaim older segments only after both CURRENT mirrors move.
 SSTable v2 embeds a validated Bloom filter. Manifest v3 added each table's level and a
-correctness-first overlapping-L0 / single-run-L1 compaction policy. Manifest v4 adds an explicit
+correctness-first overlapping-L0 / single-run-L1 compaction policy. Manifest v4 added an explicit
 tombstone-GC watermark so a full-set compaction can discard deletion markers without losing the durable
-sequence when the live result contains no SSTable entries.
+sequence when the live result contains no SSTable entries. Manifest v5 keeps that GC field and adds a
+persistent SSTable-id high watermark so table-less cleanup cannot make a historical or crash-ambiguous
+canonical id eligible for reuse.
 
 All integers are unsigned little-endian. The common 4,096-byte key and 1,048,576-byte value limits
 remain authoritative. SSTables keep sequence numbers and explicit tombstones so reads can resolve
@@ -37,8 +39,10 @@ MANIFEST-0000000000000003
 `CURRENT` determines the authoritative manifest. That manifest determines the authoritative WAL segment.
 Canonically named SSTables, manifests, or WALs not selected by this chain are orphans from interrupted or
 superseded publication and are not opened as authoritative state. Their ids still reserve numeric space,
-so later allocation never overwrites a file whose durability outcome was ambiguous. Unknown names and
-non-regular entries fail closed.
+so later allocation never overwrites a file whose durability outcome was ambiguous. On open, every
+canonical SSTable filename raises the in-memory allocation floor even when the file is not authoritative;
+the next Manifest v5 publication persists that observed high watermark before post-publication cleanup
+may remove the orphan name. Unknown names and non-regular entries fail closed.
 
 For compatibility with the earlier WAL/MemTable Phase 3 slice, an existing directory containing
 exactly the canonical WAL and no version-set files opens as a legacy layout with durable sequence zero.
@@ -116,27 +120,40 @@ yet realistic read-amplification evidence.
 ## Immutable manifest snapshots
 
 A `MANIFEST-%016d` is a complete version-set snapshot, not an append log. Manifest v1 uses its original
-64-byte header and remains readable with implicit WAL id 1 / first sequence 1. Manifest v2 introduced the
+64-byte header and remains readable with implicit WAL id 1 / first sequence 1. Manifest v2 introduced an
 80-byte header containing manifest id, durable sequence, table count, descriptor-body length, authoritative
 WAL id, WAL first sequence, reserved zeros, and header CRC. Manifest v3 keeps that 80-byte header and
-changes only the SSTable descriptor body. Manifest v4 keeps the v3 descriptor encoding and assigns
-header bytes 64–71 to `tombstone_gc_sequence`; bytes 72–75 remain zero and bytes 76–79 remain the
-header CRC. V1–v3 manifests remain readable and imply a GC watermark of zero. Every newly written
-manifest is v4, including ordinary flush and WAL-rotation snapshots, and carries the current watermark
-forward unchanged unless a full-set compaction advances it.
+changes only the SSTable descriptor body. Manifest v4 also stays 80 bytes: bytes 64–71 are
+`tombstone_gc_sequence`, bytes 72–75 are zero, and bytes 76–79 are the header CRC.
 
-Manifest v1/v2 descriptors have a 40-byte prefix and are interpreted as level 0 for compatibility. New
-Manifest v3/v4 descriptors use a 48-byte prefix: table id, file bytes, entry count, durable sequence, a
-u32 level, a zero u32 reserved field, smallest/largest-key lengths, key bounds, and descriptor CRC. The
+Manifest v5 expands the header to 88 bytes while preserving every v4 field in place. Bytes 64–71 remain
+`tombstone_gc_sequence`; bytes 72–79 are `table_id_high_watermark`; bytes 80–83 are zero; bytes 84–87
+are the header CRC over bytes 0–83. The descriptor body therefore begins at offset 88 for v5 and at its
+historical offset for every older version. V1–v3 imply a GC watermark of zero. V1–v4 do not encode an
+allocation high watermark: a nonempty legacy manifest derives it from the largest active descriptor id,
+while a table-less legacy manifest with durable history conservatively reserves ids through its durable
+sequence. This may skip unused numbers, but it cannot reconstruct and therefore must not guess a smaller
+historical allocation frontier. Every newly written manifest is v5.
+
+Manifest v1/v2 descriptors have a 40-byte prefix and are interpreted as level 0 for compatibility.
+Manifest v3/v4/v5 descriptors use a 48-byte prefix: table id, file bytes, entry count, durable sequence,
+a u32 level, a zero u32 reserved field, smallest/largest-key lengths, key bounds, and descriptor CRC. The
 implemented policy accepts only levels 0 and 1 and at most one L1 descriptor. Descriptors remain ordered
 by strictly increasing table id and durable sequence. With a nonempty table set, the manifest-level
-durable sequence must equal the newest descriptor's watermark. A table-less v4 version may retain a
+durable sequence must equal the newest descriptor's watermark. A table-less v4/v5 version may retain a
 nonzero durable sequence only when `tombstone_gc_sequence == durable_sequence`; this records that a
 complete compaction consumed every older physical version instead of pretending absent table bytes cover
 live values. The GC watermark may never exceed the durable sequence, and an install may move neither
-the durable nor GC watermark backward. No manifest is accepted merely
-because the WAL could reconstruct its data: a manifest selected by CURRENT is authoritative persistent
-state, so checksum, level, descriptor, GC-watermark, or empty-version invariant failure fails closed.
+the durable nor GC watermark backward.
+
+For v5, durable history requires a nonzero `table_id_high_watermark`, and every active descriptor id must
+be at or below it. `open` additionally raises the in-memory watermark to the largest canonical SSTable id
+observed in the directory, including unreferenced crash orphans. Flush, compaction, or WAL rotation then
+carries the maximum forward into the next immutable v5 snapshot. In particular, table-less compaction may
+clean up all SSTable filenames only after CURRENT publishes a manifest that remembers their allocation
+frontier. No manifest is accepted merely because the WAL could reconstruct its data: a manifest selected
+by CURRENT is authoritative persistent state, so checksum, level, descriptor, GC-watermark,
+allocation-watermark, or empty-version invariant failure fails closed.
 
 ## Level policy and full-set compaction
 
@@ -157,8 +174,9 @@ tombstone. This is safe only under the currently implemented conjunction of cons
 3. WAL/MemTable entries not represented by the manifest have sequence numbers above
    `durable_sequence`, so they can override the compacted result but cannot reveal an older value hidden
    below a dropped tombstone.
-4. The replacement Manifest v4 sets `tombstone_gc_sequence = durable_sequence`. Future flushes preserve
-   that watermark, and a later full-set compaction may advance it.
+4. The replacement Manifest v5 sets `tombstone_gc_sequence = durable_sequence` and preserves an
+   SSTable-id high watermark at least as large as every active or canonically observed table id. Future
+   flushes preserve both monotonic watermarks, and a later full-set compaction may advance them.
 
 These conditions are an implementation proof for this deliberately narrow engine, not permission for a
 future partial/multi-level compactor to drop tombstones. Such a compactor must establish its own
@@ -169,7 +187,7 @@ The crash-publication order is:
 1. Keep the old manifest/SSTables authoritative while reading all compaction inputs.
 2. If any live entries remain, create the replacement L1 SSTable at a fresh canonical id and `sync_all`
    it. If every newest entry is a tombstone, create no empty placeholder SSTable.
-3. Create and `sync_all` a new Manifest v4 that references the optional L1 output, the unchanged active
+3. Create and `sync_all` a new Manifest v5 that references the optional L1 output, the unchanged active
    WAL, and the advanced GC watermark.
 4. Publish the new manifest through the next CURRENT generation and `sync_data`.
 5. Publish the **same manifest id** through the other CURRENT mirror at generation + 1 and `sync_data`.
@@ -185,7 +203,7 @@ L0 table, and a fully deleted database reopening from a zero-SSTable manifest wi
 values.
 
 The compaction fault matrix records the four durable publication classes in order: replacement L1
-SSTable, Manifest v4, first CURRENT slot, then mirror CURRENT slot. Each class is exercised under a
+SSTable, Manifest v5, first CURRENT slot, then mirror CURRENT slot. Each class is exercised under a
 before-write error, a synchronized torn-output aftermath, and an after-sync reported error. Torn
 SSTable/Manifest cases truncate the new immutable file to half its committed extent; torn CURRENT cases
 overwrite half of the selected 4 KiB slot and synchronize the damaged bytes. The triggering live handle
@@ -197,7 +215,7 @@ mixed publication cannot pass merely because point reads happen to agree.
 The tombstone-aware matrix requires the old four-L0 version to retain its physical delete marker and the
 new L1 version to omit it while both return the same logical absence. A second matrix covers all-deleted
 compaction, where there is no replacement-SSTable write class: every fault must reopen either four
-tombstone L0 tables or a GC-covered table-less v4 manifest. A reported compaction failure occurs before
+tombstone L0 tables or a GC-covered table-less v5 manifest. A reported compaction failure occurs before
 the later WAL-rotation step, so the authoritative WAL may retain records already covered by the manifest
 watermark; replay skips them deterministically.
 
@@ -248,7 +266,7 @@ ordering, not a claim about hardware that violates that contract.
 Rotation is eligible only when the active WAL contains at least one record and its `next_sequence` is
 exactly `durable_sequence + 1`; this proves no unflushed mutable suffix still depends on that segment. The
 engine then creates and synchronizes a new empty canonical WAL whose first sequence is
-`durable_sequence + 1`, writes/synchronizes a new Manifest v4 naming the new WAL and unchanged SSTable
+`durable_sequence + 1`, writes/synchronizes a new Manifest v5 naming the new WAL and unchanged SSTable
 set, and publishes that manifest through the next CURRENT generation.
 
 At this point the older CURRENT mirror may still select the previous manifest/WAL, so the old WAL is not
@@ -276,6 +294,7 @@ double-mirror publication. It drops logical tombstones only at the documented fu
 Generalized size-based/multi-run levels, snapshot-aware or replication-aware tombstone GC, block/cache
 design, and read/write/space-amplification instrumentation remain separate evidence milestones. Bloom
 filtering is part of SSTable v2; level metadata and full-set L0-to-L1 publication remain readable from
-Manifest v3; the GC proof watermark and table-less durable state are Manifest v4. WAL segment
-rotation/reclamation remains part of the implemented crash-state protocol. Parent-directory durability
+Manifest v3; the GC proof watermark and table-less durable state originated in Manifest v4; persistent
+SSTable allocation history across orphan cleanup is Manifest v5. WAL segment rotation/reclamation remains
+part of the implemented crash-state protocol. Parent-directory durability
 remains subject to the repository-wide portable-fsync caveat.

@@ -3,7 +3,7 @@
 This document specifies the WAL and in-memory half of Phase 3. The WAL byte format remains version 1,
 but WALs are canonical numbered segments selected by the manifest version set. Indexed SSTables,
 immutable manifests, mirrored `CURRENT`, flush/WAL publication, SSTable v2 Bloom filters, and the
-Manifest-v4 L0/L1 compaction and tombstone-GC protocol are specified in
+Manifest-v5 L0/L1 compaction, tombstone-GC, and SSTable-allocation protocol is specified in
 `docs/lsm-sstable-manifest-format.md`. The WAL
 record bytes do not change for compaction. The engine remains correctness evidence, not yet a candidate
 for B+ tree versus LSM performance claims.
@@ -16,8 +16,9 @@ not by an empty value.
 
 WAL files use the canonical name `wal-%016d.log`. A new engine starts with WAL id 1 and first sequence
 1; later rotations allocate ids above every canonical WAL id observed in the directory, including
-unreferenced crash orphans. Manifest v2, v3, and v4 identify exactly one authoritative WAL by id and
-first sequence.
+unreferenced crash orphans. Manifest v2 through v5 identify exactly one authoritative WAL by id and
+first sequence. Manifest v5 independently persists the SSTable allocation high watermark; it does not
+change WAL ids or WAL record bytes.
 Canonical non-authoritative WALs may exist after an interrupted rotation and are ignored for replay while
 still reserving their numeric ids.
 

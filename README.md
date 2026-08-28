@@ -25,7 +25,7 @@ engine:
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v4 L0/L1 and tombstone-GC metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, and half-open range scans |
+| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, and half-open range scans |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -64,10 +64,12 @@ point reads may use a negative filter result to skip an SSTable, so the probabil
 silently introduce a false negative. Flushes enter overlapping L0; four L0 tables trigger a synchronous
 full-set merge of all authoritative SSTables into at most one L1 run. Because the current engine is
 caller-serialized, has no snapshots, and consumes every older disk run, it may elide a newest tombstone
-at that exact proof point. Manifest v4 records the resulting `tombstone_gc_sequence`; if no live keys
-remain, it safely carries a nonzero durable watermark with zero SSTables. The optional compacted SSTable
-and manifest are synchronized, the same manifest is published through both CURRENT mirrors, and only
-then are obsolete files eligible for best-effort deletion. Deterministic fault injection covers both
+at that exact proof point. Manifest v4 introduced the resulting `tombstone_gc_sequence`; Manifest v5
+preserves that field and additionally persists the highest SSTable id that has been allocated or observed
+under a canonical name. A fully deleted database can therefore carry a nonzero durable watermark with
+zero SSTables without forgetting ids whose durability was previously ambiguous. The optional compacted
+SSTable and manifest are synchronized, the same manifest is published through both CURRENT mirrors, and
+only then are obsolete files eligible for best-effort deletion. Deterministic fault injection covers both
 nonempty and table-less compaction under before-write, torn-output, and post-sync reported failures.
 Reopen must select either the complete four-L0 input version or the complete GC-published version; no
 mixed version is accepted. The current one-run L1 policy remains correctness evidence rather than a
