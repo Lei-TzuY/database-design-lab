@@ -21,7 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply Bloom integration patch
-        run: python .github/scripts/apply_lsm_bloom_filter.py
+        run: |
+          python .github/scripts/apply_lsm_bloom_filter.py
+          python .github/scripts/fix_lsm_bloom_round2.py
       - name: Validate
         run: |
           cargo fmt --all
