@@ -99,7 +99,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
 - [x] Implement tombstone-aware multi-SSTable point/range reads plus crash-safe flush manifest recovery.
   Tests cover authoritative SSTable/manifest corruption, latest-CURRENT-slot fallback with WAL replay,
   unreferenced canonical orphans, mutable WAL tails, and maximum-value flush/reopen.
-- [ ] Add levels, overlap policy, compaction, obsolete-file deletion, and safe tombstone dropping.
+- [x] Add an explicit L0/L1 overlap policy and crash-published compaction. Manifest v3 records levels;
+  flushes enter overlapping L0 and four L0 tables trigger a full-set rewrite into one L1 run. The output
+  SSTable and manifest are synchronized and published through both CURRENT mirrors before obsolete
+  SSTables/manifests are eligible for deletion. Tests cover reopen, mirror fallback after cleanup, retained
+  tombstones, and newer L0 state overriding L1.
+- [ ] Prove and implement safe tombstone dropping; compaction v3 deliberately retains deletion markers.
 - [ ] Add compaction fault injection, deterministic differential tests, and instrumentation validation.
 
 ## Phase 4 — Fair B+ tree versus LSM experiments

@@ -4,8 +4,9 @@
 //! it is synchronously written as an indexed/checksummed SSTable, a new immutable manifest snapshot is
 //! synchronized, and only then is the new version set published through one slot of mirrored `CURRENT`.
 //! WAL segments rotate only after published SSTables cover their complete sequence range. SSTable v2
-//! embeds a checksummed Bloom filter for point-read rejection; levels and compaction remain later
-//! Phase 3 work.
+//! embeds a checksummed Bloom filter for point-read rejection. Flushes enter overlapping L0; four
+//! L0 tables trigger a synchronous full-set merge into one non-overlapping L1 run, published through
+//! mirrored CURRENT before obsolete sorted-table/manifest files are reclaimed.
 
 mod bloom;
 mod manifest;
@@ -36,6 +37,8 @@ pub use wal::{RecoveredWalTail, WalVerification};
 /// Deterministic threshold used to freeze the current mutable MemTable.
 pub const MUTABLE_MEMTABLE_BYTES_LIMIT: usize = 64 * 1024;
 
+const LEVEL0_COMPACTION_TRIGGER: usize = 4;
+
 /// Current WAL/MemTable/SSTable structure counts, not performance instrumentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LsmStats {
@@ -53,6 +56,10 @@ pub struct LsmStats {
     pub immutable_entries: usize,
     /// Immutable sorted tables referenced by the authoritative manifest.
     pub sstables: usize,
+    /// Overlapping flush tables in level zero.
+    pub level0_sstables: usize,
+    /// Non-overlapping level-one runs. The current policy permits at most one.
+    pub level1_sstables: usize,
     /// Total indexed entries (including tombstones) across authoritative SSTables.
     pub sstable_entries: u64,
     /// Highest WAL sequence represented by the authoritative SSTable version set.
@@ -264,6 +271,16 @@ impl LsmEngine {
                 immutable_memtables: memtables.immutable_count(),
                 immutable_entries: memtables.immutable_entries(),
                 sstables: version.tables.len(),
+                level0_sstables: version
+                    .tables
+                    .iter()
+                    .filter(|table| table.level == 0)
+                    .count(),
+                level1_sstables: version
+                    .tables
+                    .iter()
+                    .filter(|table| table.level == 1)
+                    .count(),
                 sstable_entries,
                 durable_sequence,
             },
@@ -300,6 +317,18 @@ impl LsmEngine {
             immutable_memtables: self.memtables.immutable_count(),
             immutable_entries: self.memtables.immutable_entries(),
             sstables: self.tables.len(),
+            level0_sstables: self
+                .version
+                .tables
+                .iter()
+                .filter(|table| table.level == 0)
+                .count(),
+            level1_sstables: self
+                .version
+                .tables
+                .iter()
+                .filter(|table| table.level == 1)
+                .count(),
             sstable_entries,
             durable_sequence: self.version.durable_sequence,
         })
@@ -390,8 +419,92 @@ impl LsmEngine {
             self.next_manifest_id = next_manifest_id;
             self.memtables.retire_oldest_immutable()?;
         }
+        self.maybe_compact_level0()?;
         self.maybe_rotate_wal()?;
         Ok(())
+    }
+
+    fn maybe_compact_level0(&mut self) -> Result<()> {
+        let level0_count = self
+            .version
+            .tables
+            .iter()
+            .filter(|table| table.level == 0)
+            .count();
+        if level0_count < LEVEL0_COMPACTION_TRIGGER {
+            return Ok(());
+        }
+
+        let mut merged = BTreeMap::new();
+        for table in &self.tables {
+            table.overlay_range(b"", None, &mut merged)?;
+        }
+        if merged.is_empty() {
+            return Err(corruption(
+                "full-set compaction unexpectedly produced no entries",
+            ));
+        }
+
+        let table_id = self.next_table_id;
+        let manifest_id = self.next_manifest_id;
+        let next_table_id = checked_next_id(table_id, "SSTable")?;
+        let next_manifest_id = checked_next_id(manifest_id, "manifest")?;
+        let durable_sequence = self.version.durable_sequence;
+        let table =
+            SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
+        let compacted = manifest::install(
+            &self.path,
+            &self.version,
+            manifest_id,
+            durable_sequence,
+            vec![table.descriptor().clone()],
+            self.version.wal_id,
+            self.version.wal_first_sequence,
+        )?;
+        let mirrored = manifest::mirror_current(&self.path, &compacted)?;
+        let active_table_id = table.descriptor().table_id;
+        let active_manifest_id = mirrored.manifest_id;
+
+        let old_tables = std::mem::replace(&mut self.tables, vec![table]);
+        self.version = mirrored;
+        self.next_table_id = next_table_id;
+        self.next_manifest_id = next_manifest_id;
+        drop(old_tables);
+        self.reclaim_obsolete_sstables(active_table_id);
+        self.reclaim_obsolete_manifests(active_manifest_id);
+        Ok(())
+    }
+
+    fn reclaim_obsolete_sstables(&self, active_table_id: u64) {
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            let Some(table_id) = parse_numbered_name(&text, "sst-", ".sst") else {
+                continue;
+            };
+            if table_id != active_table_id {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    fn reclaim_obsolete_manifests(&self, active_manifest_id: u64) {
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            let Some(manifest_id) = parse_numbered_name(&text, "MANIFEST-", "") else {
+                continue;
+            };
+            if manifest_id != active_manifest_id {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 
     fn maybe_rotate_wal(&mut self) -> Result<()> {
@@ -433,6 +546,7 @@ impl LsmEngine {
         self.next_manifest_id = following_manifest_id;
         drop(old_wal);
         self.reclaim_obsolete_wals(new_wal_id);
+        self.reclaim_obsolete_manifests(self.version.manifest_id);
         debug_assert_ne!(old_wal_id, new_wal_id);
         Ok(())
     }
@@ -465,7 +579,7 @@ impl LsmEngine {
 impl KvEngine for LsmEngine {
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            name: "lsm-segmented-wal-v2",
+            name: "lsm-level1-compaction-v3",
             logical_model: LogicalModel::KeyValue,
             storage_architecture: StorageArchitecture::LsmTree,
             concurrency: ConcurrencyMode::CallerSerialized,
@@ -667,6 +781,8 @@ fn corruption(reason: impl Into<String>) -> DbError {
     }
 }
 
+#[cfg(test)]
+mod compaction_tests;
 #[cfg(test)]
 mod sstable_tests;
 #[cfg(test)]

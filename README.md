@@ -24,7 +24,7 @@ persistent point/range engine; the LSM now has a WAL/MemTable plus crash-publish
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, immutable manifest snapshots, mirrored `CURRENT` publication, crash-safe WAL rotation/reclamation, tombstones, and half-open range scans; no levels or compaction yet |
+| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v3 L0/L1 metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, tombstones, and half-open range scans |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -60,8 +60,12 @@ needs only the manifest-selected WAL suffix while both CURRENT mirrors remain va
 New SSTables use format v2 with a checksummed 10-bits/key, 7-probe Bloom section embedded in the same
 immutable file; v1 SSTables remain readable. Open validates every indexed key as Bloom-positive before
 point reads may use a negative filter result to skip an SSTable, so the probabilistic structure cannot
-silently introduce a false negative. Levels and compaction remain absent, so this is still not a fair
-B+ tree performance comparison participant.
+silently introduce a false negative. Flushes enter overlapping L0; four L0 tables trigger a synchronous
+full-set merge of all authoritative SSTables into one L1 run. The compacted SSTable and Manifest v3 are
+synchronized, the same manifest is published through both CURRENT mirrors, and only then are obsolete
+SSTables/manifests eligible for best-effort deletion. Tombstones are deliberately retained, and the
+current one-run L1 policy is correctness evidence rather than a production leveled strategy, so this is
+still not a fair B+ tree performance comparison participant.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
@@ -69,8 +73,8 @@ and a bounded half-open ordered range API `[start, end)`, with `end = None` mean
 in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
 does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
 serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
-multi-process writers, LSM levels/compaction, replication, SQL, MVCC, Raft, graph, time-series,
-and columnar execution are not implemented.
+multi-process writers, safe LSM tombstone dropping, generalized multi-run/multi-level compaction,
+replication, SQL, MVCC, Raft, graph, time-series, and columnar execution are not implemented.
 
 ## Run the laboratory
 
