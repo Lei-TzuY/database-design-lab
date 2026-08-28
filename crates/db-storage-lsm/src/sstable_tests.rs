@@ -110,6 +110,27 @@ fn referenced_sstable_corruption_fails_closed_after_wal_reclamation() {
 }
 
 #[test]
+fn referenced_sstable_bloom_corruption_fails_closed() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    {
+        let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+        engine.put(b"a", &large_value(0x35)).expect("put a");
+        engine
+            .put(b"b", &large_value(0x36))
+            .expect("put b and flush Bloom-backed SSTable");
+        assert_eq!(engine.stats().expect("stats").sstables, 1);
+    }
+
+    // SSTable v2: 64-byte file header + 40-byte Bloom header, so byte 105 lies in the bit payload.
+    flip_byte(&numbered_file(&path, "sst-", ".sst", 1), 105);
+    let error = LsmEngine::open(&path).expect_err("Bloom corruption must fail closed");
+    assert!(error.to_string().contains("corrupt"));
+    let verify_error = LsmEngine::verify(&path).expect_err("verify must reject Bloom corruption");
+    assert!(verify_error.to_string().contains("corrupt"));
+}
+
+#[test]
 fn torn_latest_current_slot_after_rotation_uses_same_manifest_and_reclaimed_wal() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");

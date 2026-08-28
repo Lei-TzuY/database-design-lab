@@ -4,8 +4,9 @@ This document specifies persistent sorted-table publication plus crash-safe WAL 
 reclamation. Mutations are acknowledged by a checksummed WAL segment before entering memory. A frozen
 MemTable is installed as an immutable indexed SSTable through an immutable manifest snapshot and mirrored
 `CURRENT`; when that durable watermark reaches the active WAL tail, Manifest v2 can atomically switch the
-version set to a new empty WAL and reclaim older segments only after both CURRENT mirrors move. Bloom
-filters, levels, compaction, and tombstone dropping remain outside this version.
+version set to a new empty WAL and reclaim older segments only after both CURRENT mirrors move. SSTable
+v2 now embeds a validated Bloom filter; levels, compaction, and tombstone dropping remain outside this
+version.
 
 All integers are unsigned little-endian. The common 4,096-byte key and 1,048,576-byte value limits
 remain authoritative. SSTables keep sequence numbers and explicit tombstones so reads can resolve
@@ -47,27 +48,68 @@ As with the existing formats, file contents are synchronized but this implementa
 portable parent-directory fsync protocol. The experimental constitution's directory-entry durability
 caveat therefore still applies to sudden system loss immediately after file creation.
 
-## SSTable v1
+## SSTable v1 and v2
 
-Each `sst-%016d.sst` is immutable once created. It consists of a 64-byte header, strictly sorted data
-records, a complete sorted index, and a 64-byte footer. The file is written with `create_new`, then
-`write_all`, then `sync_all` before any manifest may reference it.
+Each `sst-%016d.sst` is immutable once created. SSTable v1 remains readable and consists of a 64-byte
+header, sorted data records, a complete sorted index, and a 64-byte footer. New files are SSTable v2:
+the same 64-byte header is followed by one canonical Bloom section, then data records, index, and footer.
+The header's existing `data_offset` identifies the exact end of the Bloom section, so no sidecar file or
+new manifest publication object is introduced. The complete SSTable is still written with `create_new`,
+`write_all`, and `sync_all` before any manifest may reference it.
 
-The header contains magic `DBLSMSST`, format version 1, table id, entry count, data/index/footer offsets,
-reserved zero bytes, and a header CRC-32. Each data record contains magic `SSTR`, record version, PUT or
-DELETE kind, sequence, bounded key/value lengths, header CRC, key/value bytes, and a record CRC. DELETE
-records carry zero value bytes. Keys must be strictly increasing.
+The header contains magic `DBLSMSST`, format version (`1` or `2`), table id, entry count,
+data/index/footer offsets, reserved zero bytes, and a header CRC-32. Version 1 requires `data_offset = 64`.
+Version 2 requires `data_offset > 64` and interprets bytes `[64, data_offset)` as exactly one Bloom
+section. The footer must use the same SSTable version as the header. Existing record and index encodings
+remain unchanged: each data record contains magic `SSTR`, record version, PUT or DELETE kind, sequence,
+bounded key/value lengths, header CRC, key/value bytes, and record CRC; the full index stores each key,
+kind, sequence, physical record offset, and its own checksum.
 
-The index contains one entry for every data record: full key, record kind, sequence, physical data-record
-offset, and checksum. Opening validates that every index entry exactly describes the corresponding data
-record and that both sections have identical strictly increasing keys. This first implementation keeps
-the validated file bytes and full index resident in memory; that is a correctness-first choice and is
-not yet evidence for realistic read amplification.
+### Bloom section v1
 
-The footer repeats table id, entry count, index/footer offsets, and the table's durable WAL sequence.
-It includes a CRC of every byte before the footer plus its own checksum. The manifest descriptor also
-records physical file length, entry count, durable sequence, and smallest/largest key. Open requires all
-three views—header/footer/manifest—to agree.
+The embedded Bloom filter is deterministic and is built over **every SSTable key**, including keys whose
+latest entry is a tombstone. This is required because a false negative for a tombstone could otherwise
+resurrect an older value from another table. The current canonical configuration is 10 bits per key
+(minimum 64 bits), byte-rounded, with 7 double-hash probes. The hash algorithm id `1` denotes the stable
+seeded 64-bit FNV/mixing routine implemented by this repository; Rust's process-dependent
+`DefaultHasher` is intentionally not part of the persistent format.
+
+| Offset | Bytes | Meaning | Validation |
+| ---: | ---: | --- | --- |
+| 0 | 8 | magic `DBLSMBLM` | exact match |
+| 8 | 2 | Bloom format version | `1` |
+| 10 | 2 | header length | `40` |
+| 12 | 1 | hash algorithm id | `1` |
+| 13 | 1 | probe count | `7` |
+| 14 | 2 | flags | zero |
+| 16 | 8 | bit count | exactly `max(keys * 10, 64)`, rounded to 8 bits |
+| 24 | 8 | key count | exactly the SSTable entry count |
+| 32 | 4 | payload bytes | exactly `bit_count / 8` |
+| 36 | 4 | header CRC-32 | bytes 0–35 |
+| 40 | variable | packed bit array | exact declared extent |
+| tail | 4 | section CRC-32 | header + bit payload |
+
+The SSTable's pre-footer whole-file CRC independently covers this entire Bloom section as well. Any bad
+magic/version/parameter, noncanonical extent, key-count disagreement, header/section checksum failure,
+or outer SSTable checksum failure is corruption.
+
+Bloom results are never trusted before structural validation. On open, the engine first validates the
+full SSTable records/index and then requires **every indexed key** to be Bloom-positive. A false negative
+therefore fails closed rather than becoming a missing-key answer. Only after that proof may a point
+`GET` skip a table when the key is outside the manifest bounds or the Bloom filter says negative. Range
+scans do not consult Bloom filters.
+
+For the frozen configuration, the standard independent-hash approximation
+`(1 - exp(-7 / 10))^7` is about 0.82%. The deterministic regression inserts 10,000 fixed binary keys and
+queries 50,000 disjoint fixed keys; the committed hash/filter semantics produce exactly 422 false
+positives (0.844%) and are additionally gated below 2%. This is a reproducible correctness/configuration
+fixture, not a production workload or performance claim.
+
+Opening still validates that every index entry exactly describes the corresponding data record, both
+sections have identical strictly increasing keys, header/footer/manifest metadata agree, no entry
+sequence exceeds the durable watermark, and the manifest key bounds match the index. The implementation
+keeps validated file bytes and the full index resident in memory; that correctness-first choice is not
+yet realistic read-amplification evidence.
 
 ## Immutable manifest snapshots
 
@@ -146,15 +188,17 @@ manifest/WAL and old segments are redundant. A replayed frozen MemTable followed
 specifically cannot trigger reclamation until later flushes advance the durable watermark through that
 tail.
 
-Point reads search mutable/frozen MemTables first and then authoritative SSTables newest-first. Ordered
-range scans merge sequence-tagged SSTable state and the active WAL/MemTable tail, keep the newest version
-of each key, remove tombstones, and apply the common half-open bounds/limit. Compaction is still required
+Point reads search mutable/frozen MemTables first and then authoritative SSTables newest-first. For SSTable
+v2, manifest key bounds and the validated Bloom filter can reject a point lookup before index/data record
+decoding. Ordered range scans ignore Bloom filters, merge sequence-tagged SSTable state and the active
+WAL/MemTable tail, keep the newest version of each key, remove tombstones, and apply the common half-open
+bounds/limit. Compaction is still required
 before old SSTable versions or tombstones can be discarded safely.
 
 ## Explicitly deferred
 
-Bloom filters, leveled placement, overlap rules, compaction selection, crash-safe compaction publication,
-obsolete SSTable/manifest deletion, tombstone elision, block/cache design, and amplification
-instrumentation remain separate evidence milestones. WAL segment rotation/reclamation is now part of the
+Leveled placement, overlap rules, compaction selection, crash-safe compaction publication, obsolete
+SSTable/manifest deletion, tombstone elision, block/cache design, and amplification instrumentation remain
+separate evidence milestones. Bloom filtering is now part of SSTable v2. WAL segment rotation/reclamation is now part of the
 implemented crash-state protocol; parent-directory durability remains subject to the repository-wide
 portable-fsync caveat.

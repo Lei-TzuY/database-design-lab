@@ -134,8 +134,12 @@ impl BloomFilter {
         }
         let expected_crc = read_u32(&bytes[payload_end..expected_len]);
         if crc32fast::hash(&bytes[..payload_end]) != expected_crc {
+            let checksum_offset = u64::try_from(payload_end)
+                .ok()
+                .and_then(|delta| offset.checked_add(delta))
+                .ok_or_else(|| corruption(offset, "Bloom checksum offset overflowed u64"))?;
             return Err(corruption(
-                offset + u64::try_from(payload_end).unwrap_or(u64::MAX),
+                checksum_offset,
                 "Bloom section checksum mismatch",
             ));
         }
@@ -288,6 +292,10 @@ mod tests {
         let false_positives = (0..ABSENT as u64)
             .filter(|value| decoded.may_contain(&key(0x22, *value)))
             .count();
+        assert_eq!(
+            false_positives, 422,
+            "stable hash/filter semantics changed; review the on-disk Bloom format before updating this fixture"
+        );
         assert!(
             false_positives * 100 < ABSENT * 2,
             "deterministic Bloom false-positive rate exceeded 2%: {false_positives}/{ABSENT}"
