@@ -4,6 +4,7 @@
 //! framework for hypothetical future data models.
 
 mod bytes;
+mod captured_experiment;
 mod counterbalanced_experiment;
 mod differential;
 mod engine;
@@ -16,6 +17,10 @@ mod shrink;
 mod workload;
 
 pub use bytes::{ByteString, ByteStringError};
+pub use captured_experiment::{
+    compare_experiment_trace_ordered_captured, CapturedOrderedExperimentError,
+    OrderedExperimentFailureEvidence,
+};
 pub use counterbalanced_experiment::{
     compare_experiment_trace_counterbalanced, CounterbalancedExperimentComparisonReport,
     CounterbalancedPairOrder,
