@@ -20,31 +20,77 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply mechanical cleanup
+      - name: Finalize Phase 4 documentation
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          path = Path('crates/db-core/src/experiment.rs')
-          text = path.read_text()
-          text = text.replace(
-              'AmplificationInstrumented, AmplificationRatio, AmplificationReport, ByteString, DbError,\n    EngineCapabilities, KvEngine, ReadWorkUnit, Result, StructuralReadAmplification, MAX_KEY_BYTES,\n    MAX_VALUE_BYTES,',
-              'AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,\n    KvEngine, Result, MAX_VALUE_BYTES,',
+
+          def replace_once(path, old, new, label):
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one marker, found {count}')
+              path.write_text(text.replace(old, new, 1))
+
+          readme = Path('README.md')
+          replace_once(
+              readme,
+              '| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution/differential harness, experiment compatibility preflight, and common amplification report schema |',
+              '| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generators, execution/differential harnesses, versioned Phase 4 experiment traces, experiment compatibility preflight, and common amplification report schema |',
+              'README db-core row',
           )
-          text = text.replace(
-              'AmplificationInstrumented, AmplificationRatio, AmplificationReport, ByteString, DbError,\n    EngineCapabilities, KvEngine, ReadWorkUnit, Result, StructuralReadAmplification, MAX_VALUE_BYTES,',
-              'AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,\n    KvEngine, Result, MAX_VALUE_BYTES,',
+          replace_once(
+              readme,
+              '| `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |',
+              '| `db-cli` | Correctness `generate`/`run`/`differential`, Phase 4 `experiment-generate`/`experiment-compare`, plus append-log `verify`/`inspect` |',
+              'README db-cli row',
           )
-          text = text.replace(
-              '(u64::from(self.key_space) + 1) / 2',
-              'u64::from(self.key_space).div_ceil(2)',
+          replace_once(
+              readme,
+              'does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still\nserializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,',
+              'does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still\nserializes point/lifecycle regression steps only. Phase 4 uses a separate `ExperimentTrace` v1 schema with\nsetup/measured windows and stable point-read, range-scan, sequential-write, random-write, and mixed profiles;\n`experiment-compare` proves identical measured outcomes before archiving both engines\' amplification evidence.\nSee `docs/experiment-traces.md` for the frozen generation rules. Transactions,',
+              'README experiment narrative',
           )
-          path.write_text(text)
+          replace_once(
+              readme,
+              'cargo run -p db-cli -- differential --engine lsm --path experiment-lsm workload.json\ncargo run -p db-cli -- verify experiment.db',
+              'cargo run -p db-cli -- differential --engine lsm --path experiment-lsm workload.json\ncargo run -p db-cli -- experiment-generate --profile mixed --seed 42 \\\n  --operations 1000 --key-space 4096 --output mixed-42.json\ncargo run -p db-cli -- experiment-compare --trace mixed-42.json \\\n  --btree-path btree-42.db --lsm-path lsm-42 --output mixed-42-report.json\ncargo run -p db-cli -- verify experiment.db',
+              'README CLI example',
+          )
+
+          roadmap = Path('docs/roadmap.md')
+          replace_once(
+              roadmap,
+              '- [ ] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.\n- [ ] Drive the common amplification contract from shared cross-engine traces. B+ tree and LSM now both\n  implement `AmplificationInstrumented` and return the same exact report shape; hand-computable tests\n  validate B+ tree page-access/data-page/retained-page accounting and the existing LSM consult/version/\n  WAL+SSTable accounting. Read work carries an explicit architecture-specific unit so structural counters\n  cannot be mislabeled as comparable device I/O. The remaining work is one shared trace runner and archived\n  per-engine raw evidence under identical trace inputs.',
+              '- [x] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.\n  `ExperimentTrace` v1 records the full generator config and stable SplitMix64 seed, separates deterministic\n  setup from the measured window, uses byte-order-preserving fixed-width keys, supports measured REOPEN,\n  and is exposed through `db-lab experiment-generate`.\n- [x] Drive the common amplification contract from shared cross-engine traces. `compare_experiment_trace`\n  applies capability preflight, executes identical setup, resets both instrumentation windows, runs the exact\n  same measured vector, rejects any logical-outcome divergence, and returns one self-contained trace/outcome\n  record plus per-engine capabilities and exact amplification evidence. A real B+ tree/LSM mixed-trace test\n  covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain explicitly non-device-I/O.',
+              'roadmap shared traces',
+          )
+
+          methodology = Path('docs/amplification-methodology.md')
+          replace_once(
+              methodology,
+              '## Capability preflight\n',
+              '''## Shared trace and measurement-window protocol\n\nPhase 4 generated experiments use `ExperimentTrace` v1 rather than changing the Phase 1 correctness-workload\nschema. Every trace stores its profile, SplitMix64 seed, complete generator config, deterministic `setup_steps`,\nand exact `measured_steps`. The runner validates all common bounds, executes setup on each fresh candidate,\nresets process-local amplification exactly once, and only then enters the measured window. Optional REOPEN\nactions may occur inside that window and preserve the existing same-handle counters.\n\nThe stable profiles are point-read, range-scan, sequential-write, random-write, and mixed. Generated keys are\neight-byte big-endian ids so numeric order is exactly bytewise order. Point reads use a deterministic 80/20\nhit/miss split after a fully seeded setup. Range scans use `[start, min(start + range_limit, key_space))`.\nSequential writes use distinct ascending ids; random writes uniformly select the configured key space; mixed\ntraces seed even ids and then use 40% PUT, 30% GET, 15% range, and 15% DELETE. Exact rules live in\n`docs/experiment-traces.md`.\n\n`compare_experiment_trace` refuses to emit comparison evidence unless measured logical outcomes match exactly.\nA successful report stores the full trace once, the common measured outcomes once, and per-engine capabilities\nplus raw numerator/denominator amplification evidence. This proves identical logical input and output; it still\ndoes not turn unlike structural read units into device-I/O measurements.\n\n## Capability preflight\n''',
+              'methodology shared trace section',
+          )
+
+          design = Path('docs/design-space.md')
+          replace_once(
+              design,
+              'Physical compaction, shared generated experiment traces, and controlled-host measurements remain deferred |',
+              'Physical compaction and controlled-host measurements remain deferred; shared generated traces now exercise this engine against the LSM with exact logical-outcome equality |',
+              'design-space btree status',
+          )
+          replace_once(
+              design,
+              'Generalized levels, snapshot/replication-aware GC, shared generated experiment traces, device-level telemetry, controlled-host measurements, and comparable performance evidence remain deferred |',
+              'Generalized levels, snapshot/replication-aware GC, device-level telemetry, controlled-host measurements, and comparable performance evidence remain deferred; shared generated traces and exact B+ tree outcome comparison are implemented |',
+              'design-space lsm status',
+          )
           PY
-      - name: Refresh lockfile
-        run: cargo check --workspace
-      - name: Format
-        run: cargo fmt --all
+      - name: Check locked workspace
+        run: cargo check --workspace --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -55,15 +101,15 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
-      - name: Commit validated mechanical changes
+      - name: Commit finalized documentation
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock crates/db-core/src/experiment.rs crates/db-core/src/lib.rs crates/db-cli/Cargo.toml crates/db-cli/src/main.rs
+          git add README.md docs/amplification-methodology.md docs/design-space.md docs/roadmap.md
           if git diff --cached --quiet; then
-            echo "No mechanical changes to commit"
+            echo "No documentation changes to commit"
           else
-            git commit -m "chore: validate shared experiment trace implementation"
+            git commit -m "docs: freeze shared Phase 4 experiment traces"
             git push origin HEAD:feat/phase4-shared-experiment-traces
           fi
