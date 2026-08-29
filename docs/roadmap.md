@@ -160,10 +160,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
 - [x] Archive raw data and environment manifests before any result is publishable. The archive family remains
   versioned rather than silently mutating old evidence: single-run lockstep v1; exploratory counterbalanced
   success v2 and failed/excluded v3; single-pair publication success v4 and failed/excluded v5; normal
-  exploratory/publication repeated batches v6/v7; and repeated batches with captured ordered-comparison failure
-  timing sidecars v8/v9. `comparison-failures.json` preserves pair/repetition/order provenance, any completed
-  first repetition, stable failure identity, and both engine timing reports without changing v6/v7 success
-  schemas. Every path rejects existing archive targets and removes partial multi-file archives on write failure.
+  exploratory/publication repeated batches v6/v7. Failure-sidecar v8/v9 remain frozen legacy formats because
+  they did not carry the repeated pair index. New contextual failure archives use v10/v11 and
+  `ordered_comparison_failure_sidecar_v2`; every sidecar entry binds `pair_index`/`pair_order` to the nested
+  failed repetition, any completed first repetition, stable failure identity, and both engine timing reports
+  without changing v6/v7 success schemas. Every path rejects existing archive targets and removes partial
+  multi-file archives on write failure.
 - [ ] Establish a controlled pinned performance host before adding regression gates. Publication admission
   records complete host/filesystem/build/noise metadata but does not itself pin CPU affinity, thermals, turbo,
   background load, or device/controller conditions; hosted CI remains correctness/build validation only.
