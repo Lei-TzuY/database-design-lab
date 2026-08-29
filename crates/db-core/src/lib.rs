@@ -7,6 +7,7 @@ mod bytes;
 mod differential;
 mod engine;
 mod error;
+mod experiment;
 mod operation;
 mod workload;
 
@@ -20,6 +21,13 @@ pub use engine::{
     StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 pub use error::{DbError, ErrorClass, Result};
+pub use experiment::{
+    compare_experiment_trace, execute_experiment_step, generate_experiment_trace,
+    run_experiment_trace, ExperimentComparisonReport, ExperimentEngineEvidence,
+    ExperimentGeneratorConfig, ExperimentOutcome, ExperimentProfile, ExperimentRow,
+    ExperimentRunReport, ExperimentStep, ExperimentTrace, EXPERIMENT_TRACE_FORMAT_VERSION,
+    MAX_EXPERIMENT_STEPS,
+};
 pub use operation::{Outcome, WorkloadStep};
 pub use workload::{
     generate_workload, GeneratorConfig, Workload, MAX_WORKLOAD_STEPS, WORKLOAD_FORMAT_VERSION,
