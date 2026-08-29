@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "db-lab-batch"
 path = "src/bin/db-lab-batch.rs"
 
+[[bin]]
+name = "db-lab-shrink"
+path = "src/bin/db-lab-shrink.rs"
+
 [dependencies]
 clap.workspace = true
 db-core = { path = "../db-core" }
@@ -24,10 +28,8 @@ db-storage-log = { path = "../db-storage-log" }
 db-storage-memory = { path = "../db-storage-memory" }
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
