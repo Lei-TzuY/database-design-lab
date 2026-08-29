@@ -10,25 +10,38 @@ use crate::{
     OperationalTimingInstrumented, MAX_EXPERIMENT_BATCH_PAIRS,
 };
 
+/// One comparison-failure sidecar entry bound to its unique requested-pair identity.
+///
+/// `CounterbalancedComparisonFailureEvidence` intentionally describes one AB/BA pair in isolation and
+/// therefore carries pair order but not the repeated-batch index. Repeated evidence must retain the
+/// surrounding `ExperimentAttemptContext` so a sidecar can be joined to exactly one failed ledger row
+/// without guessing among later pairs that reuse the same alternating order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CounterbalancedBatchComparisonFailureEvidence {
+    /// Unique pair context within the repeated batch.
+    pub context: ExperimentAttemptContext,
+    /// Failure-boundary evidence captured before either fresh engine is dropped.
+    pub failure: CounterbalancedComparisonFailureEvidence,
+}
+
 /// Stable batch ledger plus sidecar-ready evidence from failed ordered comparisons.
 ///
 /// The nested `batch` keeps the existing report shape. `comparison_failures` is deliberately separate
-/// so current archive formats do not silently grow fields; a future archive-version bump can persist
-/// this sidecar explicitly.
+/// so archive formats can version failure telemetry independently of the stable denominator ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CounterbalancedExperimentBatchCapturedReport {
     /// Existing non-lossy included/failed/excluded pair ledger.
     pub batch: CounterbalancedExperimentBatchReport,
     /// Failure-boundary reports for unsuccessful pairs whose ordered comparison had started.
-    pub comparison_failures: Vec<CounterbalancedComparisonFailureEvidence>,
+    pub comparison_failures: Vec<CounterbalancedBatchComparisonFailureEvidence>,
 }
 
 /// Runs repeated fresh counterbalanced pairs while retaining comparison-boundary timing sidecars.
 ///
 /// Factory failures remain represented only in the stable batch ledger because one or both fresh
 /// instances never existed. Ordered-comparison failures retain both engine timing reports, and a
-/// second-repetition failure additionally retains the complete first repetition. Later requested
-/// pairs still execute after an individual pair fails.
+/// second-repetition failure additionally retains the complete first repetition. Every sidecar is bound
+/// to the exact pair index/order from the stable ledger before later requested pairs continue.
 pub fn run_counterbalanced_experiment_batch_captured<L, R, MakeLeft, MakeRight, Admit>(
     trace: &ExperimentTrace,
     pair_seed: u64,
@@ -133,7 +146,12 @@ where
                         failed_pairs = failed_pairs.saturating_add(1);
                         let (source, comparison_failure) = error.into_parts();
                         if let Some(evidence) = comparison_failure {
-                            comparison_failures.push(*evidence);
+                            comparison_failures.push(
+                                CounterbalancedBatchComparisonFailureEvidence {
+                                    context,
+                                    failure: *evidence,
+                                },
+                            );
                         }
                         let class = source.class();
                         let message = source.to_string();
@@ -201,15 +219,16 @@ mod tests {
     use super::run_counterbalanced_experiment_batch_captured;
     use crate::{
         generate_experiment_trace, AmplificationInstrumented, AmplificationRatio,
-        AmplificationReport, ConcurrencyMode, CrashRecovery, DbError, DistributionMode,
-        EngineCapabilities, ErrorClass, ExperimentAttemptAdmission, ExperimentGeneratorConfig,
-        ExperimentProfile, KvEngine, LogicalModel, OperationalTimingFailureSample,
-        OperationalTimingInstrumented, OperationalTimingReport, Persistence, ReadWorkUnit, Result,
-        StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+        AmplificationReport, ConcurrencyMode, CounterbalancedPairOrder, CrashRecovery, DbError,
+        DistributionMode, EngineCapabilities, ErrorClass, ExperimentAttemptAdmission,
+        ExperimentGeneratorConfig, ExperimentProfile, KvEngine, LogicalModel,
+        OperationalTimingFailureSample, OperationalTimingInstrumented, OperationalTimingReport,
+        Persistence, ReadWorkUnit, Result, StorageArchitecture, StructuralReadAmplification,
+        MAX_KEY_BYTES, MAX_VALUE_BYTES,
     };
 
     #[test]
-    fn batch_retains_second_repetition_failure_and_continues_to_later_pairs() {
+    fn batch_retains_pair_identity_second_repetition_failure_and_later_pairs() {
         let trace = generate_experiment_trace(ExperimentGeneratorConfig {
             seed: 0x39,
             profile: ExperimentProfile::RandomWrite,
@@ -224,7 +243,7 @@ mod tests {
         let report = run_counterbalanced_experiment_batch_captured(
             &trace,
             0,
-            2,
+            3,
             |_context| {
                 Ok(FakeEngine::new(
                     "left",
@@ -244,22 +263,35 @@ mod tests {
         )
         .expect("captured batch");
 
-        assert_eq!(report.batch.requested_pairs, 2);
+        assert_eq!(report.batch.requested_pairs, 3);
         assert_eq!(report.batch.failed_pairs, 1);
-        assert_eq!(report.batch.included_pairs, 1);
+        assert_eq!(report.batch.included_pairs, 2);
         assert_eq!(report.batch.excluded_pairs, 0);
         assert_eq!(report.comparison_failures.len(), 1);
-        let failure = &report.comparison_failures[0];
-        assert_eq!(failure.repetition_index, 1);
-        assert!(failure.completed_first.is_some());
-        assert_eq!(failure.ordered_failure.error_class, ErrorClass::Io);
-        let sample = failure
+        let sidecar = &report.comparison_failures[0];
+        assert_eq!(sidecar.context.pair_index, 0);
+        assert_eq!(
+            sidecar.context.pair_order,
+            CounterbalancedPairOrder::LeftThenRightFirst
+        );
+        assert_eq!(sidecar.context.pair_order, sidecar.failure.pair_order);
+        assert_eq!(sidecar.failure.repetition_index, 1);
+        assert!(sidecar.failure.completed_first.is_some());
+        assert_eq!(sidecar.failure.ordered_failure.error_class, ErrorClass::Io);
+        let sample = sidecar
+            .failure
             .ordered_failure
             .right_operational_timing
             .compaction_stall_failure_samples[0];
         assert_eq!(sample.measured_step_index, Some(0));
         assert_eq!(sample.duration_ns, 19);
         assert_eq!(sample.error_class, ErrorClass::Io);
+        assert_eq!(report.batch.attempts[0].context, sidecar.context);
+        assert_eq!(
+            report.batch.attempts[2].context.pair_order,
+            CounterbalancedPairOrder::LeftThenRightFirst,
+            "pair order repeats by pair 2, so pair index is required for an unambiguous join"
+        );
     }
 
     struct FakeEngine {
