@@ -110,7 +110,11 @@ mod tests {
             ExperimentExecutionOrder::LeftThenRight
         );
         assert_eq!(error.evidence.error_class, ErrorClass::Io);
-        assert!(error.evidence.left_operational_timing.reopen_failure_samples.is_empty());
+        assert!(error
+            .evidence
+            .left_operational_timing
+            .reopen_failure_samples
+            .is_empty());
         assert_eq!(
             error
                 .evidence
@@ -119,7 +123,10 @@ mod tests {
                 .len(),
             1
         );
-        let failure = error.evidence.right_operational_timing.reopen_failure_samples[0];
+        let failure = error
+            .evidence
+            .right_operational_timing
+            .reopen_failure_samples[0];
         assert_eq!(failure.duration_ns, 77);
         assert_eq!(failure.error_class, ErrorClass::Io);
         assert!(failure.measured_step_index.is_some());
@@ -135,11 +142,7 @@ mod tests {
     }
 
     impl FakeEngine {
-        fn new(
-            name: &'static str,
-            architecture: StorageArchitecture,
-            fail_reopen: bool,
-        ) -> Self {
+        fn new(name: &'static str, architecture: StorageArchitecture, fail_reopen: bool) -> Self {
             Self {
                 name,
                 architecture,
@@ -210,7 +213,9 @@ mod tests {
                     work: None,
                     error_class: ErrorClass::Io,
                 });
-            Err(DbError::Io(std::io::Error::other("injected reopen failure")))
+            Err(DbError::Io(std::io::Error::other(
+                "injected reopen failure",
+            )))
         }
     }
 
