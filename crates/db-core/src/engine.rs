@@ -147,25 +147,66 @@ pub struct AmplificationReport {
     pub primary_structure_bytes_per_live_byte: AmplificationRatio,
 }
 
-/// Raw process-local duration samples for synchronous recovery and compaction stalls.
+/// Architecture-specific unit paired with one synchronous operational timing sample.
 ///
-/// Samples are integer nanoseconds measured with `std::time::Instant`. They are evidence to archive,
-/// not a performance claim: host, filesystem, cache state, build profile, and scheduler must be pinned
-/// before durations are compared across engines or revisions.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct OperationalTimingReport {
-    /// Successful same-handle `REOPEN` durations in nanoseconds.
-    pub reopen_ns: Vec<u64>,
-    /// Successful synchronous compaction-path durations in nanoseconds. Empty for engines without compaction.
-    pub compaction_stall_ns: Vec<u64>,
+/// Like `ReadWorkUnit`, these are deterministic engine-level work units rather than device I/O events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalWorkUnit {
+    /// One logical validated B+ tree data-page access during reopen validation/reuse discovery.
+    BtreePageAccess,
+    /// One LSM persisted record version examined while reopening WAL/SSTable state.
+    LsmRecordVersion,
+    /// One authoritative SSTable record version consumed by a full-set compaction.
+    LsmSstableRecordVersion,
 }
 
-/// Reset/report surface for raw operational timing samples collected during an experiment window.
+/// Deterministic data-path work associated with one operational timing sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OperationalWork {
+    /// Architecture-specific logical work unit.
+    pub unit: OperationalWorkUnit,
+    /// Number of logical units examined by the operation.
+    pub units_examined: u64,
+    /// Data-path bytes represented by those units under the engine's documented accounting boundary.
+    pub bytes_examined: u64,
+}
+
+/// One successful synchronous operation sample associated with an experiment step when available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OperationalTimingSample {
+    /// Zero-based measured experiment step that triggered this sample, or `None` outside a measured runner.
+    pub measured_step_index: Option<u64>,
+    /// Wall-clock duration measured with `std::time::Instant`.
+    pub duration_ns: u64,
+    /// Deterministic data-path work completed by the timed operation.
+    pub work: OperationalWork,
+}
+
+/// Raw process-local successful recovery and compaction-stall samples.
+///
+/// Duration plus deterministic work is evidence to archive, not a performance claim: failed/excluded attempts,
+/// execution-order counterbalancing, cache/filesystem protocol, host pinning, and scheduler/device controls remain
+/// required before durations are compared across engines or revisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OperationalTimingReport {
+    /// Successful same-handle `REOPEN` samples.
+    pub reopen_samples: Vec<OperationalTimingSample>,
+    /// Successful synchronous compaction-path samples. Empty for engines without compaction.
+    pub compaction_stall_samples: Vec<OperationalTimingSample>,
+}
+
+/// Reset/context/report surface for operational samples collected during an experiment window.
 pub trait OperationalTimingInstrumented {
-    /// Clears process-local duration samples without changing database state.
+    /// Clears process-local operational samples without changing database state.
     fn reset_operational_timing(&mut self);
 
-    /// Returns a clone of the raw timing samples accumulated in the current window.
+    /// Associates subsequently emitted operational samples with one measured experiment step.
+    ///
+    /// The experiment runner sets this immediately before a measured action and clears it immediately after.
+    fn set_operational_step_index(&mut self, step_index: Option<u64>);
+
+    /// Returns a clone of the raw operational samples accumulated in the current window.
     fn operational_timing_report(&self) -> OperationalTimingReport;
 }
 

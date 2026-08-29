@@ -520,8 +520,8 @@ where
     engine.reset_operational_timing();
     let mut outcome_bytes = 0_u64;
     let mut outcomes = Vec::with_capacity(trace.measured_steps.len());
-    for step in &trace.measured_steps {
-        let outcome = execute_experiment_step(engine, step)?;
+    for (index, step) in trace.measured_steps.iter().enumerate() {
+        let outcome = execute_measured_experiment_step(engine, step, index)?;
         outcome_bytes =
             checked_add_outcome_payload(outcome_bytes, &outcome, "experiment measured outcomes")?;
         outcomes.push(outcome);
@@ -586,8 +586,8 @@ where
     let mut outcome_bytes = 0_u64;
     let mut outcomes = Vec::with_capacity(trace.measured_steps.len());
     for (index, step) in trace.measured_steps.iter().enumerate() {
-        let left_outcome = execute_experiment_step(left, step)?;
-        let right_outcome = execute_experiment_step(right, step)?;
+        let left_outcome = execute_measured_experiment_step(left, step, index)?;
+        let right_outcome = execute_measured_experiment_step(right, step, index)?;
         if left_outcome != right_outcome {
             return Err(logical_mismatch(
                 "measured",
@@ -620,6 +620,23 @@ where
             operational_timing: right.operational_timing_report(),
         },
     })
+}
+
+fn execute_measured_experiment_step<E>(
+    engine: &mut E,
+    step: &ExperimentStep,
+    index: usize,
+) -> Result<ExperimentOutcome>
+where
+    E: KvEngine + OperationalTimingInstrumented,
+{
+    let index = u64::try_from(index).map_err(|_| {
+        DbError::InvalidInput("measured experiment step index does not fit u64".to_owned())
+    })?;
+    engine.set_operational_step_index(Some(index));
+    let result = execute_experiment_step(engine, step);
+    engine.set_operational_step_index(None);
+    result
 }
 
 fn logical_mismatch(
@@ -787,7 +804,8 @@ mod tests {
     use crate::{
         AmplificationInstrumented, AmplificationRatio, AmplificationReport, ConcurrencyMode,
         CrashRecovery, DistributionMode, EngineCapabilities, KvEngine, LogicalModel,
-        OperationalTimingInstrumented, OperationalTimingReport, Persistence, ReadWorkUnit, Result,
+        OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample,
+        OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit, Result,
         StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
     };
 
@@ -967,6 +985,34 @@ mod tests {
         assert_eq!(right.reset_calls, 1);
         assert_eq!(left.timing_reset_calls, 1);
         assert_eq!(right.timing_reset_calls, 1);
+        let expected_reopen_indices: Vec<_> = trace
+            .measured_steps
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                matches!(step, ExperimentStep::Reopen).then_some(index as u64)
+            })
+            .collect();
+        assert_eq!(
+            report
+                .left
+                .operational_timing
+                .reopen_samples
+                .iter()
+                .map(|sample| sample.measured_step_index.expect("measured sample index"))
+                .collect::<Vec<_>>(),
+            expected_reopen_indices
+        );
+        assert_eq!(
+            report
+                .right
+                .operational_timing
+                .reopen_samples
+                .iter()
+                .map(|sample| sample.measured_step_index.expect("measured sample index"))
+                .collect::<Vec<_>>(),
+            expected_reopen_indices
+        );
         assert_eq!(
             report.left.amplification.point_read.unit,
             ReadWorkUnit::BtreePageAccess
@@ -1028,6 +1074,8 @@ mod tests {
         logical_bytes: u64,
         reset_calls: u64,
         timing_reset_calls: u64,
+        operational_step_index: Option<u64>,
+        operational_timing: OperationalTimingReport,
     }
 
     impl FakeEngine {
@@ -1041,6 +1089,8 @@ mod tests {
                 logical_bytes: 0,
                 reset_calls: 0,
                 timing_reset_calls: 0,
+                operational_step_index: None,
+                operational_timing: OperationalTimingReport::default(),
             }
         }
     }
@@ -1104,6 +1154,21 @@ mod tests {
         }
 
         fn reopen(&mut self) -> Result<()> {
+            self.operational_timing
+                .reopen_samples
+                .push(OperationalTimingSample {
+                    measured_step_index: self.operational_step_index,
+                    duration_ns: 1,
+                    work: OperationalWork {
+                        unit: if self.architecture == StorageArchitecture::BPlusTree {
+                            OperationalWorkUnit::BtreePageAccess
+                        } else {
+                            OperationalWorkUnit::LsmRecordVersion
+                        },
+                        units_examined: 1,
+                        bytes_examined: 1,
+                    },
+                });
             Ok(())
         }
     }
@@ -1111,10 +1176,16 @@ mod tests {
     impl OperationalTimingInstrumented for FakeEngine {
         fn reset_operational_timing(&mut self) {
             self.timing_reset_calls = self.timing_reset_calls.saturating_add(1);
+            self.operational_step_index = None;
+            self.operational_timing = OperationalTimingReport::default();
+        }
+
+        fn set_operational_step_index(&mut self, step_index: Option<u64>) {
+            self.operational_step_index = step_index;
         }
 
         fn operational_timing_report(&self) -> OperationalTimingReport {
-            OperationalTimingReport::default()
+            self.operational_timing.clone()
         }
     }
 

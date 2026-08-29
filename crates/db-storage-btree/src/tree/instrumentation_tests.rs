@@ -1,7 +1,7 @@
 use db_core::{
     validate_experiment_compatibility, AmplificationInstrumented, ConcurrencyMode, CrashRecovery,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, ReadWorkUnit,
-    StorageArchitecture,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
+    OperationalWorkUnit, Persistence, ReadWorkUnit, StorageArchitecture,
 };
 use tempfile::tempdir;
 
@@ -154,4 +154,28 @@ fn common_amplification_trait_uses_the_same_report_shape() {
         .expect("common amplification report");
     assert_eq!(report.point_read.unit, ReadWorkUnit::BtreePageAccess);
     assert_eq!(report.point_read.ratio.denominator, 1);
+}
+
+#[test]
+fn reopen_sample_is_step_associated_and_counts_open_validation_work() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("reopen-work.db");
+    let mut tree = BPlusTree::create_new(&path, 4).expect("create tree");
+    tree.put(b"key", b"value").expect("put");
+    tree.reset_operational_timing();
+    tree.set_operational_step_index(Some(7));
+    KvEngine::reopen(&mut tree).expect("reopen");
+
+    let timing = tree.operational_timing_report();
+    assert_eq!(timing.compaction_stall_samples, Vec::new());
+    assert_eq!(timing.reopen_samples.len(), 1);
+    let sample = timing.reopen_samples[0];
+    assert_eq!(sample.measured_step_index, Some(7));
+    assert_eq!(sample.work.unit, OperationalWorkUnit::BtreePageAccess);
+    assert_eq!(
+        sample.work.units_examined, 2,
+        "open validates the root for tree integrity and reuse discovery"
+    );
+    assert_eq!(sample.work.bytes_examined, 2 * PAGE_SIZE as u64);
+    assert!(sample.duration_ns > 0);
 }

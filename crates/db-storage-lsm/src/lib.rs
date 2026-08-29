@@ -32,8 +32,9 @@ use db_core::{
     validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
     AmplificationReport, ConcurrencyMode, CrashRecovery, DbError, DistributionMode,
     EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalTimingReport, Persistence, ReadWorkUnit, Result, StorageArchitecture,
-    StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
+    Persistence, ReadWorkUnit, Result, StorageArchitecture, StructuralReadAmplification,
+    MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 use serde::Serialize;
 
@@ -163,6 +164,7 @@ pub struct LsmEngine {
     next_wal_id: u64,
     instrumentation: LsmInstrumentation,
     operational_timing: OperationalTimingReport,
+    operational_step_index: Option<u64>,
     poisoned: bool,
     #[cfg(test)]
     compaction_fault_spec: Option<CompactionFaultSpec>,
@@ -227,6 +229,7 @@ impl LsmEngine {
             next_wal_id: 2,
             instrumentation: LsmInstrumentation::default(),
             operational_timing: OperationalTimingReport::default(),
+            operational_step_index: None,
             poisoned: false,
             #[cfg(test)]
             compaction_fault_spec: None,
@@ -298,6 +301,7 @@ impl LsmEngine {
             version,
             instrumentation: LsmInstrumentation::default(),
             operational_timing: OperationalTimingReport::default(),
+            operational_step_index: None,
             poisoned: false,
             #[cfg(test)]
             compaction_fault_spec: None,
@@ -643,6 +647,9 @@ impl LsmEngine {
             .tables
             .iter()
             .fold(0_u64, |total, table| total.saturating_add(table.file_bytes));
+        let input_records = self.version.tables.iter().fold(0_u64, |total, table| {
+            total.saturating_add(table.entry_count)
+        });
         self.instrumentation.compaction_input_sstable_bytes = self
             .instrumentation
             .compaction_input_sstable_bytes
@@ -741,8 +748,17 @@ impl LsmEngine {
         self.reclaim_obsolete_sstables(active_table_id);
         self.reclaim_obsolete_manifests(active_manifest_id);
         self.operational_timing
-            .compaction_stall_ns
-            .push(u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+            .compaction_stall_samples
+            .push(OperationalTimingSample {
+                measured_step_index: self.operational_step_index,
+                duration_ns: u64::try_from(compaction_started.elapsed().as_nanos())
+                    .unwrap_or(u64::MAX),
+                work: OperationalWork {
+                    unit: OperationalWorkUnit::LsmSstableRecordVersion,
+                    units_examined: input_records,
+                    bytes_examined: input_bytes,
+                },
+            });
         Ok(())
     }
 
@@ -867,6 +883,23 @@ impl LsmEngine {
                 let _ = fs::remove_file(entry.path());
             }
         }
+    }
+
+    fn reopen_work(&self) -> Result<OperationalWork> {
+        let wal = self.wal.as_ref().ok_or(DbError::Poisoned)?;
+        let sstable_records = self.version.tables.iter().fold(0_u64, |total, table| {
+            total.saturating_add(table.entry_count)
+        });
+        let sstable_bytes = self
+            .version
+            .tables
+            .iter()
+            .fold(0_u64, |total, table| total.saturating_add(table.file_bytes));
+        Ok(OperationalWork {
+            unit: OperationalWorkUnit::LsmRecordVersion,
+            units_examined: wal.record_count().saturating_add(sstable_records),
+            bytes_examined: wal.open_examined_bytes().saturating_add(sstable_bytes),
+        })
     }
 
     fn maybe_rotate_wal(&mut self) -> Result<()> {
@@ -1035,15 +1068,23 @@ impl KvEngine for LsmEngine {
     fn reopen(&mut self) -> Result<()> {
         let instrumentation = self.instrumentation;
         let mut operational_timing = self.operational_timing.clone();
+        let operational_step_index = self.operational_step_index;
         let started = Instant::now();
         self.wal.take();
         match Self::open_existing(self.path.clone()) {
             Ok(mut reopened) => {
+                let work = reopened.reopen_work()?;
                 operational_timing
-                    .reopen_ns
-                    .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+                    .reopen_samples
+                    .push(OperationalTimingSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns: u64::try_from(started.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX),
+                        work,
+                    });
                 reopened.instrumentation = instrumentation;
                 reopened.operational_timing = operational_timing;
+                reopened.operational_step_index = operational_step_index;
                 *self = reopened;
                 Ok(())
             }
@@ -1058,6 +1099,11 @@ impl KvEngine for LsmEngine {
 impl OperationalTimingInstrumented for LsmEngine {
     fn reset_operational_timing(&mut self) {
         self.operational_timing = OperationalTimingReport::default();
+        self.operational_step_index = None;
+    }
+
+    fn set_operational_step_index(&mut self, step_index: Option<u64>) {
+        self.operational_step_index = step_index;
     }
 
     fn operational_timing_report(&self) -> OperationalTimingReport {
