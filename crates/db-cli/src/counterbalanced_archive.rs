@@ -12,7 +12,8 @@ use db_storage_lsm::LsmEngine;
 use serde::Serialize;
 
 use super::{
-    read_experiment_trace, rustc_version, validate_revision, write_new_json, CacheStateKind, CliError,
+    read_experiment_trace, rustc_version, validate_revision, write_new_json, CacheStateKind,
+    CliError,
 };
 
 const COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 2;
@@ -142,7 +143,8 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
         || {
             let path = lsm_paths.next().ok_or_else(|| {
                 DbError::InvalidInput(
-                    "counterbalanced LSM factory requested more than two fresh instances".to_owned(),
+                    "counterbalanced LSM factory requested more than two fresh instances"
+                        .to_owned(),
                 )
             })?;
             LsmEngine::create_new(path)
@@ -170,9 +172,7 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
         btree_cache_pages,
         recorded_unix_seconds: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| {
-                CliError::Usage(format!("system clock precedes Unix epoch: {error}"))
-            })?
+            .map_err(|error| CliError::Usage(format!("system clock precedes Unix epoch: {error}")))?
             .as_secs(),
         notes: args.notes,
     };
@@ -345,14 +345,16 @@ mod tests {
         )
         .expect("parse environment");
         assert_eq!(environment["format_version"], 2);
-        assert_eq!(environment["execution_protocol"], "fresh_counterbalanced_ab_ba");
+        assert_eq!(
+            environment["execution_protocol"],
+            "fresh_counterbalanced_ab_ba"
+        );
         assert_eq!(environment["pair_order"], "right_then_left_first");
         assert_eq!(environment["cache_state"], "warm");
 
-        let index: Value = serde_json::from_slice(
-            &fs::read(archive_dir.join("index.json")).expect("read index"),
-        )
-        .expect("parse index");
+        let index: Value =
+            serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
+                .expect("parse index");
         assert_eq!(index["format_version"], 2);
         assert_eq!(index["execution_protocol"], "fresh_counterbalanced_ab_ba");
         assert_eq!(
