@@ -31,10 +31,10 @@ use std::time::Instant;
 use db_core::{
     validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
     AmplificationReport, ConcurrencyMode, CrashRecovery, DbError, DistributionMode,
-    EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
-    Persistence, ReadWorkUnit, Result, StorageArchitecture, StructuralReadAmplification,
-    MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    EngineCapabilities, KvEngine, LogicalModel, OperationalTimingFailureSample,
+    OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample,
+    OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit, Result, StorageArchitecture,
+    StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 use serde::Serialize;
 
@@ -654,10 +654,49 @@ impl LsmEngine {
             .instrumentation
             .compaction_input_sstable_bytes
             .saturating_add(input_bytes);
+        let work = OperationalWork {
+            unit: OperationalWorkUnit::LsmSstableRecordVersion,
+            units_examined: input_records,
+            bytes_examined: input_bytes,
+        };
+        let mut input_fully_examined = false;
+        let result = self.compact_level0_after_trigger(&mut input_fully_examined);
+        let duration_ns =
+            u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        match result {
+            Ok(()) => {
+                self.operational_timing
+                    .compaction_stall_ns
+                    .push(duration_ns);
+                self.operational_timing
+                    .compaction_stall_samples
+                    .push(OperationalTimingSample {
+                        measured_step_index: self.operational_step_index,
+                        duration_ns,
+                        work,
+                    });
+                Ok(())
+            }
+            Err(error) => {
+                self.operational_timing
+                    .compaction_stall_failure_samples
+                    .push(OperationalTimingFailureSample {
+                        measured_step_index: self.operational_step_index,
+                        duration_ns,
+                        work: input_fully_examined.then_some(work),
+                        error_class: error.class(),
+                    });
+                Err(error)
+            }
+        }
+    }
+
+    fn compact_level0_after_trigger(&mut self, input_fully_examined: &mut bool) -> Result<()> {
         let mut merged = BTreeMap::new();
         for table in &self.tables {
             let _ = table.overlay_range(b"", None, &mut merged)?;
         }
+        *input_fully_examined = true;
         if merged.is_empty() {
             return Err(corruption(
                 "full-set compaction unexpectedly produced no entries",
@@ -747,22 +786,6 @@ impl LsmEngine {
         drop(old_tables);
         self.reclaim_obsolete_sstables(active_table_id);
         self.reclaim_obsolete_manifests(active_manifest_id);
-        let duration_ns =
-            u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.operational_timing
-            .compaction_stall_ns
-            .push(duration_ns);
-        self.operational_timing
-            .compaction_stall_samples
-            .push(OperationalTimingSample {
-                measured_step_index: self.operational_step_index,
-                duration_ns,
-                work: OperationalWork {
-                    unit: OperationalWorkUnit::LsmSstableRecordVersion,
-                    units_examined: input_records,
-                    bytes_examined: input_bytes,
-                },
-            });
         Ok(())
     }
 
@@ -1139,7 +1162,6 @@ fn validate_layout(path: &Path) -> Result<Layout> {
     if !metadata.is_dir() {
         return Err(corruption("LSM engine path is not a directory"));
     }
-
     let current_name = OsStr::new(CURRENT_FILE_NAME);
     let mut wal_ids = BTreeSet::new();
     let mut found_current = false;
