@@ -214,7 +214,13 @@ mod tests {
         let error = compare_experiment_trace_counterbalanced_captured(
             &trace,
             CounterbalancedPairOrder::LeftThenRightFirst,
-            || Ok(FakeEngine::new("left", StorageArchitecture::BPlusTree, false)),
+            || {
+                Ok(FakeEngine::new(
+                    "left",
+                    StorageArchitecture::BPlusTree,
+                    false,
+                ))
+            },
             || {
                 let fail_put = right_creations == 1;
                 right_creations = right_creations.saturating_add(1);
