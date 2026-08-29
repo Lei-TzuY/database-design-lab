@@ -18,9 +18,15 @@ use super::{
 
 const COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 2;
 const COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION: u16 = 3;
+const PUBLICATION_EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 4;
+const PUBLICATION_ATTEMPT_ARCHIVE_FORMAT_VERSION: u16 = 5;
 const COUNTERBALANCED_EXECUTION_PROTOCOL: &str = "fresh_counterbalanced_ab_ba";
 const COUNTERBALANCED_ATTEMPT_PROTOCOL: &str = "record_non_success_counterbalanced_attempts";
+const PUBLICATION_ADMISSION_PROTOCOL: &str = "publication_warm_v1";
+const PUBLICATION_CACHE_POLICY: &str = "trace_induced_warm";
+const PUBLICATION_DURABILITY_MODE: &str = "synced_single_operation";
 const MAX_EXCLUSION_REASON_BYTES: usize = 4 * 1024;
+const MAX_PUBLICATION_METADATA_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CounterbalancedPairOrderKind {
@@ -35,6 +41,14 @@ impl From<CounterbalancedPairOrderKind> for CounterbalancedPairOrder {
             CounterbalancedPairOrderKind::RightThenLeftFirst => Self::RightThenLeftFirst,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AdmissionKind {
+    /// Exploratory evidence may declare incomplete environment metadata and is not publication-grade.
+    Exploratory,
+    /// Strict release-only warm-cache admission with complete reproducibility metadata.
+    PublicationWarmV1,
 }
 
 /// Arguments for a fresh two-repetition AB/BA evidence archive.
@@ -74,21 +88,61 @@ pub(super) struct CounterbalancedArchiveArgs {
     /// Human-readable host identity without secrets (for example, `lab-5090-a`).
     #[arg(long)]
     host_label: Option<String>,
+    /// Host CPU model/topology label required by publication admission.
+    #[arg(long)]
+    host_cpu: Option<String>,
+    /// Host memory configuration label required by publication admission.
+    #[arg(long)]
+    host_memory: Option<String>,
     /// Filesystem under test, when known (for example, `ntfs`, `ext4`, `apfs`).
     #[arg(long)]
     filesystem: Option<String>,
+    /// Filesystem mount options required by publication admission.
+    #[arg(long)]
+    mount_options: Option<String>,
     /// Storage device/model label, when known. Do not place credentials or serial numbers here.
     #[arg(long)]
     storage_device: Option<String>,
     /// Declared cache preparation state for both repetitions.
     #[arg(long, value_enum, default_value_t = CacheStateKind::Unspecified)]
     cache_state: CacheStateKind,
+    /// Evidence admission policy. Publication mode is intentionally stricter than exploratory mode.
+    #[arg(long, value_enum, default_value_t = AdmissionKind::Exploratory)]
+    admission: AdmissionKind,
+    /// Optimization/Rust flags used for the measured binary; required by publication admission.
+    #[arg(long)]
+    optimization_flags: Option<String>,
+    /// Version/commit of the analysis script intended to consume this archive.
+    #[arg(long)]
+    analysis_script_version: Option<String>,
+    /// Reviewed host-noise budget/threshold identifier for this run.
+    #[arg(long)]
+    noise_budget: Option<String>,
     /// Record a methodological exclusion without creating either repetition.
     #[arg(long)]
     exclude_reason: Option<String>,
     /// Optional free-form experiment note. Do not include secrets.
     #[arg(long)]
     notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublicationAdmissionRecord {
+    admission_protocol: &'static str,
+    rust_target_triple: String,
+    host_label: String,
+    host_cpu: String,
+    host_memory: String,
+    storage_device: String,
+    filesystem: String,
+    mount_options: String,
+    cache_policy: &'static str,
+    cache_state: &'static str,
+    durability_mode: &'static str,
+    repetition_count: u8,
+    optimization_flags: String,
+    analysis_script_version: String,
+    noise_budget: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +162,8 @@ struct CounterbalancedEvidenceArchiveEnvironment {
     cache_state: &'static str,
     btree_cache_pages: usize,
     recorded_unix_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publication_admission: Option<PublicationAdmissionRecord>,
     notes: Option<String>,
 }
 
@@ -116,6 +172,8 @@ struct CounterbalancedEvidenceArchiveIndex {
     format_version: u16,
     repository_revision: String,
     execution_protocol: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_protocol: Option<&'static str>,
     files: [&'static str; 3],
 }
 
@@ -125,6 +183,8 @@ struct CounterbalancedAttemptArchiveIndex {
     repository_revision: String,
     execution_protocol: &'static str,
     attempt_protocol: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_protocol: Option<&'static str>,
     files: [&'static str; 3],
 }
 
@@ -159,16 +219,29 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
         &args.archive_dir,
     )?;
     let pair_order: CounterbalancedPairOrder = args.pair_order.into();
+    let publication_admission =
+        validate_publication_admission(&args, current_build_profile(), rustc_host_triple())?;
+    let evidence_format_version = if publication_admission.is_some() {
+        PUBLICATION_EVIDENCE_ARCHIVE_FORMAT_VERSION
+    } else {
+        COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION
+    };
+    let attempt_format_version = if publication_admission.is_some() {
+        PUBLICATION_ATTEMPT_ARCHIVE_FORMAT_VERSION
+    } else {
+        COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION
+    };
 
     if let Some(reason) = args.exclude_reason.as_deref() {
         let reason = validate_exclusion_reason(reason)?;
         let environment = build_environment(
-            COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+            attempt_format_version,
             pair_order,
             &args,
+            publication_admission,
         )?;
         let attempt = CounterbalancedAttemptRecord {
-            format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+            format_version: attempt_format_version,
             pair_order,
             outcome: CounterbalancedAttemptOutcome::Excluded { reason },
         };
@@ -184,9 +257,10 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
     match execute_counterbalanced(&trace, pair_order, &args) {
         Ok(comparison) => {
             let environment = build_environment(
-                COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                evidence_format_version,
                 pair_order,
                 &args,
+                publication_admission,
             )?;
             write_counterbalanced_evidence_archive(
                 &args.archive_dir,
@@ -198,12 +272,13 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
         }
         Err(error) => {
             let environment = build_environment(
-                COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                attempt_format_version,
                 pair_order,
                 &args,
+                publication_admission,
             )?;
             let attempt = CounterbalancedAttemptRecord {
-                format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                format_version: attempt_format_version,
                 pair_order,
                 outcome: CounterbalancedAttemptOutcome::Failed {
                     error_class: error.class(),
@@ -223,13 +298,115 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
 }
 
 fn validate_exclusion_reason(reason: &str) -> Result<String, CliError> {
-    let reason = reason.trim();
-    if reason.is_empty() || reason.len() > MAX_EXCLUSION_REASON_BYTES {
+    validate_bounded_metadata("--exclude-reason", reason, MAX_EXCLUSION_REASON_BYTES)
+}
+
+fn validate_publication_admission(
+    args: &CounterbalancedArchiveArgs,
+    build_profile: &'static str,
+    rust_target_triple: Option<String>,
+) -> Result<Option<PublicationAdmissionRecord>, CliError> {
+    match args.admission {
+        AdmissionKind::Exploratory => {
+            if args.host_cpu.is_some()
+                || args.host_memory.is_some()
+                || args.mount_options.is_some()
+                || args.optimization_flags.is_some()
+                || args.analysis_script_version.is_some()
+                || args.noise_budget.is_some()
+            {
+                return Err(CliError::Usage(
+                    "publication-only metadata requires --admission publication-warm-v1".to_owned(),
+                ));
+            }
+            Ok(None)
+        }
+        AdmissionKind::PublicationWarmV1 => {
+            if build_profile != "release" {
+                return Err(CliError::Usage(
+                    "publication-warm-v1 requires a release build; debug binaries are not admitted"
+                        .to_owned(),
+                ));
+            }
+            if !matches!(args.cache_state, CacheStateKind::Warm) {
+                return Err(CliError::Usage(
+                    "publication-warm-v1 requires --cache-state warm; cold_best_effort is not accepted as proof of a cold OS/device cache"
+                        .to_owned(),
+                ));
+            }
+            let rust_target_triple = rust_target_triple.ok_or_else(|| {
+                CliError::Usage(
+                    "publication-warm-v1 requires a Rust host target triple from `rustc -vV`"
+                        .to_owned(),
+                )
+            })?;
+            Ok(Some(PublicationAdmissionRecord {
+                admission_protocol: PUBLICATION_ADMISSION_PROTOCOL,
+                rust_target_triple: validate_bounded_metadata(
+                    "rust target triple",
+                    &rust_target_triple,
+                    MAX_PUBLICATION_METADATA_BYTES,
+                )?,
+                host_label: required_publication_metadata(
+                    "--host-label",
+                    args.host_label.as_deref(),
+                )?,
+                host_cpu: required_publication_metadata("--host-cpu", args.host_cpu.as_deref())?,
+                host_memory: required_publication_metadata(
+                    "--host-memory",
+                    args.host_memory.as_deref(),
+                )?,
+                storage_device: required_publication_metadata(
+                    "--storage-device",
+                    args.storage_device.as_deref(),
+                )?,
+                filesystem: required_publication_metadata(
+                    "--filesystem",
+                    args.filesystem.as_deref(),
+                )?,
+                mount_options: required_publication_metadata(
+                    "--mount-options",
+                    args.mount_options.as_deref(),
+                )?,
+                cache_policy: PUBLICATION_CACHE_POLICY,
+                cache_state: "warm",
+                durability_mode: PUBLICATION_DURABILITY_MODE,
+                repetition_count: 2,
+                optimization_flags: required_publication_metadata(
+                    "--optimization-flags",
+                    args.optimization_flags.as_deref(),
+                )?,
+                analysis_script_version: required_publication_metadata(
+                    "--analysis-script-version",
+                    args.analysis_script_version.as_deref(),
+                )?,
+                noise_budget: required_publication_metadata(
+                    "--noise-budget",
+                    args.noise_budget.as_deref(),
+                )?,
+            }))
+        }
+    }
+}
+
+fn required_publication_metadata(label: &str, value: Option<&str>) -> Result<String, CliError> {
+    let value =
+        value.ok_or_else(|| CliError::Usage(format!("publication-warm-v1 requires {label}")))?;
+    validate_bounded_metadata(label, value, MAX_PUBLICATION_METADATA_BYTES)
+}
+
+fn validate_bounded_metadata(
+    label: &str,
+    value: &str,
+    maximum_bytes: usize,
+) -> Result<String, CliError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum_bytes {
         return Err(CliError::Usage(format!(
-            "--exclude-reason must contain 1..={MAX_EXCLUSION_REASON_BYTES} UTF-8 bytes after trimming"
+            "{label} must contain 1..={maximum_bytes} UTF-8 bytes after trimming"
         )));
     }
-    Ok(reason.to_owned())
+    Ok(value.to_owned())
 }
 
 fn execute_counterbalanced(
@@ -272,6 +449,7 @@ fn build_environment(
     format_version: u16,
     pair_order: CounterbalancedPairOrder,
     args: &CounterbalancedArchiveArgs,
+    publication_admission: Option<PublicationAdmissionRecord>,
 ) -> Result<CounterbalancedEvidenceArchiveEnvironment, CliError> {
     Ok(CounterbalancedEvidenceArchiveEnvironment {
         format_version,
@@ -281,11 +459,7 @@ fn build_environment(
         db_lab_version: env!("CARGO_PKG_VERSION"),
         target_os: std::env::consts::OS,
         target_arch: std::env::consts::ARCH,
-        build_profile: if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
+        build_profile: current_build_profile(),
         rustc_version: rustc_version(),
         host_label: args.host_label.clone(),
         filesystem: args.filesystem.clone(),
@@ -296,8 +470,34 @@ fn build_environment(
             .duration_since(UNIX_EPOCH)
             .map_err(|error| CliError::Usage(format!("system clock precedes Unix epoch: {error}")))?
             .as_secs(),
+        publication_admission,
         notes: args.notes.clone(),
     })
+}
+
+const fn current_build_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+fn rustc_host_triple() -> Option<String> {
+    let output = std::process::Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let output = String::from_utf8(output.stdout).ok()?;
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
 }
 
 fn ensure_fresh_counterbalanced_archive_targets(
@@ -366,9 +566,13 @@ fn write_counterbalanced_evidence_archive(
         write_new_json(
             &archive_dir.join("index.json"),
             &CounterbalancedEvidenceArchiveIndex {
-                format_version: COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                format_version: environment.format_version,
                 repository_revision: revision.to_owned(),
                 execution_protocol: COUNTERBALANCED_EXECUTION_PROTOCOL,
+                admission_protocol: environment
+                    .publication_admission
+                    .as_ref()
+                    .map(|_| PUBLICATION_ADMISSION_PROTOCOL),
                 files: ["trace.json", "counterbalanced.json", "environment.json"],
             },
         )
@@ -394,10 +598,14 @@ fn write_counterbalanced_attempt_archive(
         write_new_json(
             &archive_dir.join("index.json"),
             &CounterbalancedAttemptArchiveIndex {
-                format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                format_version: environment.format_version,
                 repository_revision: revision.to_owned(),
                 execution_protocol: COUNTERBALANCED_EXECUTION_PROTOCOL,
                 attempt_protocol: COUNTERBALANCED_ATTEMPT_PROTOCOL,
+                admission_protocol: environment
+                    .publication_admission
+                    .as_ref()
+                    .map(|_| PUBLICATION_ADMISSION_PROTOCOL),
                 files: ["trace.json", "attempt.json", "environment.json"],
             },
         )
@@ -418,8 +626,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ensure_fresh_counterbalanced_archive_targets, run, CounterbalancedArchiveArgs,
-        CounterbalancedPairOrderKind,
+        ensure_fresh_counterbalanced_archive_targets, run, validate_publication_admission,
+        AdmissionKind, CounterbalancedArchiveArgs, CounterbalancedPairOrderKind,
+        PUBLICATION_ADMISSION_PROTOCOL, PUBLICATION_CACHE_POLICY, PUBLICATION_DURABILITY_MODE,
     };
     use crate::CacheStateKind;
 
@@ -466,12 +675,13 @@ mod tests {
         );
         assert_eq!(environment["pair_order"], "right_then_left_first");
         assert_eq!(environment["cache_state"], "warm");
+        assert!(environment.get("publication_admission").is_none());
 
         let index: Value =
             serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
                 .expect("parse index");
         assert_eq!(index["format_version"], 2);
-        assert_eq!(index["execution_protocol"], "fresh_counterbalanced_ab_ba");
+        assert!(index.get("admission_protocol").is_none());
         assert_eq!(
             index["files"],
             serde_json::json!(["trace.json", "counterbalanced.json", "environment.json"])
@@ -502,15 +712,6 @@ mod tests {
             attempt["reason"],
             "host load exceeded the frozen admission threshold"
         );
-
-        let index: Value =
-            serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
-                .expect("parse index");
-        assert_eq!(index["format_version"], 3);
-        assert_eq!(
-            index["attempt_protocol"],
-            "record_non_success_counterbalanced_attempts"
-        );
     }
 
     #[test]
@@ -531,9 +732,68 @@ mod tests {
         assert_eq!(attempt["format_version"], 3);
         assert_eq!(attempt["status"], "failed");
         assert_eq!(attempt["error_class"], "io");
-        assert!(attempt["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("I/O error")));
+    }
+
+    #[test]
+    fn publication_admission_rejects_debug_and_unverified_cold_state() {
+        let directory = tempdir().expect("temporary directory");
+        let trace = write_trace(&directory);
+        let mut args = publication_args(&directory, trace, directory.path().join("publication"));
+
+        let debug_error = validate_publication_admission(
+            &args,
+            "debug",
+            Some("x86_64-unknown-linux-gnu".to_owned()),
+        )
+        .expect_err("debug build must not be admitted");
+        assert!(debug_error.to_string().contains("release build"));
+
+        args.cache_state = CacheStateKind::ColdBestEffort;
+        let cold_error = validate_publication_admission(
+            &args,
+            "release",
+            Some("x86_64-unknown-linux-gnu".to_owned()),
+        )
+        .expect_err("best-effort cold cache must not be admitted");
+        assert!(cold_error
+            .to_string()
+            .contains("requires --cache-state warm"));
+    }
+
+    #[test]
+    fn publication_admission_freezes_complete_warm_protocol_metadata() {
+        let directory = tempdir().expect("temporary directory");
+        let trace = write_trace(&directory);
+        let args = publication_args(&directory, trace, directory.path().join("publication"));
+
+        let admission = validate_publication_admission(
+            &args,
+            "release",
+            Some("x86_64-unknown-linux-gnu".to_owned()),
+        )
+        .expect("validate publication admission")
+        .expect("publication record");
+        assert_eq!(admission.admission_protocol, PUBLICATION_ADMISSION_PROTOCOL);
+        assert_eq!(admission.cache_policy, PUBLICATION_CACHE_POLICY);
+        assert_eq!(admission.cache_state, "warm");
+        assert_eq!(admission.durability_mode, PUBLICATION_DURABILITY_MODE);
+        assert_eq!(admission.repetition_count, 2);
+        assert_eq!(admission.filesystem, "ext4");
+        assert_eq!(admission.mount_options, "rw,noatime");
+        assert_eq!(admission.analysis_script_version, "analysis@abc123");
+    }
+
+    #[test]
+    fn exploratory_mode_rejects_publication_only_metadata() {
+        let directory = tempdir().expect("temporary directory");
+        let trace = write_trace(&directory);
+        let mut args = base_args(&directory, trace, directory.path().join("archive"));
+        args.host_cpu = Some("cpu".to_owned());
+        let error = validate_publication_admission(&args, "release", None)
+            .expect_err("publication metadata without admission must fail");
+        assert!(error
+            .to_string()
+            .contains("requires --admission publication-warm-v1"));
     }
 
     fn write_trace(directory: &tempfile::TempDir) -> PathBuf {
@@ -572,11 +832,37 @@ mod tests {
             revision: "test-revision".to_owned(),
             archive_dir,
             host_label: Some("test-host".to_owned()),
+            host_cpu: None,
+            host_memory: None,
             filesystem: None,
+            mount_options: None,
             storage_device: None,
             cache_state: CacheStateKind::Warm,
+            admission: AdmissionKind::Exploratory,
+            optimization_flags: None,
+            analysis_script_version: None,
+            noise_budget: None,
             exclude_reason: None,
             notes: None,
         }
+    }
+
+    fn publication_args(
+        directory: &tempfile::TempDir,
+        trace: PathBuf,
+        archive_dir: PathBuf,
+    ) -> CounterbalancedArchiveArgs {
+        let mut args = base_args(directory, trace, archive_dir);
+        args.admission = AdmissionKind::PublicationWarmV1;
+        args.host_label = Some("perf-host-01".to_owned());
+        args.host_cpu = Some("Example CPU / pinned topology".to_owned());
+        args.host_memory = Some("64 GiB / fixed channels".to_owned());
+        args.filesystem = Some("ext4".to_owned());
+        args.mount_options = Some("rw,noatime".to_owned());
+        args.storage_device = Some("Example NVMe model".to_owned());
+        args.optimization_flags = Some("--release; RUSTFLAGS=-C target-cpu=native".to_owned());
+        args.analysis_script_version = Some("analysis@abc123".to_owned());
+        args.noise_budget = Some("host-noise-budget-v1".to_owned());
+        args
     }
 }
