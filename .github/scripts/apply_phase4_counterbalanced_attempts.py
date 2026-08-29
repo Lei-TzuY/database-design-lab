@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Explicit trigger: the validator is already present on this staging branch.
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "crates/db-core/src/engine.rs"
 EXPERIMENT = ROOT / "crates/db-core/src/experiment.rs"
@@ -272,7 +273,6 @@ pub struct ExperimentBatchReport {
 ''',
     "batch types",
 )
-# Convert the existing comparison function into default wrapper + ordered implementation.
 replace_once(
     EXPERIMENT,
     '''/// Runs the exact same trace against two fresh candidates and refuses to report incomparable semantics.
@@ -341,7 +341,6 @@ replace_once(
 ''',
     "ordered measured execution",
 )
-# Insert batch runner before measured helper.
 replace_once(
     EXPERIMENT,
     '''fn execute_measured_experiment_step<E>(
@@ -556,7 +555,6 @@ fn execute_measured_experiment_step<E>(
 ''',
     "batch runner",
 )
-# Test imports and FakeEngine attempt streams + new tests.
 replace_once(
     EXPERIMENT,
     '''        checked_add_payload, compare_experiment_trace, generate_experiment_trace,
@@ -676,7 +674,6 @@ replace_once(
 ''',
     "fake reopen attempt evidence",
 )
-# Insert tests before FakeEngine struct.
 replace_once(
     EXPERIMENT,
     '''    struct FakeEngine {
@@ -985,7 +982,6 @@ replace_once(
 ''',
     "lsm failed reopen attempt",
 )
-# Wrap full-set compaction body so every triggered attempt gets success/failure evidence.
 replace_once(
     LSM,
     '''        self.instrumentation.compaction_input_sstable_bytes = self
@@ -1095,7 +1091,6 @@ replace_once(
 ''',
     "cli batch imports",
 )
-# Add command before Verify.
 replace_once(
     CLI,
     '''    /// Validate an append-log file without modifying it.
@@ -1148,7 +1143,6 @@ replace_once(
 ''',
     "cli batch command",
 )
-# Add batch archive index struct.
 replace_once(
     CLI,
     '''struct EvidenceArchiveIndex {
@@ -1174,7 +1168,6 @@ struct BatchEvidenceArchiveIndex {
 ''',
     "batch archive index",
 )
-# Add match arm before Verify.
 replace_once(
     CLI,
     '''        Command::Verify { path } => {
@@ -1251,7 +1244,6 @@ replace_once(
 ''',
     "cli batch arm",
 )
-# Helper mapping + fresh paths + archive writer before validate_revision.
 replace_once(
     CLI,
     '''fn validate_revision(revision: &str) -> Result<(), CliError> {
@@ -1291,7 +1283,6 @@ fn validate_revision(revision: &str) -> Result<(), CliError> {
 ''',
     "cli batch helpers",
 )
-# Add batch writer before existing write_evidence_archive.
 replace_once(
     CLI,
     '''fn write_evidence_archive(
