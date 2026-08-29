@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Explicit validation trigger after the workflow learned about this fix helper.
 path = Path(__file__).resolve().parents[2] / "crates/db-core/src/experiment.rs"
 text = path.read_text()
 
