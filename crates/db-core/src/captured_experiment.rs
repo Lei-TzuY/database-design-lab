@@ -34,7 +34,8 @@ pub struct CapturedOrderedExperimentError {
     #[source]
     pub source: DbError,
     /// Engine-local timing evidence sampled immediately after the failure returned.
-    pub evidence: OrderedExperimentFailureEvidence,
+    /// Boxed so the normal `Result` remains compact while the uncommon error path can retain both reports.
+    pub evidence: Box<OrderedExperimentFailureEvidence>,
 }
 
 /// Runs an ordered comparison while retaining both engine timing reports on failure.
@@ -54,13 +55,13 @@ where
     R: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
 {
     compare_experiment_trace_ordered(left, right, trace, execution_order).map_err(|source| {
-        let evidence = OrderedExperimentFailureEvidence {
+        let evidence = Box::new(OrderedExperimentFailureEvidence {
             execution_order,
             error_class: source.class(),
             message: source.to_string(),
             left_operational_timing: left.operational_timing_report(),
             right_operational_timing: right.operational_timing_report(),
-        };
+        });
         CapturedOrderedExperimentError { source, evidence }
     })
 }
