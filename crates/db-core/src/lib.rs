@@ -24,8 +24,8 @@ pub use error::{DbError, ErrorClass, Result};
 pub use experiment::{
     generate_experiment_trace, run_amplification_comparison, EngineAmplificationEvidence,
     ExperimentComparisonReport, ExperimentConfig, ExperimentOutcome, ExperimentProfile,
-    ExperimentStep, ExperimentTrace, EXPERIMENT_GENERATOR_REVISION, EXPERIMENT_TRACE_FORMAT_VERSION,
-    MAX_EXPERIMENT_KEY_SPACE, MAX_EXPERIMENT_RANGE_WIDTH,
+    ExperimentStep, ExperimentTrace, EXPERIMENT_GENERATOR_REVISION,
+    EXPERIMENT_TRACE_FORMAT_VERSION, MAX_EXPERIMENT_KEY_SPACE, MAX_EXPERIMENT_RANGE_WIDTH,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use workload::{
