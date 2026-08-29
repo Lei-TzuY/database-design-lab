@@ -26,7 +26,8 @@ pub use experiment::{
     run_experiment_trace, ExperimentComparisonReport, ExperimentEngineEvidence,
     ExperimentGeneratorConfig, ExperimentOutcome, ExperimentProfile, ExperimentRow,
     ExperimentRunReport, ExperimentStep, ExperimentTrace, EXPERIMENT_TRACE_FORMAT_VERSION,
-    MAX_EXPERIMENT_STEPS,
+    MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES, MAX_EXPERIMENT_RANGE_LIMIT, MAX_EXPERIMENT_STEPS,
+    MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use workload::{

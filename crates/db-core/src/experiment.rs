@@ -10,6 +10,14 @@ use crate::{
 pub const EXPERIMENT_TRACE_FORMAT_VERSION: u16 = 1;
 /// Defensive upper bound across setup plus measured trace steps.
 pub const MAX_EXPERIMENT_STEPS: usize = 1_000_000;
+/// Defensive bound on combined key/value bytes encoded by one trace.
+pub const MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// Defensive bound on cumulative key/value bytes produced by one outcome phase.
+pub const MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// Defensive bound on rows requested by one experiment range scan.
+pub const MAX_EXPERIMENT_RANGE_LIMIT: u32 = 1_000_000;
+
+const EXPERIMENT_KEY_BYTES: u64 = 8;
 
 /// Stable workload family used by the Phase 4 comparison runner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,13 +83,19 @@ impl ExperimentGeneratorConfig {
                     .to_owned(),
             ));
         }
+        if self.range_limit == 0 || self.range_limit > MAX_EXPERIMENT_RANGE_LIMIT {
+            return Err(DbError::InvalidInput(format!(
+                "experiment range_limit is {}; expected 1..={MAX_EXPERIMENT_RANGE_LIMIT}",
+                self.range_limit
+            )));
+        }
         if matches!(
             self.profile,
             ExperimentProfile::RangeScan | ExperimentProfile::Mixed
-        ) && (self.range_limit == 0 || self.range_limit > self.key_space)
+        ) && self.range_limit > self.key_space
         {
             return Err(DbError::InvalidInput(
-                "range_scan and mixed traces require 0 < range_limit <= key_space".to_owned(),
+                "range_scan and mixed traces require range_limit <= key_space".to_owned(),
             ));
         }
 
@@ -103,6 +117,48 @@ impl ExperimentGeneratorConfig {
         if total_steps > MAX_EXPERIMENT_STEPS {
             return Err(DbError::InvalidInput(format!(
                 "generated experiment would have {total_steps} steps; maximum is {MAX_EXPERIMENT_STEPS}"
+            )));
+        }
+        self.validate_generated_payload()?;
+        Ok(())
+    }
+
+    fn validate_generated_payload(self) -> Result<()> {
+        let put_bytes = EXPERIMENT_KEY_BYTES
+            .checked_add(u64::from(self.value_bytes))
+            .ok_or_else(|| {
+                DbError::InvalidInput("experiment payload size overflowed".to_owned())
+            })?;
+        let setup_puts = match self.profile {
+            ExperimentProfile::PointRead | ExperimentProfile::RangeScan => {
+                u64::from(self.key_space)
+            }
+            ExperimentProfile::Mixed => u64::from(self.key_space).div_ceil(2),
+            ExperimentProfile::SequentialWrite | ExperimentProfile::RandomWrite => 0,
+        };
+        let setup_bytes = setup_puts.checked_mul(put_bytes).ok_or_else(|| {
+            DbError::InvalidInput("experiment payload size overflowed".to_owned())
+        })?;
+        let range_bytes = EXPERIMENT_KEY_BYTES.checked_mul(2).ok_or_else(|| {
+            DbError::InvalidInput("experiment payload size overflowed".to_owned())
+        })?;
+        let measured_bytes_per_operation = match self.profile {
+            ExperimentProfile::PointRead => EXPERIMENT_KEY_BYTES,
+            ExperimentProfile::RangeScan => range_bytes,
+            ExperimentProfile::SequentialWrite | ExperimentProfile::RandomWrite => put_bytes,
+            ExperimentProfile::Mixed => put_bytes.max(range_bytes),
+        };
+        let measured_bytes = u64::from(self.operations)
+            .checked_mul(measured_bytes_per_operation)
+            .ok_or_else(|| {
+                DbError::InvalidInput("experiment payload size overflowed".to_owned())
+            })?;
+        let payload_bytes = setup_bytes.checked_add(measured_bytes).ok_or_else(|| {
+            DbError::InvalidInput("experiment payload size overflowed".to_owned())
+        })?;
+        if payload_bytes > MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES {
+            return Err(DbError::InvalidInput(format!(
+                "generated experiment may materialize {payload_bytes} key/value bytes; maximum is {MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES}"
             )));
         }
         Ok(())
@@ -139,9 +195,9 @@ pub struct ExperimentTrace {
     pub format_version: u16,
     /// Human/machine-readable workload family.
     pub profile: ExperimentProfile,
-    /// Generator seed for generated traces; `None` is reserved for hand-authored traces.
+    /// Generator seed; trace format v1 requires this to match `generator.seed`.
     pub seed: Option<u64>,
-    /// Full generator inputs when the trace came from the stable generator.
+    /// Full stable-generator inputs; trace format v1 requires canonical generated steps.
     pub generator: Option<ExperimentGeneratorConfig>,
     /// State-building actions excluded from the measurement window.
     pub setup_steps: Vec<ExperimentStep>,
@@ -150,8 +206,26 @@ pub struct ExperimentTrace {
 }
 
 impl ExperimentTrace {
-    /// Validates schema, operation bounds, generator metadata, and every common operation.
+    /// Validates schema, resource bounds, and exact binding to the embedded stable generator.
     pub fn validate(&self) -> Result<()> {
+        self.validate_structure()?;
+        let generator = self.generator.ok_or_else(|| {
+            DbError::InvalidInput(
+                "experiment trace v1 requires embedded generator metadata".to_owned(),
+            )
+        })?;
+        let expected = build_generated_trace(generator)?;
+        if self.setup_steps != expected.setup_steps
+            || self.measured_steps != expected.measured_steps
+        {
+            return Err(DbError::InvalidInput(
+                "experiment trace steps do not match embedded generator metadata".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_structure(&self) -> Result<()> {
         if self.format_version != EXPERIMENT_TRACE_FORMAT_VERSION {
             return Err(DbError::UnsupportedVersion {
                 format: "experiment trace",
@@ -187,8 +261,15 @@ impl ExperimentTrace {
                 ));
             }
         }
+        let mut payload_bytes = 0_u64;
         for step in self.setup_steps.iter().chain(&self.measured_steps) {
             validate_experiment_step(step)?;
+            payload_bytes = checked_add_payload(
+                payload_bytes,
+                experiment_step_payload_bytes(step)?,
+                MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
+                "experiment trace",
+            )?;
         }
         Ok(())
     }
@@ -253,6 +334,10 @@ pub struct ExperimentComparisonReport {
 
 /// Generates one of the stable Phase 4 trace families.
 pub fn generate_experiment_trace(config: ExperimentGeneratorConfig) -> Result<ExperimentTrace> {
+    build_generated_trace(config)
+}
+
+fn build_generated_trace(config: ExperimentGeneratorConfig) -> Result<ExperimentTrace> {
     config.validate()?;
     let mut random = SplitMix64::new(config.seed);
     let mut setup_steps = Vec::new();
@@ -347,7 +432,7 @@ pub fn generate_experiment_trace(config: ExperimentGeneratorConfig) -> Result<Ex
         setup_steps,
         measured_steps,
     };
-    trace.validate()?;
+    trace.validate_structure()?;
     Ok(trace)
 }
 
@@ -356,6 +441,7 @@ pub fn execute_experiment_step<E: KvEngine>(
     engine: &mut E,
     step: &ExperimentStep,
 ) -> Result<ExperimentOutcome> {
+    validate_experiment_step(step)?;
     match step {
         ExperimentStep::Put { key, value } => {
             engine
@@ -378,21 +464,26 @@ pub fn execute_experiment_step<E: KvEngine>(
                     previous: previous.map(ByteString::from),
                 })
         }
-        ExperimentStep::RangeScan { start, end, limit } => engine
-            .range_scan(
-                start.as_slice(),
-                end.as_ref().map(ByteString::as_slice),
-                usize::try_from(*limit).unwrap_or(usize::MAX),
-            )
-            .map(|rows| ExperimentOutcome::RangeScan {
-                rows: rows
-                    .into_iter()
-                    .map(|(key, value)| ExperimentRow {
-                        key: ByteString::from(key),
-                        value: ByteString::from(value),
-                    })
-                    .collect(),
-            }),
+        ExperimentStep::RangeScan { start, end, limit } => {
+            let limit = usize::try_from(*limit).map_err(|_| {
+                DbError::InvalidInput("experiment range limit does not fit usize".to_owned())
+            })?;
+            engine
+                .range_scan(
+                    start.as_slice(),
+                    end.as_ref().map(ByteString::as_slice),
+                    limit,
+                )
+                .map(|rows| ExperimentOutcome::RangeScan {
+                    rows: rows
+                        .into_iter()
+                        .map(|(key, value)| ExperimentRow {
+                            key: ByteString::from(key),
+                            value: ByteString::from(value),
+                        })
+                        .collect(),
+                })
+        }
         ExperimentStep::Reopen => {
             engine.reopen()?;
             Ok(ExperimentOutcome::Reopened)
@@ -416,16 +507,25 @@ where
             capabilities.name
         )));
     }
+    let mut setup_outcome_bytes = 0_u64;
     for step in &trace.setup_steps {
-        execute_experiment_step(engine, step)?;
+        let outcome = execute_experiment_step(engine, step)?;
+        setup_outcome_bytes = checked_add_outcome_payload(
+            setup_outcome_bytes,
+            &outcome,
+            "experiment setup outcomes",
+        )?;
     }
     engine.reset_amplification();
     engine.reset_operational_timing();
-    let outcomes = trace
-        .measured_steps
-        .iter()
-        .map(|step| execute_experiment_step(engine, step))
-        .collect::<Result<Vec<_>>>()?;
+    let mut outcome_bytes = 0_u64;
+    let mut outcomes = Vec::with_capacity(trace.measured_steps.len());
+    for step in &trace.measured_steps {
+        let outcome = execute_experiment_step(engine, step)?;
+        outcome_bytes =
+            checked_add_outcome_payload(outcome_bytes, &outcome, "experiment measured outcomes")?;
+        outcomes.push(outcome);
+    }
     let amplification = engine.amplification_report()?;
     let operational_timing = engine.operational_timing_report();
     Ok(ExperimentRunReport {
@@ -452,32 +552,86 @@ where
     R: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
 {
     trace.validate()?;
+    let left_capabilities = left.capabilities();
+    let right_capabilities = right.capabilities();
     validate_experiment_compatibility(
-        left.capabilities(),
-        right.capabilities(),
+        left_capabilities,
+        right_capabilities,
         trace.requires_ordered_range(),
     )?;
-    let left_report = run_experiment_trace(left, trace)?;
-    let right_report = run_experiment_trace(right, trace)?;
-    if left_report.outcomes != right_report.outcomes {
-        let mismatch = left_report
-            .outcomes
-            .iter()
-            .zip(&right_report.outcomes)
-            .position(|(left, right)| left != right)
-            .unwrap_or_else(|| left_report.outcomes.len().min(right_report.outcomes.len()));
-        return Err(DbError::InvalidInput(format!(
-            "experiment logical outcomes diverged at measured step {mismatch}"
-        )));
+
+    let mut setup_outcome_bytes = 0_u64;
+    for (index, step) in trace.setup_steps.iter().enumerate() {
+        let left_outcome = execute_experiment_step(left, step)?;
+        let right_outcome = execute_experiment_step(right, step)?;
+        if left_outcome != right_outcome {
+            return Err(logical_mismatch(
+                "setup",
+                index,
+                left_capabilities,
+                right_capabilities,
+            ));
+        }
+        setup_outcome_bytes = checked_add_outcome_payload(
+            setup_outcome_bytes,
+            &left_outcome,
+            "experiment setup outcomes",
+        )?;
     }
+    left.reset_amplification();
+    right.reset_amplification();
+    left.reset_operational_timing();
+    right.reset_operational_timing();
+
+    let mut outcome_bytes = 0_u64;
+    let mut outcomes = Vec::with_capacity(trace.measured_steps.len());
+    for (index, step) in trace.measured_steps.iter().enumerate() {
+        let left_outcome = execute_experiment_step(left, step)?;
+        let right_outcome = execute_experiment_step(right, step)?;
+        if left_outcome != right_outcome {
+            return Err(logical_mismatch(
+                "measured",
+                index,
+                left_capabilities,
+                right_capabilities,
+            ));
+        }
+        outcome_bytes = checked_add_outcome_payload(
+            outcome_bytes,
+            &left_outcome,
+            "experiment measured outcomes",
+        )?;
+        outcomes.push(left_outcome);
+    }
+
     Ok(ExperimentComparisonReport {
         trace: trace.clone(),
         setup_steps_executed: trace.setup_steps.len(),
-        measured_steps_executed: trace.measured_steps.len(),
-        outcomes: left_report.outcomes,
-        left: left_report.engine,
-        right: right_report.engine,
+        measured_steps_executed: outcomes.len(),
+        outcomes,
+        left: ExperimentEngineEvidence {
+            capabilities: left_capabilities,
+            amplification: left.amplification_report()?,
+            operational_timing: left.operational_timing_report(),
+        },
+        right: ExperimentEngineEvidence {
+            capabilities: right_capabilities,
+            amplification: right.amplification_report()?,
+            operational_timing: right.operational_timing_report(),
+        },
     })
+}
+
+fn logical_mismatch(
+    phase: &str,
+    index: usize,
+    left: EngineCapabilities,
+    right: EngineCapabilities,
+) -> DbError {
+    DbError::InvalidInput(format!(
+        "experiment logical outcomes diverged at {phase} step {index} between {} and {}",
+        left.name, right.name
+    ))
 }
 
 fn validate_experiment_step(step: &ExperimentStep) -> Result<()> {
@@ -486,11 +640,82 @@ fn validate_experiment_step(step: &ExperimentStep) -> Result<()> {
         ExperimentStep::Get { key } | ExperimentStep::Delete { key } => {
             validate_key(key.as_slice())
         }
-        ExperimentStep::RangeScan { start, end, .. } => {
+        ExperimentStep::RangeScan { start, end, limit } => {
+            if *limit == 0 || *limit > MAX_EXPERIMENT_RANGE_LIMIT {
+                return Err(DbError::InvalidInput(format!(
+                    "experiment range limit is {limit}; expected 1..={MAX_EXPERIMENT_RANGE_LIMIT}"
+                )));
+            }
             validate_range_scan(start.as_slice(), end.as_ref().map(ByteString::as_slice))
         }
         ExperimentStep::Reopen => Ok(()),
     }
+}
+
+fn experiment_step_payload_bytes(step: &ExperimentStep) -> Result<u64> {
+    match step {
+        ExperimentStep::Put { key, value } => {
+            checked_payload_lengths(&[key.as_slice().len(), value.as_slice().len()])
+        }
+        ExperimentStep::Get { key } | ExperimentStep::Delete { key } => {
+            checked_payload_lengths(&[key.as_slice().len()])
+        }
+        ExperimentStep::RangeScan {
+            start,
+            end: Some(end),
+            ..
+        } => checked_payload_lengths(&[start.as_slice().len(), end.as_slice().len()]),
+        ExperimentStep::RangeScan {
+            start, end: None, ..
+        } => checked_payload_lengths(&[start.as_slice().len()]),
+        ExperimentStep::Reopen => Ok(0),
+    }
+}
+
+fn checked_add_outcome_payload(total: u64, outcome: &ExperimentOutcome, kind: &str) -> Result<u64> {
+    let next = match outcome {
+        ExperimentOutcome::Put { previous }
+        | ExperimentOutcome::Delete { previous }
+        | ExperimentOutcome::Get { value: previous } => {
+            previous.as_ref().map_or(Ok(0), |value| {
+                u64::try_from(value.as_slice().len()).map_err(|_| {
+                    DbError::InvalidInput("experiment outcome length does not fit u64".to_owned())
+                })
+            })?
+        }
+        ExperimentOutcome::RangeScan { rows } => rows.iter().try_fold(0_u64, |total, row| {
+            let row_bytes =
+                checked_payload_lengths(&[row.key.as_slice().len(), row.value.as_slice().len()])?;
+            total.checked_add(row_bytes).ok_or_else(|| {
+                DbError::InvalidInput("experiment outcome payload size overflowed".to_owned())
+            })
+        })?,
+        ExperimentOutcome::Reopened => 0,
+    };
+    checked_add_payload(total, next, MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES, kind)
+}
+
+fn checked_payload_lengths(lengths: &[usize]) -> Result<u64> {
+    lengths.iter().try_fold(0_u64, |total, length| {
+        let length = u64::try_from(*length).map_err(|_| {
+            DbError::InvalidInput("experiment payload length does not fit u64".to_owned())
+        })?;
+        total
+            .checked_add(length)
+            .ok_or_else(|| DbError::InvalidInput("experiment payload size overflowed".to_owned()))
+    })
+}
+
+fn checked_add_payload(total: u64, next: u64, maximum: u64, kind: &str) -> Result<u64> {
+    let total = total
+        .checked_add(next)
+        .ok_or_else(|| DbError::InvalidInput(format!("{kind} payload size overflowed")))?;
+    if total > maximum {
+        return Err(DbError::InvalidInput(format!(
+            "{kind} has {total} payload bytes; maximum is {maximum}"
+        )));
+    }
+    Ok(total)
 }
 
 fn generated_range_step(
@@ -555,8 +780,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        compare_experiment_trace, generate_experiment_trace, run_experiment_trace,
-        ExperimentGeneratorConfig, ExperimentProfile, ExperimentStep,
+        checked_add_payload, compare_experiment_trace, generate_experiment_trace,
+        run_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile, ExperimentStep,
+        ExperimentTrace, MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
     };
     use crate::{
         AmplificationInstrumented, AmplificationRatio, AmplificationReport, ConcurrencyMode,
@@ -567,12 +793,12 @@ mod tests {
 
     #[test]
     fn every_generated_profile_is_repeatable_and_valid() {
-        for profile in [
-            ExperimentProfile::PointRead,
-            ExperimentProfile::RangeScan,
-            ExperimentProfile::SequentialWrite,
-            ExperimentProfile::RandomWrite,
-            ExperimentProfile::Mixed,
+        for (profile, expected_fingerprint) in [
+            (ExperimentProfile::PointRead, "8b62b67ed7863c9c"),
+            (ExperimentProfile::RangeScan, "11fd7c642dbe424d"),
+            (ExperimentProfile::SequentialWrite, "39f590db5df5a879"),
+            (ExperimentProfile::RandomWrite, "5f9024298838cc33"),
+            (ExperimentProfile::Mixed, "f9ed608bf9073e37"),
         ] {
             let config = ExperimentGeneratorConfig {
                 seed: 0x51_7eed,
@@ -589,6 +815,17 @@ mod tests {
             first.validate().expect("validate generated trace");
             assert_eq!(first.seed, Some(config.seed));
             assert_eq!(first.generator, Some(config));
+            let encoded = serde_json::to_vec(&first).expect("serialize trace");
+            let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+            for byte in &encoded {
+                fingerprint ^= u64::from(*byte);
+                fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            assert_eq!(format!("{fingerprint:016x}"), expected_fingerprint);
+            let round_trip: ExperimentTrace =
+                serde_json::from_slice(&encoded).expect("deserialize trace");
+            round_trip.validate().expect("validate round trip");
+            assert_eq!(round_trip, first);
         }
     }
 
@@ -632,6 +869,85 @@ mod tests {
     }
 
     #[test]
+    fn generated_payload_budget_is_checked_before_materializing_setup() {
+        let error = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 1,
+            profile: ExperimentProfile::PointRead,
+            operations: 1,
+            key_space: 65,
+            value_bytes: MAX_VALUE_BYTES as u32,
+            range_limit: 1,
+            reopen_every: None,
+        })
+        .expect_err("oversized generated payload must fail before allocation");
+        assert!(error.to_string().contains("may materialize"));
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn generated_metadata_is_bound_to_the_exact_encoded_steps() {
+        let mut trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 2,
+            profile: ExperimentProfile::RandomWrite,
+            operations: 4,
+            key_space: 4,
+            value_bytes: 4,
+            range_limit: 1,
+            reopen_every: None,
+        })
+        .expect("generated trace");
+        trace.measured_steps[0] = ExperimentStep::Reopen;
+        let error = trace
+            .validate()
+            .expect_err("tampered generated steps must fail validation");
+        assert!(error
+            .to_string()
+            .contains("do not match embedded generator"));
+    }
+
+    #[test]
+    fn trace_v1_rejects_unbound_hand_authored_metadata() {
+        let mut trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 3,
+            profile: ExperimentProfile::RandomWrite,
+            operations: 1,
+            key_space: 1,
+            value_bytes: 1,
+            range_limit: 1,
+            reopen_every: None,
+        })
+        .expect("generated trace");
+        trace.generator = None;
+        trace.seed = None;
+        let error = trace
+            .validate()
+            .expect_err("trace v1 requires generator binding");
+        assert!(error.to_string().contains("requires embedded generator"));
+    }
+
+    #[test]
+    fn outcome_payload_budget_fails_at_the_exact_boundary() {
+        assert_eq!(
+            checked_add_payload(
+                MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
+                0,
+                MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
+                "test outcomes",
+            )
+            .expect("the exact outcome budget is valid"),
+            MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES
+        );
+        let error = checked_add_payload(
+            MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
+            1,
+            MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
+            "test outcomes",
+        )
+        .expect_err("one byte beyond the outcome budget must fail");
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
     fn shared_runner_resets_after_setup_and_compares_exact_outcomes() {
         let trace = generate_experiment_trace(ExperimentGeneratorConfig {
             seed: 0xabc,
@@ -659,6 +975,29 @@ mod tests {
             report.right.amplification.point_read.unit,
             ReadWorkUnit::LsmSstableConsult
         );
+    }
+
+    #[test]
+    fn comparison_rejects_setup_divergence_even_when_final_state_converges() {
+        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 4,
+            profile: ExperimentProfile::PointRead,
+            operations: 1,
+            key_space: 1,
+            value_bytes: 4,
+            range_limit: 1,
+            reopen_every: None,
+        })
+        .expect("point trace");
+        let mut left = FakeEngine::new("left", StorageArchitecture::BPlusTree);
+        let mut right = FakeEngine::new("right", StorageArchitecture::LsmTree);
+        right
+            .map
+            .insert(0_u64.to_be_bytes().to_vec(), b"preexisting".to_vec());
+
+        let error = compare_experiment_trace(&mut left, &mut right, &trace)
+            .expect_err("different setup outcomes must fail immediately");
+        assert!(error.to_string().contains("setup step 0"));
     }
 
     #[test]

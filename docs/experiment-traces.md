@@ -10,8 +10,8 @@ experiment traces add ordered range scans and an explicit setup/measurement boun
 `ExperimentTrace` v1 contains:
 
 - `profile`: one stable experiment family;
-- `seed`: the recorded SplitMix64 seed for generated traces;
-- `generator`: all generator parameters when the trace is generated rather than hand-authored;
+- `seed`: the recorded SplitMix64 seed;
+- `generator`: all stable-generator parameters;
 - `setup_steps`: deterministic state-building operations excluded from amplification counters;
 - `measured_steps`: the exact operations included in the measurement window.
 
@@ -20,10 +20,23 @@ The runner validates every key/value/range against the common contract, executes
 the measured window. B+ tree and LSM preserve their process-local measurement window across the common
 same-handle reopen operation.
 
+Trace format v1 accepts canonical generated traces only. Validation regenerates the declared seed/config
+and requires the setup and measured vectors to match exactly; removing generator metadata or editing steps
+without changing the metadata fails closed. A future hand-authored/custom family needs an explicit schema
+and profile rather than borrowing a generated profile label.
+
+Resource bounds are part of trace validity. A trace contains at most 1,000,000 total steps, 64 MiB of
+combined encoded key/value payload, and range limits no greater than 1,000,000 rows. Generation checks a
+conservative profile-specific payload upper bound before allocating step vectors. Runners also cap the
+cumulative key/value payload produced by setup or measured outcomes at 64 MiB per phase; only the common
+measured vector is retained in a report. These are defensive limits, not recommended experiment sizes.
+
 Generated keys are fixed-width eight-byte **big-endian** unsigned ids. Numeric id order therefore equals
 bytewise key order, making generated range boundaries architecture-independent. Values are fixed-size byte
 strings filled by the specified SplitMix64 stream. The experiment generator has its own SplitMix64
 implementation so future changes to the Phase 1 correctness generator cannot silently change Phase 4 traces.
+Committed golden fingerprints cover every profile under one fixed configuration. Changing a generator rule
+requires a trace-format revision and continued validation support for archived older traces.
 
 ## Stable profiles
 
@@ -70,9 +83,12 @@ do not change the configured logical-operation count.
 caller-serialization contract, persistence class, standalone distribution, ordered-range support, and key/value
 limits must match. Storage architecture and crash-recovery mechanism are deliberately allowed to differ.
 
-Both candidates then execute the same setup and measured vectors. The comparison is rejected if any measured
-logical outcome differs. A successful `ExperimentComparisonReport` stores the full trace once, the proven
-common outcome vector once, and per-engine capabilities plus the exact common `AmplificationReport`.
+Both candidates execute each setup action in lockstep and compare its complete logical outcome before moving
+to the next action. Only after all setup outcomes agree are both instrumentation windows reset. Measured
+actions are likewise executed and checked in lockstep; the first mismatch fails the experiment without
+emitting amplification evidence. A successful `ExperimentComparisonReport` stores the full trace once, the
+proven common measured-outcome vector once, and per-engine capabilities plus the exact common
+`AmplificationReport`.
 Read-work units remain architecture-specific (`btree_page_access`, `lsm_sstable_consult`, and
 `lsm_sstable_version_decoded`) and must not be interpreted as interchangeable device I/O.
 
@@ -108,10 +124,10 @@ silently inheriting old engine state or overwriting prior evidence.
 
 ## Scope boundary
 
-This runner establishes identical logical inputs, explicit setup/measurement boundaries, exact logical outcome
-equality, and shared structural amplification reporting. It does **not** establish a fair latency benchmark by
-itself. Controlled-host CPU/device/filesystem settings, cache-state protocol, latency distributions, recovery
-cost, compaction stalls, and archived environment manifests remain separate Phase 4 work.
+This runner establishes canonical bounded logical inputs, explicit setup/measurement boundaries, lockstep
+setup/measured outcome equality, and shared structural amplification reporting. It does **not** establish a
+fair latency benchmark by itself. Complete recovery-work accounting, failed/excluded samples, counterbalanced
+engine order, a cache/filesystem protocol, and controlled-host pinning remain separate Phase 4 work.
 
 ## Evidence archives
 

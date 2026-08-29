@@ -138,18 +138,19 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
 - [x] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.
   `ExperimentTrace` v1 records the full generator config and stable SplitMix64 seed, separates deterministic
   setup from the measured window, uses byte-order-preserving fixed-width keys, supports measured REOPEN,
-  and is exposed through `db-lab experiment-generate`.
+  and is exposed through `db-lab experiment-generate`. Validation binds the encoded steps to the exact
+  generator metadata and enforces explicit trace/outcome resource budgets.
 - [x] Drive the common amplification contract from shared cross-engine traces. `compare_experiment_trace`
-  applies capability preflight, executes identical setup, resets both instrumentation windows, runs the exact
-  same measured vector, rejects any logical-outcome divergence, and returns one self-contained trace/outcome
-  record plus per-engine capabilities and exact amplification evidence. A real B+ tree/LSM mixed-trace test
-  covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain explicitly non-device-I/O.
-- [x] Capture recovery-cost and compaction-stall distributions as raw process-local nanosecond samples.
-  Both comparison engines record successful measured `REOPEN` durations; the synchronous LSM compaction
-  path additionally records one stall sample per successfully published full-set compaction. Samples are
-  reset at the same experiment measurement boundary as amplification counters and are embedded in each
-  engine evidence record. They are archival telemetry, not cross-engine performance claims until the host
-  and cache/filesystem conditions are pinned.
+  applies capability preflight, executes and checks setup lockstep, resets both instrumentation windows, then
+  executes and checks the measured vector lockstep. It rejects the first logical-outcome divergence and returns
+  one self-contained trace/outcome record plus per-engine capabilities and exact amplification evidence. A real
+  B+ tree/LSM mixed-trace test covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain
+  explicitly non-device-I/O.
+- [ ] Complete recovery-cost and compaction-stall distributions. Both engines expose successful measured
+  `REOPEN` nanoseconds and the LSM exposes successful synchronous full-set compaction nanoseconds, but this is
+  only partial telemetry. Recovery bytes/records examined, deterministic sample-association tests,
+  failed/excluded attempts, counterbalanced engine order, and a cache/filesystem protocol are still required
+  before this methodology or roadmap item is complete.
 - [x] Archive raw data and environment manifests before any result is publishable. `db-lab
   experiment-archive` runs the same shared comparison but writes a create-new archive directory containing
   `trace.json`, `comparison.json`, `environment.json`, and `index.json`. The environment manifest records the
