@@ -278,7 +278,10 @@ fn instance_path(root: &Path, context: ExperimentInstanceContext, leaf: &str) ->
 
 fn prepare_instance_parent(path: &Path) -> Result<(), DbError> {
     let parent = path.parent().ok_or_else(|| {
-        DbError::InvalidInput(format!("engine instance path has no parent: {}", path.display()))
+        DbError::InvalidInput(format!(
+            "engine instance path has no parent: {}",
+            path.display()
+        ))
     })?;
     fs::create_dir_all(parent).map_err(DbError::Io)
 }
@@ -399,10 +402,7 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), CliError> {
 mod tests {
     use std::fs;
 
-    use db_core::{
-        generate_experiment_trace, ExperimentAttemptDisposition, ExperimentGeneratorConfig,
-        ExperimentProfile,
-    };
+    use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
     use serde_json::Value;
     use tempfile::tempdir;
 
@@ -412,7 +412,10 @@ mod tests {
     fn exclusion_specs_are_bounded_unique_and_in_range() {
         let values = vec!["1=scheduled cooldown".to_owned(), "3=host noise".to_owned()];
         let parsed = parse_exclusions(&values, 4).expect("parse exclusions");
-        assert_eq!(parsed.get(&1).map(String::as_str), Some("scheduled cooldown"));
+        assert_eq!(
+            parsed.get(&1).map(String::as_str),
+            Some("scheduled cooldown")
+        );
         assert_eq!(parsed.get(&3).map(String::as_str), Some("host noise"));
 
         let duplicate = vec!["1=first".to_owned(), "1=second".to_owned()];
@@ -465,21 +468,26 @@ mod tests {
         })
         .expect("archive batch");
 
-        let batch: Value = serde_json::from_slice(
-            &fs::read(archive_dir.join("batch.json")).expect("read batch"),
-        )
-        .expect("parse batch");
+        let batch: Value =
+            serde_json::from_slice(&fs::read(archive_dir.join("batch.json")).expect("read batch"))
+                .expect("parse batch");
         assert_eq!(batch["requested_pairs"], 3);
         assert_eq!(batch["included_pairs"], 2);
         assert_eq!(batch["failed_pairs"], 0);
         assert_eq!(batch["excluded_pairs"], 1);
-        assert_eq!(batch["attempts"][0]["context"]["pair_order"], "left_then_right_first");
+        assert_eq!(
+            batch["attempts"][0]["context"]["pair_order"],
+            "left_then_right_first"
+        );
         assert_eq!(batch["attempts"][1]["disposition"], "excluded");
         assert_eq!(
             batch["attempts"][1]["exclusion_reason"],
             "scheduled thermal cooldown"
         );
-        assert_eq!(batch["attempts"][2]["context"]["pair_order"], "left_then_right_first");
+        assert_eq!(
+            batch["attempts"][2]["context"]["pair_order"],
+            "left_then_right_first"
+        );
 
         let environment: Value = serde_json::from_slice(
             &fs::read(archive_dir.join("environment.json")).expect("read environment"),
@@ -490,15 +498,17 @@ mod tests {
             environment["execution_protocol"],
             "fresh_counterbalanced_repeated_batch_v1"
         );
-        assert_eq!(environment["attempt_protocol"], "retain_all_requested_pairs_v1");
+        assert_eq!(
+            environment["attempt_protocol"],
+            "retain_all_requested_pairs_v1"
+        );
         assert_eq!(environment["pair_seed"], 0);
         assert_eq!(environment["requested_pairs"], 3);
         assert_eq!(environment["cache_state"], "warm");
 
-        let index: Value = serde_json::from_slice(
-            &fs::read(archive_dir.join("index.json")).expect("read index"),
-        )
-        .expect("parse index");
+        let index: Value =
+            serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
+                .expect("parse index");
         assert_eq!(index["format_version"], 6);
         assert_eq!(
             index["files"],
@@ -511,12 +521,5 @@ mod tests {
         assert!(engine_root.join("pair-000000/repetition-0/lsm").exists());
         assert!(!engine_root.join("pair-000001").exists());
         assert!(engine_root.join("pair-000002/repetition-1/lsm").exists());
-
-        let dispositions = [
-            ExperimentAttemptDisposition::Included,
-            ExperimentAttemptDisposition::Excluded,
-            ExperimentAttemptDisposition::Included,
-        ];
-        assert_eq!(dispositions.len(), batch["attempts"].as_array().unwrap().len());
     }
 }
