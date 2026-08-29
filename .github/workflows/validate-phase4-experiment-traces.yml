@@ -27,7 +27,18 @@ jobs:
           from pathlib import Path
           path = Path('crates/db-core/src/experiment.rs')
           text = path.read_text()
-          text = text.replace('ReadWorkUnit, Result, StructuralReadAmplification, MAX_KEY_BYTES,\n    MAX_VALUE_BYTES,', 'ReadWorkUnit, Result, StructuralReadAmplification, MAX_VALUE_BYTES,')
+          text = text.replace(
+              'AmplificationInstrumented, AmplificationRatio, AmplificationReport, ByteString, DbError,\n    EngineCapabilities, KvEngine, ReadWorkUnit, Result, StructuralReadAmplification, MAX_KEY_BYTES,\n    MAX_VALUE_BYTES,',
+              'AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,\n    KvEngine, Result, MAX_VALUE_BYTES,',
+          )
+          text = text.replace(
+              'AmplificationInstrumented, AmplificationRatio, AmplificationReport, ByteString, DbError,\n    EngineCapabilities, KvEngine, ReadWorkUnit, Result, StructuralReadAmplification, MAX_VALUE_BYTES,',
+              'AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,\n    KvEngine, Result, MAX_VALUE_BYTES,',
+          )
+          text = text.replace(
+              '(u64::from(self.key_space) + 1) / 2',
+              'u64::from(self.key_space).div_ceil(2)',
+          )
           path.write_text(text)
           PY
       - name: Refresh lockfile
