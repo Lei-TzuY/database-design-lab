@@ -87,10 +87,10 @@ Sequential writes use distinct ascending ids; random writes uniformly select the
 traces seed even ids and then use 40% PUT, 30% GET, 15% range, and 15% DELETE. Exact rules live in
 `docs/experiment-traces.md`.
 
-`compare_experiment_trace` refuses to emit comparison evidence unless measured logical outcomes match exactly.
-A successful report stores the full trace once, the common measured outcomes once, and per-engine capabilities
-plus raw numerator/denominator amplification evidence. This proves identical logical input and output; it still
-does not turn unlike structural read units into device-I/O measurements.
+`compare_experiment_trace` refuses to emit comparison evidence unless setup and measured logical outcomes
+match exactly in lockstep. A successful report stores the full trace once, the common measured outcomes once,
+and per-engine capabilities plus raw numerator/denominator amplification evidence. This proves identical
+logical input and output; it still does not turn unlike structural read units into device-I/O measurements.
 
 ## Capability preflight
 
@@ -114,3 +114,8 @@ an empty compaction vector. Samples use integer nanoseconds from `std::time::Ins
 setup together with amplification counters. Failed recovery/compaction attempts are not included in these
 success distributions. These raw samples are intentionally ungated in CI: scheduler noise, filesystem/device,
 cache state, build profile, and host identity must be archived and pinned before latency comparisons are made.
+They are partial operational telemetry, not a complete recovery-cost result: the report does not yet pair each
+duration with bytes or records examined, retain failed/excluded attempts, or counterbalance engine execution
+order. Evidence archives record the declared environment and cache state, but do not enforce a cache/filesystem
+protocol. Those controls and deterministic sample-association tests are required before publishing B+ tree
+versus LSM timing distributions.
