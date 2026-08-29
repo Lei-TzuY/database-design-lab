@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Explicit trigger after the finalization validator was added to this staging branch.
 ROOT = Path(__file__).resolve().parents[2]
 BTREE_TEST = ROOT / "crates/db-storage-btree/src/tree/instrumentation_tests.rs"
 LSM_FAULT = ROOT / "crates/db-storage-lsm/src/compaction_fault_tests.rs"
