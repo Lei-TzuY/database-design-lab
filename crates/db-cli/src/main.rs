@@ -949,6 +949,41 @@ mod tests {
     }
 
     #[test]
+    fn experiment_batch_archive_shape_parses() {
+        let batch = Cli::try_parse_from([
+            "db-lab",
+            "experiment-batch-archive",
+            "--trace",
+            "trace.json",
+            "--workspace-dir",
+            "work/run-001",
+            "--archive-dir",
+            "evidence/run-001",
+            "--included-attempts",
+            "6",
+            "--warmup-attempts",
+            "2",
+            "--order-seed",
+            "99",
+            "--revision",
+            "1073efafb752b6ae318ed01c667253a7406ae2fa",
+            "--cache-state",
+            "warm",
+        ])
+        .expect("parse experiment batch archive");
+        assert!(matches!(
+            batch.command,
+            Command::ExperimentBatchArchive {
+                included_attempts: 6,
+                warmup_attempts: 2,
+                order_seed: 99,
+                cache_state: CacheStateKind::Warm,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn experiment_archive_shape_parses_and_revision_validation_is_strict() {
         let archive = Cli::try_parse_from([
             "db-lab",

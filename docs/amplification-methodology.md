@@ -128,9 +128,24 @@ Operational work is architecture-specific and explicitly unit-tagged:
   version is published, mirrored, and obsolete-file reclamation completes. B+ tree reports no compaction
   samples.
 
-The compatibility duration vectors and structured vectors are appended together and tests require their
-indices/durations to agree. Successful-sample work accounting is therefore deterministic and trace-associated,
-but the roadmap item remains incomplete: failed/excluded recovery or compaction attempts are not retained,
-engine execution order is not counterbalanced, and the archive's declared cache/filesystem state is not an
-enforced protocol. Scheduler noise, build profile, host identity, cache state, filesystem, and storage device
-must still be controlled before timing distributions can support a performance claim.
+The compatibility duration vectors and structured success vectors are appended together and tests require
+their indices/durations to agree. `OperationalTimingReport` also retains complete attempt streams: successful
+REOPEN/compaction attempts mirror the compatibility sample, while failures keep elapsed duration, measured
+step index, stable error class/message, and deterministic work when it is known without extra measurement I/O.
+Injected LSM compaction failures are regression-tested to appear only in the attempt stream, not in the
+success-only duration projection.
+
+`ExperimentBatch` v1 addresses execution-order and exclusion bias at the runner layer. Included attempts must
+be a positive even count; every pair executes the same trace once B+ tree-first and once LSM-first, while a
+stable `order_seed` chooses each pair's orientation. Warmups are executed, indexed, and archived as
+`excluded_warmup` rather than discarded. Every attempt uses fresh engine targets and records success or the
+factory/comparison failure that ended it; comparison failures preserve each already-created engine's partial
+operational attempt stream. The first successful attempt supplies one canonical logical-outcome vector and
+later successes must match it. `experiment-batch-archive` stores `trace.json`, `batch.json`, and the environment
+manifest while retaining per-attempt engine state in a distinct workspace for forensic inspection.
+
+The roadmap item still remains incomplete because the archive's declared cache/filesystem state is metadata,
+not an enforced preparation protocol. Scheduler noise, build profile, host identity, cache state, filesystem,
+and storage device must still be controlled on a pinned host before timing distributions can support a
+performance claim. A batch with any included failure must be reported as such; it is not silently filtered into
+a success-only distribution.

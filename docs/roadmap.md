@@ -146,11 +146,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   one self-contained trace/outcome record plus per-engine capabilities and exact amplification evidence. A real
   B+ tree/LSM mixed-trace test covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain
   explicitly non-device-I/O.
-- [ ] Complete recovery-cost and compaction-stall distributions. Successful samples now pair duration with
-  the exact measured trace-step index and deterministic data-path work: B+ tree reopen page accesses/bytes,
-  LSM reopen WAL+SSTable record versions/bytes, and LSM full-set compaction input record versions/bytes. Tests
-  pin trace association and the legacy raw-nanosecond projections. Failed/excluded attempts, counterbalanced
-  engine order, and an enforced cache/filesystem protocol are still required before this item is complete.
+- [ ] Complete recovery-cost and compaction-stall distributions. Successful samples pair duration with the
+  exact measured trace-step index and deterministic data-path work. Full operational attempt streams now retain
+  failed REOPEN/compaction durations and stable errors, with compaction input work when known. `ExperimentBatch`
+  v1 runs fresh engines repeatedly, archives warmups as excluded attempts, and guarantees equal B+ tree-first /
+  LSM-first counts through deterministic AB/BA pairs; factory/comparison failures remain in the ledger instead
+  of disappearing. The remaining blocker is an enforced cache/filesystem preparation protocol on a pinned host.
 - [x] Archive raw data and environment manifests before any result is publishable. `db-lab
   experiment-archive` runs the same shared comparison but writes a create-new archive directory containing
   `trace.json`, `comparison.json`, `environment.json`, and `index.json`. The environment manifest records the

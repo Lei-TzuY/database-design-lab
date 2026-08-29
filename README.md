@@ -26,7 +26,7 @@ engine:
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, bounded validated-page caching, and exact structural amplification instrumentation |
 | `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, half-open range scans, deterministic compaction differential tests, and the shared exact amplification report contract |
-| `db-cli` | Correctness `generate`/`run`/`differential`, Phase 4 `experiment-generate`/`experiment-compare`, plus append-log `verify`/`inspect` |
+| `db-cli` | Correctness `generate`/`run`/`differential`, Phase 4 trace/compare/single-archive/counterbalanced-batch archive commands, plus append-log `verify`/`inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
 The B+ tree uses a separate page file whose two mirrored superblocks define the committed physical
@@ -106,8 +106,13 @@ setup/measured windows and stable point-read, range-scan, sequential-write, rand
 `experiment-compare` proves identical setup and measured outcomes in lockstep before archiving both
 engines' amplification evidence. Successful REOPEN/LSM-compaction timings additionally carry their exact
 measured-step index and deterministic page/record plus data-path-byte work while retaining the original raw
-nanosecond vectors for compatibility; these samples are still not controlled-host performance claims.
-`experiment-archive` adds a create-new raw evidence directory plus an explicit environment manifest.
+nanosecond vectors for compatibility. `ExperimentBatch` v1 adds repeated fresh-engine attempts with a
+seeded, exactly balanced AB/BA order among included attempts; warmups execute and remain archived but are
+explicitly excluded. Factory/comparison failures remain in the attempt ledger, and timed REOPEN/compaction
+failure attempts retain duration, error class/message, and deterministic work when it is already known.
+These samples are still not controlled-host performance claims. `experiment-archive` adds a create-new raw
+evidence directory plus an explicit environment manifest; `experiment-batch-archive` additionally preserves
+fresh per-attempt engine state in a separate workspace and writes `batch.json` beside trace/environment data.
 See `docs/experiment-traces.md` for the frozen generation rules. Transactions,
 multi-process writers, snapshot/replication-aware tombstone GC, generalized multi-run/multi-level compaction,
 replication, SQL, MVCC, Raft, graph, time-series, and columnar execution are not implemented.
@@ -126,6 +131,9 @@ cargo run -p db-cli -- experiment-generate --profile mixed --seed 42 \
   --operations 1000 --key-space 4096 --output mixed-42.json
 cargo run -p db-cli -- experiment-compare --trace mixed-42.json \
   --btree-path btree-42.db --lsm-path lsm-42 --output mixed-42-report.json
+cargo run -p db-cli -- experiment-batch-archive --trace mixed-42.json \
+  --workspace-dir work/mixed-42 --archive-dir evidence/mixed-42 --included-attempts 10 \
+  --warmup-attempts 2 --order-seed 4242 --revision REVISION
 cargo run -p db-cli -- verify experiment.db
 cargo run -p db-cli -- inspect experiment.db --show-values
 ```

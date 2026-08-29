@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use db_core::{DbError, KvEngine, MAX_KEY_BYTES};
+use db_core::{
+    DbError, ErrorClass, KvEngine, OperationalAttemptOutcome, OperationalTimingInstrumented,
+    MAX_KEY_BYTES,
+};
 use tempfile::{tempdir, TempDir};
 
 use super::{CompactionFaultMode, CompactionWriteKind, LsmEngine, MUTABLE_MEMTABLE_BYTES_LIMIT};
@@ -115,6 +118,31 @@ fn assert_fault_case(
         "{kind:?} {mode:?}: {error}"
     );
     expected.push((key7, value7));
+    let timing = engine.operational_timing_report();
+    assert!(timing.compaction_stall_ns.is_empty(), "{kind:?} {mode:?}");
+    assert!(
+        timing.compaction_stall_samples.is_empty(),
+        "{kind:?} {mode:?}"
+    );
+    assert_eq!(
+        timing.compaction_stall_attempts.len(),
+        1,
+        "{kind:?} {mode:?}"
+    );
+    let attempt = &timing.compaction_stall_attempts[0];
+    assert_eq!(attempt.measured_step_index, None, "{kind:?} {mode:?}");
+    let work = attempt
+        .work
+        .expect("triggered compaction has known input work");
+    assert!(work.units_examined > 0, "{kind:?} {mode:?}");
+    assert!(work.bytes_examined > 0, "{kind:?} {mode:?}");
+    assert!(matches!(
+        &attempt.outcome,
+        OperationalAttemptOutcome::Failed {
+            error_class: ErrorClass::Io,
+            ..
+        }
+    ));
     assert!(matches!(engine.get(b"k-00"), Err(DbError::Poisoned)));
     drop(engine);
 
