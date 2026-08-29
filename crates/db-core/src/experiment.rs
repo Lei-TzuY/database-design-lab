@@ -1154,6 +1154,7 @@ mod tests {
         }
 
         fn reopen(&mut self) -> Result<()> {
+            self.operational_timing.reopen_ns.push(1);
             self.operational_timing
                 .reopen_samples
                 .push(OperationalTimingSample {

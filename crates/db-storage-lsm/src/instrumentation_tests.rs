@@ -282,6 +282,7 @@ fn operational_samples_bind_compaction_and_reopen_to_deterministic_work() {
     let timing = engine.operational_timing_report();
     assert_eq!(timing.compaction_stall_samples.len(), 1);
     let compaction = timing.compaction_stall_samples[0];
+    assert_eq!(timing.compaction_stall_ns, vec![compaction.duration_ns]);
     assert_eq!(compaction.measured_step_index, Some(7));
     assert_eq!(
         compaction.work.unit,
@@ -301,6 +302,7 @@ fn operational_samples_bind_compaction_and_reopen_to_deterministic_work() {
     let timing = engine.operational_timing_report();
     assert_eq!(timing.reopen_samples.len(), 1);
     let reopen = timing.reopen_samples[0];
+    assert_eq!(timing.reopen_ns, vec![reopen.duration_ns]);
     assert_eq!(reopen.measured_step_index, Some(99));
     assert_eq!(reopen.work.unit, OperationalWorkUnit::LsmRecordVersion);
     assert_eq!(

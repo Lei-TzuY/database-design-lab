@@ -190,9 +190,13 @@ pub struct OperationalTimingSample {
 /// required before durations are compared across engines or revisions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct OperationalTimingReport {
-    /// Successful same-handle `REOPEN` samples.
+    /// Backward-compatible projection of successful same-handle `REOPEN` durations in nanoseconds.
+    pub reopen_ns: Vec<u64>,
+    /// Backward-compatible projection of successful synchronous compaction durations in nanoseconds.
+    pub compaction_stall_ns: Vec<u64>,
+    /// Successful same-handle `REOPEN` samples with deterministic work and measured-step association.
     pub reopen_samples: Vec<OperationalTimingSample>,
-    /// Successful synchronous compaction-path samples. Empty for engines without compaction.
+    /// Successful synchronous compaction samples with deterministic work and measured-step association.
     pub compaction_stall_samples: Vec<OperationalTimingSample>,
 }
 

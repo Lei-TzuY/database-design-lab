@@ -170,6 +170,7 @@ fn reopen_sample_is_step_associated_and_counts_open_validation_work() {
     assert_eq!(timing.compaction_stall_samples, Vec::new());
     assert_eq!(timing.reopen_samples.len(), 1);
     let sample = timing.reopen_samples[0];
+    assert_eq!(timing.reopen_ns, vec![sample.duration_ns]);
     assert_eq!(sample.measured_step_index, Some(7));
     assert_eq!(sample.work.unit, OperationalWorkUnit::BtreePageAccess);
     assert_eq!(

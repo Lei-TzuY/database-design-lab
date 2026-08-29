@@ -747,12 +747,16 @@ impl LsmEngine {
         drop(old_tables);
         self.reclaim_obsolete_sstables(active_table_id);
         self.reclaim_obsolete_manifests(active_manifest_id);
+        let duration_ns =
+            u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.operational_timing
+            .compaction_stall_ns
+            .push(duration_ns);
         self.operational_timing
             .compaction_stall_samples
             .push(OperationalTimingSample {
                 measured_step_index: self.operational_step_index,
-                duration_ns: u64::try_from(compaction_started.elapsed().as_nanos())
-                    .unwrap_or(u64::MAX),
+                duration_ns,
                 work: OperationalWork {
                     unit: OperationalWorkUnit::LsmSstableRecordVersion,
                     units_examined: input_records,
@@ -1074,12 +1078,13 @@ impl KvEngine for LsmEngine {
         match Self::open_existing(self.path.clone()) {
             Ok(mut reopened) => {
                 let work = reopened.reopen_work()?;
+                let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                operational_timing.reopen_ns.push(duration_ns);
                 operational_timing
                     .reopen_samples
                     .push(OperationalTimingSample {
                         measured_step_index: operational_step_index,
-                        duration_ns: u64::try_from(started.elapsed().as_nanos())
-                            .unwrap_or(u64::MAX),
+                        duration_ns,
                         work,
                     });
                 reopened.instrumentation = instrumentation;

@@ -69,12 +69,13 @@ impl KvEngine for BPlusTree {
         match BPlusTree::open(&path, self.cache_capacity) {
             Ok(mut reopened) => {
                 let page_accesses = reopened.pager.read_page_calls();
+                let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                operational_timing.reopen_ns.push(duration_ns);
                 operational_timing
                     .reopen_samples
                     .push(OperationalTimingSample {
                         measured_step_index: operational_step_index,
-                        duration_ns: u64::try_from(started.elapsed().as_nanos())
-                            .unwrap_or(u64::MAX),
+                        duration_ns,
                         work: OperationalWork {
                             unit: OperationalWorkUnit::BtreePageAccess,
                             units_examined: page_accesses,
