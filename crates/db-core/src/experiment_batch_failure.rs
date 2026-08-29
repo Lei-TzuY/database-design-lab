@@ -137,15 +137,15 @@ where
                         }
                         let class = source.class();
                         let message = source.to_string();
-                        let failure = left_factory_failure
-                            .or(right_factory_failure)
-                            .unwrap_or(ExperimentAttemptFailure {
+                        let failure = left_factory_failure.or(right_factory_failure).unwrap_or(
+                            ExperimentAttemptFailure {
                                 stage: ExperimentAttemptFailureStage::Comparison,
                                 engine_role: None,
                                 repetition_index: None,
                                 class,
                                 message,
-                            });
+                            },
+                        );
                         attempts.push(ExperimentAttemptRecord {
                             context,
                             disposition: ExperimentAttemptDisposition::Failed,
@@ -225,7 +225,7 @@ mod tests {
             &trace,
             0,
             2,
-            |context| {
+            |_context| {
                 Ok(FakeEngine::new(
                     "left",
                     StorageArchitecture::BPlusTree,
