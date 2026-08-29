@@ -18,6 +18,10 @@ use db_storage_memory::MemoryEngine;
 use serde::Serialize;
 use thiserror::Error;
 
+mod counterbalanced_archive;
+
+use counterbalanced_archive::CounterbalancedArchiveArgs;
+
 const MAX_JSON_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
@@ -156,6 +160,11 @@ enum Command {
         /// Optional free-form experiment note. Do not include secrets.
         #[arg(long)]
         notes: Option<String>,
+    },
+    /// Run a fresh two-repetition AB/BA pair and archive exact evidence plus order provenance.
+    ExperimentArchiveCounterbalanced {
+        #[command(flatten)]
+        args: CounterbalancedArchiveArgs,
     },
     /// Validate an append-log file without modifying it.
     Verify {
@@ -454,6 +463,7 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
             };
             write_evidence_archive(&archive_dir, &revision, &trace, &comparison, &environment)
         }
+        Command::ExperimentArchiveCounterbalanced { args } => counterbalanced_archive::run(args),
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
             write_stdout_json(&report)
@@ -790,6 +800,35 @@ mod tests {
                 ..
             }
         ));
+
+        let counterbalanced = Cli::try_parse_from([
+            "db-lab",
+            "experiment-archive-counterbalanced",
+            "--trace",
+            "trace.json",
+            "--first-btree-path",
+            "tree-a.db",
+            "--first-lsm-path",
+            "lsm-a",
+            "--second-btree-path",
+            "tree-b.db",
+            "--second-lsm-path",
+            "lsm-b",
+            "--pair-order",
+            "right-then-left-first",
+            "--revision",
+            "e1fb48a61d2a3ec6fafe4e9a4d001d5c6ce0231f",
+            "--archive-dir",
+            "evidence/run-002",
+            "--cache-state",
+            "warm",
+        ])
+        .expect("parse counterbalanced experiment archive");
+        assert!(matches!(
+            counterbalanced.command,
+            Command::ExperimentArchiveCounterbalanced { .. }
+        ));
+
         validate_revision("abc123").expect("simple revision");
         assert!(validate_revision("").is_err());
         assert!(validate_revision("bad revision with spaces").is_err());
