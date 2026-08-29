@@ -9,6 +9,7 @@ mod engine;
 mod error;
 mod experiment;
 mod operation;
+mod ordered_experiment;
 mod workload;
 
 pub use bytes::{ByteString, ByteStringError};
@@ -31,6 +32,9 @@ pub use experiment::{
     MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
 };
 pub use operation::{Outcome, WorkloadStep};
+pub use ordered_experiment::{
+    compare_experiment_trace_ordered, ExperimentExecutionOrder, OrderedExperimentComparisonReport,
+};
 pub use workload::{
     generate_workload, GeneratorConfig, Workload, MAX_WORKLOAD_STEPS, WORKLOAD_FORMAT_VERSION,
 };
