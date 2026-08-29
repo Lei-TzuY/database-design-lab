@@ -5,11 +5,13 @@
 
 mod bytes;
 mod counterbalanced_experiment;
+mod counterbalanced_failure;
 mod differential;
 mod engine;
 mod error;
 mod experiment;
 mod experiment_batch;
+mod experiment_batch_failure;
 mod operation;
 mod ordered_experiment;
 mod workload;
@@ -18,6 +20,10 @@ pub use bytes::{ByteString, ByteStringError};
 pub use counterbalanced_experiment::{
     compare_experiment_trace_counterbalanced, CounterbalancedExperimentComparisonReport,
     CounterbalancedPairOrder,
+};
+pub use counterbalanced_failure::{
+    compare_experiment_trace_counterbalanced_with_failure_evidence,
+    CounterbalancedComparisonFailureEvidence, CounterbalancedExperimentExecutionError,
 };
 pub use differential::{compare_workload, DifferentialError, DifferentialReport};
 pub use engine::{
@@ -43,6 +49,10 @@ pub use experiment_batch::{
     ExperimentAttemptAdmission, ExperimentAttemptContext, ExperimentAttemptDisposition,
     ExperimentAttemptFailure, ExperimentAttemptFailureStage, ExperimentAttemptRecord,
     ExperimentEngineRole, ExperimentInstanceContext, MAX_EXPERIMENT_BATCH_PAIRS,
+};
+pub use experiment_batch_failure::{
+    run_counterbalanced_experiment_batch_with_failure_evidence,
+    CounterbalancedExperimentBatchFailureEvidenceReport,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use ordered_experiment::{
