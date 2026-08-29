@@ -146,13 +146,14 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   one self-contained trace/outcome record plus per-engine capabilities and exact amplification evidence. A real
   B+ tree/LSM mixed-trace test covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain
   explicitly non-device-I/O.
-- [ ] Complete recovery-cost and compaction-stall distributions. Successful samples now pair duration with
-  the exact measured trace-step index and deterministic data-path work: B+ tree reopen page accesses/bytes,
-  LSM reopen WAL+SSTable record versions/bytes, and LSM full-set compaction input record versions/bytes. Whole-run
-  execution order is explicit, fresh AB/BA pairs are first-class in `db-core`, and
-  `experiment-archive-counterbalanced` preserves both repetitions plus pair-order provenance. Non-success
-  invocations are now retained as immutable format-v3 `failed`/`excluded` attempt evidence rather than being
-  silently dropped. An enforced cache/filesystem preparation protocol is still required before this item is complete.
+- [ ] Complete recovery-cost and compaction-stall distributions. Successful samples pair duration with exact
+  measured trace-step indices and deterministic data-path work. Whole-run order is explicit, fresh AB/BA pairs
+  are first-class, and one counterbalanced invocation is archived as successful format-v2 evidence or immutable
+  format-v3 `failed`/`excluded` attempt evidence. The reusable repeated-batch layer additionally alternates outer
+  pair order from a recorded seed and retains every requested pair as included, failed, or explicitly excluded,
+  continuing after pair failure; factory failures carry left/right plus repetition provenance. An enforced
+  cache/filesystem preparation protocol, immutable archive wiring for the repeated-batch ledger, and duration/work
+  capture for failed internal recovery or compaction operations remain required before this item is complete.
 - [x] Archive raw data and environment manifests before any result is publishable. The backward-compatible
   `db-lab experiment-archive` format v1 writes `trace.json`, `comparison.json`, `environment.json`, and
   `index.json` for one fresh lockstep comparison. Successful `db-lab experiment-archive-counterbalanced` runs
