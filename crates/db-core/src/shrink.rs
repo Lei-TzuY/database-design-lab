@@ -161,18 +161,16 @@ mod tests {
             let mut candidate = minimized.clone();
             candidate.steps.remove(index);
             assert!(
-                !matches!(
-                    minimize_failing_workload(&candidate, |probe| {
-                        let has_put = probe.steps.iter().any(|step| {
-                            matches!(step, WorkloadStep::Put { key, .. } if key.as_slice() == b"key")
-                        });
-                        let has_get = probe.steps.iter().any(|step| {
-                            matches!(step, WorkloadStep::Get { key } if key.as_slice() == b"key")
-                        });
-                        Ok::<_, DbError>(has_put && has_get)
-                    }),
-                    Ok(_)
-                ),
+                minimize_failing_workload(&candidate, |probe| {
+                    let has_put = probe.steps.iter().any(|step| {
+                        matches!(step, WorkloadStep::Put { key, .. } if key.as_slice() == b"key")
+                    });
+                    let has_get = probe.steps.iter().any(|step| {
+                        matches!(step, WorkloadStep::Get { key } if key.as_slice() == b"key")
+                    });
+                    Ok::<_, DbError>(has_put && has_get)
+                })
+                .is_err(),
                 "removing step {index} must stop reproduction"
             );
         }
