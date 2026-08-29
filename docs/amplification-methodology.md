@@ -1,0 +1,86 @@
+# Amplification evidence methodology
+
+This document freezes the first common reporting contract used before any B+ tree versus LSM performance
+claim. The goal is reproducible structural evidence, not a synthetic promise that unlike storage engines
+perform the same physical I/O operations.
+
+## Common report shape
+
+`db_core::AmplificationReport` stores exact integer numerator/denominator pairs. Ratios are never rounded
+inside the engine and a zero denominator is preserved. Both persistent comparison candidates implement
+`AmplificationInstrumented`, whose reset operation changes only process-local counters and whose report
+operation does not change logical database state.
+
+The report contains four fields:
+
+| Field | Numerator | Denominator |
+| --- | --- | --- |
+| `point_read` | structural read work, with an explicit `ReadWorkUnit` | successful explicit `GET` calls |
+| `range_read` | structural read work, with an explicit `ReadWorkUnit` | logical records returned by successful range scans |
+| `data_write_bytes_per_logical_byte` | documented engine data-path bytes written | acknowledged logical mutation bytes |
+| `primary_structure_bytes_per_live_byte` | documented retained primary-structure bytes | live logical key + value bytes represented by that structure |
+
+PUT contributes key + value bytes to the logical write denominator. DELETE contributes key bytes even
+when the key is missing, because the successful call is still part of the requested mutation trace.
+Internal previous-value lookups used to implement PUT/DELETE return values are never counted as explicit
+user point reads.
+
+## Read amplification is structural and unit-tagged
+
+A raw structural numerator is meaningful only together with its `ReadWorkUnit`:
+
+- B+ tree point and range reads use `btree_page_access`: one logical access to a validated 4 KiB data page,
+  including a page served from the bounded cache. Overflow-key and overflow-value pages count because the
+  logical operation must traverse them.
+- LSM point reads use `lsm_sstable_consult`: one SSTable considered before its bounds/Bloom/index path
+  establishes hit or miss.
+- LSM range reads use `lsm_sstable_version_decoded`: one physical SSTable record version decoded while
+  resolving newest visible state.
+
+Therefore `4 btree_page_access / GET` and `4 lsm_sstable_consult / GET` are **not** four units of the same
+physical resource. The common schema makes this mismatch machine-visible instead of silently calling both
+numbers "read I/O amplification". Device bytes read, cache misses, system calls, page-cache behavior, and
+hardware counters belong to a later controlled-host measurement layer.
+
+## B+ tree byte accounting
+
+B+ tree data-write bytes count successfully synchronized leaf, internal, key-overflow, and value-overflow
+page images produced during the measurement window. Mirrored allocation/root superblock writes are excluded
+from this data-path numerator. Failed mutations are not added to the logical denominator; durable page work
+from an ambiguous failed operation is likewise not retroactively assigned to a later successful mutation.
+
+Primary-structure bytes are `committed_data_pages * 4096`. This intentionally includes unreachable COW
+history still retained in the page file because those bytes remain allocated storage and are available for
+later orphan reuse. The two fixed mirrored superblocks are excluded. The live-byte denominator is rebuilt
+from the authoritative root without incrementing public read counters.
+
+Hand-computable regression evidence includes a two-key one-leaf file: after COW history creates two retained
+data pages, one recycled-leaf overwrite plus one missing DELETE produces exactly 4096 data-write bytes over
+four logical mutation bytes. One explicit point lookup touches one page; a full two-row range touches one
+page and returns two records. An 8192-byte value occupies three 4048-byte overflow chunks, so point/range
+retrieval each requires exactly one leaf plus three overflow page accesses.
+
+## LSM byte accounting
+
+LSM data-write bytes are complete WAL mutation records plus immutable SSTable bytes produced by MemTable
+flushes and compaction outputs. Manifest snapshots, mirrored `CURRENT`, filesystem metadata, cache traffic,
+and device writeback are excluded. The separate raw counter for compaction-input SSTable bytes remains
+available as architecture-specific evidence but is not added again to the write-output numerator.
+
+Primary-structure bytes are authoritative SSTable bytes divided by durable live key + value bytes represented
+by those SSTables. Unflushed WAL/MemTable state is excluded from both sides. Existing hand-computable tests
+prove WAL framing, flush/output byte totals, first full-set compaction input, `5/3` point SSTable consults,
+and `10/9` decoded range versions per logical result on a layered L0/L1 state.
+
+## Capability preflight
+
+`validate_experiment_compatibility` rejects a comparison when engines disagree on the common logical model,
+caller/concurrency contract, persistence class, distribution mode, ordered-range capability, or key/value
+limits. Storage architecture and crash-recovery mechanism are intentionally allowed to differ: those are the
+physical design choices the experiment exists to compare. A range-bearing experiment can additionally
+require ordered-range support explicitly.
+
+This preflight does not establish performance fairness by itself. Every future benchmark must still record
+the exact trace, engine settings, binary revision, operating system, filesystem/device context, cache state,
+and raw counters. No latency or device-level conclusion should be published from the structural ratios in
+this document alone.

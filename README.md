@@ -21,11 +21,11 @@ engine:
 
 | Crate | Implemented role |
 | --- | --- |
-| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution and differential harness |
+| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution/differential harness, experiment compatibility preflight, and common amplification report schema |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
-| `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, and bounded validated-page caching |
-| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, half-open range scans, deterministic compaction differential tests, and exact integer amplification instrumentation |
+| `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, bounded validated-page caching, and exact structural amplification instrumentation |
+| `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, half-open range scans, deterministic compaction differential tests, and the shared exact amplification report contract |
 | `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
@@ -47,7 +47,12 @@ pre-write, torn-half-write, and post-sync error modes. Reopen must select either
 the complete new tree; only a fully synchronized root superblock whose caller still receives an I/O
 error may expose the new state. Torn recycled orphans remain unreachable and are proven safely
 overwriteable by a later mutation. Physical file compaction/truncation and arbitrary device/cache
-power-loss modeling remain deferred.
+power-loss modeling remain deferred. Process-local B+ tree instrumentation now records explicit
+GET/range structural page accesses, acknowledged logical mutation bytes, and synchronized data-page
+bytes without counting the PUT/DELETE previous-value lookup as a user GET. Its common amplification
+report counts retained committed data pages—including reusable COW history—as primary-structure space.
+Hand-computable tests cover a one-leaf COW/reuse trace and an 8 KiB value whose lookup requires exactly
+one leaf plus three overflow-page accesses.
 
 The LSM is not an adapter around `db-storage-log`: it owns a distinct WAL format and keeps
 sequence-tagged values/tombstones in an ordered mutable MemTable that freezes at a documented 64 KiB
@@ -81,6 +86,15 @@ structural/data-path counters: manifest/CURRENT bytes, filesystem metadata, cach
 hardware writeback are not silently folded into them. The current one-run L1 policy remains correctness
 evidence rather than a production leveled strategy, so this is still not a fair B+ tree performance
 comparison participant.
+
+Both persistent candidates now implement `db_core::AmplificationInstrumented` and return the same
+`AmplificationReport` shape. That does **not** make their structural read numerators interchangeable:
+B+ tree reads carry the explicit unit `btree_page_access`, LSM point reads carry `lsm_sstable_consult`,
+and LSM range reads carry `lsm_sstable_version_decoded`. The common capability preflight requires the
+logical model, concurrency/persistence/distribution contract, ordered-range support, and key/value limits
+to agree while deliberately allowing storage architecture and recovery mechanism to differ. See
+`docs/amplification-methodology.md` for exact accounting boundaries. Device I/O, cache-miss attribution,
+latency distributions, and controlled-host performance measurements remain later Phase 4 evidence.
 
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,

@@ -29,12 +29,13 @@ use std::path::{Path, PathBuf};
 
 use db_core::{
     validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
-    AmplificationRatio, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, ReadWorkUnit,
-    Result, StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    AmplificationReport, ConcurrencyMode, CrashRecovery, DbError, DistributionMode,
+    EngineCapabilities, KvEngine, LogicalModel, Persistence, ReadWorkUnit, Result,
+    StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 use serde::Serialize;
 
+pub use db_core::AmplificationRatio;
 use manifest::{VersionSet, CURRENT_FILE_NAME};
 use memtable::{MemTableSet, VersionedEntry};
 use sstable::{file_name as sstable_file_name, SsTable};

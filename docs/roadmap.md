@@ -131,10 +131,17 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
 
 ## Phase 4 — Fair B+ tree versus LSM experiments
 
-- [ ] Freeze common point/range/write/delete/durability semantics and capability preflight.
+- [x] Freeze common point/range/write/delete/durability semantics and capability preflight. The
+  reusable preflight rejects mismatched logical model, caller/concurrency contract, persistence class,
+  distribution mode, ordered-range support, or key/value limits while allowing storage architecture and
+  recovery mechanism to remain the experimental variables.
 - [ ] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.
-- [ ] Generalize validated read/write/space amplification counters into a common cross-engine experiment
-  contract. LSM-local hand-computable counters are now proven; B+ tree parity and shared reporting remain.
+- [ ] Drive the common amplification contract from shared cross-engine traces. B+ tree and LSM now both
+  implement `AmplificationInstrumented` and return the same exact report shape; hand-computable tests
+  validate B+ tree page-access/data-page/retained-page accounting and the existing LSM consult/version/
+  WAL+SSTable accounting. Read work carries an explicit architecture-specific unit so structural counters
+  cannot be mislabeled as comparable device I/O. The remaining work is one shared trace runner and archived
+  per-engine raw evidence under identical trace inputs.
 - [ ] Measure recovery cost and compaction stall distributions.
 - [ ] Archive raw data and environment manifests; publish no result before this evidence exists.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
