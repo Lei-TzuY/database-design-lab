@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use db_core::{
@@ -120,6 +121,42 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Run a shared comparison and create a new immutable evidence archive directory.
+    ExperimentArchive {
+        /// Versioned experiment trace JSON file.
+        #[arg(long)]
+        trace: PathBuf,
+        /// New B+ tree page file to create.
+        #[arg(long)]
+        btree_path: PathBuf,
+        /// New LSM directory to create.
+        #[arg(long)]
+        lsm_path: PathBuf,
+        /// B+ tree validated-page cache capacity.
+        #[arg(long, default_value_t = 64)]
+        btree_cache_pages: usize,
+        /// Exact source revision represented by the binary/run, normally a full Git commit SHA.
+        #[arg(long)]
+        revision: String,
+        /// New archive directory; existing paths are never overwritten.
+        #[arg(long)]
+        archive_dir: PathBuf,
+        /// Human-readable host identity without secrets (for example, `lab-5090-a`).
+        #[arg(long)]
+        host_label: Option<String>,
+        /// Filesystem under test, when known (for example, `ntfs`, `ext4`, `apfs`).
+        #[arg(long)]
+        filesystem: Option<String>,
+        /// Storage device/model label, when known. Do not place credentials or serial numbers here.
+        #[arg(long)]
+        storage_device: Option<String>,
+        /// Declared cache preparation state for this run.
+        #[arg(long, value_enum, default_value_t = CacheStateKind::Unspecified)]
+        cache_state: CacheStateKind,
+        /// Optional free-form experiment note. Do not include secrets.
+        #[arg(long)]
+        notes: Option<String>,
+    },
     /// Validate an append-log file without modifying it.
     Verify {
         /// Append-log file.
@@ -157,6 +194,23 @@ enum ExperimentProfileKind {
     Mixed,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CacheStateKind {
+    Unspecified,
+    Warm,
+    ColdBestEffort,
+}
+
+impl CacheStateKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Warm => "warm",
+            Self::ColdBestEffort => "cold_best_effort",
+        }
+    }
+}
+
 impl From<ExperimentProfileKind> for ExperimentProfile {
     fn from(value: ExperimentProfileKind) -> Self {
         match value {
@@ -191,6 +245,33 @@ struct DifferentialCliReport {
 struct ExperimentCliReport {
     btree_cache_pages: usize,
     comparison: ExperimentComparisonReport,
+}
+
+const EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 1;
+
+#[derive(Debug, Serialize)]
+struct EvidenceArchiveEnvironment {
+    format_version: u16,
+    repository_revision: String,
+    db_lab_version: &'static str,
+    target_os: &'static str,
+    target_arch: &'static str,
+    build_profile: &'static str,
+    rustc_version: Option<String>,
+    host_label: Option<String>,
+    filesystem: Option<String>,
+    storage_device: Option<String>,
+    cache_state: &'static str,
+    btree_cache_pages: usize,
+    recorded_unix_seconds: u64,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EvidenceArchiveIndex {
+    format_version: u16,
+    repository_revision: String,
+    files: [&'static str; 3],
 }
 
 #[derive(Debug, Error)]
@@ -327,6 +408,52 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
                 },
             )
         }
+        Command::ExperimentArchive {
+            trace,
+            btree_path,
+            lsm_path,
+            btree_cache_pages,
+            revision,
+            archive_dir,
+            host_label,
+            filesystem,
+            storage_device,
+            cache_state,
+            notes,
+        } => {
+            validate_revision(&revision)?;
+            let trace = read_experiment_trace(&trace)?;
+            ensure_fresh_archive_targets(&btree_path, &lsm_path, &archive_dir)?;
+            let mut btree = BPlusTree::create_new(&btree_path, btree_cache_pages)?;
+            let mut lsm = LsmEngine::create_new(&lsm_path)?;
+            let comparison = compare_experiment_trace(&mut btree, &mut lsm, &trace)?;
+            let environment = EvidenceArchiveEnvironment {
+                format_version: EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                repository_revision: revision.clone(),
+                db_lab_version: env!("CARGO_PKG_VERSION"),
+                target_os: std::env::consts::OS,
+                target_arch: std::env::consts::ARCH,
+                build_profile: if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                },
+                rustc_version: rustc_version(),
+                host_label,
+                filesystem,
+                storage_device,
+                cache_state: cache_state.as_str(),
+                btree_cache_pages,
+                recorded_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| {
+                        CliError::Usage(format!("system clock precedes Unix epoch: {error}"))
+                    })?
+                    .as_secs(),
+                notes,
+            };
+            write_evidence_archive(&archive_dir, &revision, &trace, &comparison, &environment)
+        }
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
             write_stdout_json(&report)
@@ -417,6 +544,86 @@ fn ensure_fresh_experiment_targets(
     Ok(())
 }
 
+fn validate_revision(revision: &str) -> Result<(), CliError> {
+    let revision = revision.trim();
+    if revision.is_empty()
+        || revision.len() > 128
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(CliError::Usage(
+            "--revision must be 1..=128 ASCII alphanumeric, '-', '_', or '.' characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_fresh_archive_targets(
+    btree_path: &Path,
+    lsm_path: &Path,
+    archive_dir: &Path,
+) -> Result<(), CliError> {
+    if btree_path == lsm_path || btree_path == archive_dir || lsm_path == archive_dir {
+        return Err(CliError::Usage(
+            "archive B+ tree, LSM, and archive paths must be distinct".to_owned(),
+        ));
+    }
+    for (label, path) in [
+        ("B+ tree", btree_path),
+        ("LSM", lsm_path),
+        ("archive", archive_dir),
+    ] {
+        if path.exists() {
+            return Err(CliError::Usage(format!(
+                "experiment {label} path already exists: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn rustc_version() -> Option<String> {
+    let output = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
+}
+
+fn write_evidence_archive(
+    archive_dir: &Path,
+    revision: &str,
+    trace: &ExperimentTrace,
+    comparison: &ExperimentComparisonReport,
+    environment: &EvidenceArchiveEnvironment,
+) -> Result<(), CliError> {
+    fs::create_dir(archive_dir)?;
+    let result = (|| {
+        write_new_json(&archive_dir.join("trace.json"), trace)?;
+        write_new_json(&archive_dir.join("comparison.json"), comparison)?;
+        write_new_json(&archive_dir.join("environment.json"), environment)?;
+        write_new_json(
+            &archive_dir.join("index.json"),
+            &EvidenceArchiveIndex {
+                format_version: EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                repository_revision: revision.to_owned(),
+                files: ["trace.json", "comparison.json", "environment.json"],
+            },
+        )
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(archive_dir);
+    }
+    result
+}
+
 fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), CliError> {
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
     let mut writer = BufWriter::new(file);
@@ -447,7 +654,10 @@ mod tests {
     use db_storage_lsm::LsmEngine;
     use tempfile::tempdir;
 
-    use super::{Cli, Command, EngineKind, ExperimentProfileKind, PersistentEngineKind};
+    use super::{
+        validate_revision, CacheStateKind, Cli, Command, EngineKind, ExperimentProfileKind,
+        PersistentEngineKind,
+    };
 
     #[test]
     fn suggested_run_shape_parses() {
@@ -552,6 +762,37 @@ mod tests {
         ])
         .expect("parse experiment comparison");
         assert!(matches!(compare.command, Command::ExperimentCompare { .. }));
+    }
+
+    #[test]
+    fn experiment_archive_shape_parses_and_revision_validation_is_strict() {
+        let archive = Cli::try_parse_from([
+            "db-lab",
+            "experiment-archive",
+            "--trace",
+            "trace.json",
+            "--btree-path",
+            "tree.db",
+            "--lsm-path",
+            "lsm-dir",
+            "--revision",
+            "e1fb48a61d2a3ec6fafe4e9a4d001d5c6ce0231f",
+            "--archive-dir",
+            "evidence/run-001",
+            "--cache-state",
+            "warm",
+        ])
+        .expect("parse experiment archive");
+        assert!(matches!(
+            archive.command,
+            Command::ExperimentArchive {
+                cache_state: CacheStateKind::Warm,
+                ..
+            }
+        ));
+        validate_revision("abc123").expect("simple revision");
+        assert!(validate_revision("").is_err());
+        assert!(validate_revision("bad revision with spaces").is_err());
     }
 
     #[test]
