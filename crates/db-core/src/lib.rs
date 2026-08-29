@@ -57,7 +57,8 @@ pub use experiment_batch::{
     ExperimentEngineRole, ExperimentInstanceContext, MAX_EXPERIMENT_BATCH_PAIRS,
 };
 pub use experiment_batch_failure::{
-    run_counterbalanced_experiment_batch_captured, CounterbalancedExperimentBatchCapturedReport,
+    run_counterbalanced_experiment_batch_captured, CounterbalancedBatchComparisonFailureEvidence,
+    CounterbalancedExperimentBatchCapturedReport,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use ordered_experiment::{
