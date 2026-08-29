@@ -24,9 +24,10 @@ pub use engine::{
     execute_step, execute_workload, validate_experiment_compatibility, validate_key,
     validate_key_value, validate_range_scan, AmplificationInstrumented, AmplificationRatio,
     AmplificationReport, ConcurrencyMode, CrashRecovery, DistributionMode, EngineCapabilities,
-    KvEngine, LogicalModel, OperationalTimingInstrumented, OperationalTimingReport,
-    OperationalTimingSample, OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit,
-    StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    KvEngine, LogicalModel, OperationalTimingFailureSample, OperationalTimingInstrumented,
+    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
+    Persistence, ReadWorkUnit, StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES,
+    MAX_VALUE_BYTES,
 };
 pub use error::{DbError, ErrorClass, Result};
 pub use experiment::{

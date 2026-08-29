@@ -1,8 +1,8 @@
 use db_core::{
     AmplificationInstrumented, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
-    Persistence, StorageArchitecture,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingFailureSample,
+    OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample,
+    OperationalWork, OperationalWorkUnit, Persistence, StorageArchitecture,
 };
 use std::time::Instant;
 
@@ -89,8 +89,19 @@ impl KvEngine for BPlusTree {
                 Ok(())
             }
             Err(error) => {
+                let error = common_error(error);
+                let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                operational_timing
+                    .reopen_failure_samples
+                    .push(OperationalTimingFailureSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: None,
+                        error_class: error.class(),
+                    });
+                self.operational_timing = operational_timing;
                 self.pager.poisoned = true;
-                Err(common_error(error))
+                Err(error)
             }
         }
     }
@@ -124,8 +135,8 @@ impl AmplificationInstrumented for BPlusTree {
 #[cfg(test)]
 mod tests {
     use db_core::{
-        compare_workload, ByteString, KvEngine, Workload, WorkloadStep, MAX_KEY_BYTES,
-        MAX_VALUE_BYTES, WORKLOAD_FORMAT_VERSION,
+        compare_workload, ByteString, ErrorClass, KvEngine, OperationalTimingInstrumented,
+        Workload, WorkloadStep, MAX_KEY_BYTES, MAX_VALUE_BYTES, WORKLOAD_FORMAT_VERSION,
     };
     use db_storage_memory::MemoryEngine;
     use tempfile::tempdir;
@@ -147,11 +158,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_reopen_retains_step_duration_and_error_class_without_inventing_work() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("failed-reopen.db");
+        let mut tree = BPlusTree::create_new(&path, 4).expect("create tree");
+        tree.put(b"key", b"value").expect("seed tree");
+        tree.reset_operational_timing();
+        tree.set_operational_step_index(Some(17));
+
+        tree.cache_capacity = 0;
+        let error =
+            KvEngine::reopen(&mut tree).expect_err("zero cache capacity must reject reopen");
+        assert_eq!(error.class(), ErrorClass::InvalidInput);
+
+        let timing = tree.operational_timing_report();
+        assert!(timing.reopen_ns.is_empty());
+        assert!(timing.reopen_samples.is_empty());
+        assert_eq!(timing.reopen_failure_samples.len(), 1);
+        let failure = timing.reopen_failure_samples[0];
+        assert_eq!(failure.measured_step_index, Some(17));
+        assert_eq!(failure.error_class, ErrorClass::InvalidInput);
+        assert_eq!(failure.work, None);
+        assert!(timing.compaction_stall_failure_samples.is_empty());
+        assert_eq!(
+            KvEngine::get(&mut tree, b"key")
+                .expect_err("failed reopen poisons handle")
+                .class(),
+            ErrorClass::Poisoned
+        );
+    }
+
+    #[test]
     fn common_ordered_ranges_match_memory_after_splits_reopen_and_delete() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("range-differential.db");
         let mut reference = MemoryEngine::new();
-        let mut candidate = BPlusTree::create_new(&path, 8).expect("create tree");
+        let mut candidate = BPlusTree::create_new(&path, 8).expect("create B+ tree");
 
         for index in 0..96_u16 {
             let key = index.to_be_bytes().to_vec();
@@ -200,7 +242,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("differential.db");
         let mut reference = MemoryEngine::new();
-        let mut candidate = BPlusTree::create_new(&path, 16).expect("create tree");
+        let mut candidate = BPlusTree::create_new(&path, 16).expect("create B+ tree");
 
         let mut maximum_key = vec![0xa5; MAX_KEY_BYTES];
         maximum_key[MAX_KEY_BYTES - 1] = 0xfe;
