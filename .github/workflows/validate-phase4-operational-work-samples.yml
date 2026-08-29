@@ -5,7 +5,7 @@ on:
     branches:
       - feat/phase4-operational-work-samples
     paths:
-      - .github/scripts/apply_phase4_operational_work_samples.py
+      - .github/scripts/harden_phase4_operational_work_compat.py
       - .github/workflows/validate-phase4-operational-work-samples.yml
 
 permissions:
@@ -25,8 +25,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply implementation
-        run: python .github/scripts/apply_phase4_operational_work_samples.py
+      - name: Apply compatibility hardening
+        run: python .github/scripts/harden_phase4_operational_work_compat.py
       - name: Format
         run: cargo fmt --all
       - name: Check formatting
@@ -43,15 +43,15 @@ jobs:
         uses: dtolnay/rust-toolchain@1.85.0
       - name: Check MSRV
         run: cargo +1.85.0 check --workspace --all-targets --all-features --locked
-      - name: Commit validated implementation
+      - name: Commit validated hardening
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/db-core/src/engine.rs crates/db-core/src/lib.rs crates/db-core/src/experiment.rs crates/db-storage-btree/src/tree.rs crates/db-storage-btree/src/tree/common.rs crates/db-storage-btree/src/tree/instrumentation_tests.rs crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/wal.rs crates/db-storage-lsm/src/instrumentation_tests.rs
+          git add crates/db-core/src/engine.rs crates/db-core/src/experiment.rs crates/db-storage-btree/src/tree/common.rs crates/db-storage-btree/src/tree/instrumentation_tests.rs crates/db-storage-lsm/src/lib.rs crates/db-storage-lsm/src/instrumentation_tests.rs
           if git diff --cached --quiet; then
-            echo "No implementation changes to commit"
+            echo "No compatibility changes to commit"
           else
-            git commit -m "feat: associate operational timing with deterministic work"
+            git commit -m "fix: preserve raw operational timing projections"
             git push origin HEAD:feat/phase4-operational-work-samples
           fi
