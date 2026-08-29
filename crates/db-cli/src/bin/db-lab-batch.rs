@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use db_core::{
-    run_counterbalanced_experiment_batch_captured, CounterbalancedComparisonFailureEvidence,
+    run_counterbalanced_experiment_batch_captured, CounterbalancedBatchComparisonFailureEvidence,
     CounterbalancedExperimentBatchReport, DbError, ExperimentAttemptAdmission,
     ExperimentInstanceContext, ExperimentTrace, MAX_EXPERIMENT_BATCH_PAIRS,
 };
@@ -21,11 +21,11 @@ const MAX_EXCLUSION_REASON_BYTES: usize = 4 * 1024;
 const MAX_PUBLICATION_METADATA_BYTES: usize = 4 * 1024;
 const BATCH_ARCHIVE_FORMAT_VERSION: u16 = 6;
 const BATCH_PUBLICATION_ARCHIVE_FORMAT_VERSION: u16 = 7;
-const BATCH_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION: u16 = 8;
-const BATCH_PUBLICATION_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION: u16 = 9;
+const BATCH_CONTEXTUAL_FAILURE_ARCHIVE_FORMAT_VERSION: u16 = 10;
+const BATCH_PUBLICATION_CONTEXTUAL_FAILURE_ARCHIVE_FORMAT_VERSION: u16 = 11;
 const BATCH_EXECUTION_PROTOCOL: &str = "fresh_counterbalanced_repeated_batch_v1";
 const BATCH_ATTEMPT_PROTOCOL: &str = "retain_all_requested_pairs_v1";
-const BATCH_COMPARISON_FAILURE_PROTOCOL: &str = "ordered_comparison_failure_sidecar_v1";
+const BATCH_COMPARISON_FAILURE_PROTOCOL: &str = "ordered_comparison_failure_sidecar_v2";
 const ENGINE_LAYOUT: &str = "pair-{pair_index:06}/repetition-{repetition_index}/{btree.db|lsm}";
 const PUBLICATION_ADMISSION_PROTOCOL: &str = "publication_warm_v1";
 const PUBLICATION_CACHE_POLICY: &str = "trace_induced_warm";
@@ -287,8 +287,8 @@ const fn select_archive_format_version(publication: bool, has_comparison_failure
     match (publication, has_comparison_failures) {
         (false, false) => BATCH_ARCHIVE_FORMAT_VERSION,
         (true, false) => BATCH_PUBLICATION_ARCHIVE_FORMAT_VERSION,
-        (false, true) => BATCH_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION,
-        (true, true) => BATCH_PUBLICATION_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION,
+        (false, true) => BATCH_CONTEXTUAL_FAILURE_ARCHIVE_FORMAT_VERSION,
+        (true, true) => BATCH_PUBLICATION_CONTEXTUAL_FAILURE_ARCHIVE_FORMAT_VERSION,
     }
 }
 
@@ -600,7 +600,7 @@ fn write_batch_archive(
     revision: &str,
     trace: &ExperimentTrace,
     report: &CounterbalancedExperimentBatchReport,
-    comparison_failures: &[CounterbalancedComparisonFailureEvidence],
+    comparison_failures: &[CounterbalancedBatchComparisonFailureEvidence],
     environment: &BatchArchiveEnvironment,
 ) -> Result<(), CliError> {
     fs::create_dir(archive_dir)?;
@@ -655,10 +655,11 @@ mod tests {
     use std::path::PathBuf;
 
     use db_core::{
-        generate_experiment_trace, CounterbalancedComparisonFailureEvidence,
-        CounterbalancedExperimentBatchReport, CounterbalancedPairOrder, ErrorClass,
-        ExperimentExecutionOrder, ExperimentGeneratorConfig, ExperimentProfile,
-        OperationalTimingFailureSample, OperationalTimingReport, OrderedExperimentFailureEvidence,
+        generate_experiment_trace, CounterbalancedBatchComparisonFailureEvidence,
+        CounterbalancedComparisonFailureEvidence, CounterbalancedExperimentBatchReport,
+        CounterbalancedPairOrder, ErrorClass, ExperimentAttemptContext, ExperimentExecutionOrder,
+        ExperimentGeneratorConfig, ExperimentProfile, OperationalTimingFailureSample,
+        OperationalTimingReport, OrderedExperimentFailureEvidence,
     };
     use serde_json::Value;
     use tempfile::tempdir;
@@ -766,15 +767,15 @@ mod tests {
     }
 
     #[test]
-    fn archive_format_only_bumps_when_captured_failure_evidence_exists() {
+    fn archive_format_bumps_to_contextual_sidecar_versions() {
         assert_eq!(select_archive_format_version(false, false), 6);
         assert_eq!(select_archive_format_version(true, false), 7);
-        assert_eq!(select_archive_format_version(false, true), 8);
-        assert_eq!(select_archive_format_version(true, true), 9);
+        assert_eq!(select_archive_format_version(false, true), 10);
+        assert_eq!(select_archive_format_version(true, true), 11);
     }
 
     #[test]
-    fn captured_comparison_failure_writes_immutable_sidecar() {
+    fn captured_comparison_failure_writes_pair_indexed_immutable_sidecar() {
         let directory = tempdir().expect("temporary directory");
         let trace_path = write_trace(&directory);
         let trace: db_core::ExperimentTrace =
@@ -796,28 +797,36 @@ mod tests {
         right_timing
             .compaction_stall_failure_samples
             .push(failure_sample);
-        let failures = vec![CounterbalancedComparisonFailureEvidence {
+        let pair_context = ExperimentAttemptContext {
+            pair_index: 4,
             pair_order: CounterbalancedPairOrder::LeftThenRightFirst,
-            repetition_index: 0,
-            completed_first: None,
-            ordered_failure: Box::new(OrderedExperimentFailureEvidence {
-                execution_order: ExperimentExecutionOrder::LeftThenRight,
-                error_class: ErrorClass::Io,
-                message: "synthetic compaction fault".to_owned(),
-                left_operational_timing: OperationalTimingReport::default(),
-                right_operational_timing: right_timing,
-            }),
+        };
+        let failures = vec![CounterbalancedBatchComparisonFailureEvidence {
+            context: pair_context,
+            failure: CounterbalancedComparisonFailureEvidence {
+                pair_order: pair_context.pair_order,
+                repetition_index: 0,
+                completed_first: None,
+                ordered_failure: Box::new(OrderedExperimentFailureEvidence {
+                    execution_order: ExperimentExecutionOrder::LeftThenRight,
+                    error_class: ErrorClass::Io,
+                    message: "synthetic compaction fault".to_owned(),
+                    left_operational_timing: OperationalTimingReport::default(),
+                    right_operational_timing: right_timing,
+                }),
+            },
         }];
         let report = CounterbalancedExperimentBatchReport {
             trace: trace.clone(),
             pair_seed: 0,
-            requested_pairs: 1,
+            requested_pairs: 5,
             included_pairs: 0,
             failed_pairs: 1,
-            excluded_pairs: 0,
+            excluded_pairs: 4,
             attempts: Vec::new(),
         };
-        let environment = build_environment(&args, 8, None, true).expect("build v8 environment");
+        let environment =
+            build_environment(&args, 10, None, true).expect("build v10 environment");
         write_batch_archive(
             &args.archive_dir,
             &args.revision,
@@ -833,10 +842,18 @@ mod tests {
                 .expect("read comparison failure sidecar"),
         )
         .expect("parse comparison failure sidecar");
-        assert_eq!(sidecar[0]["repetition_index"], 0);
-        assert_eq!(sidecar[0]["ordered_failure"]["error_class"], "io");
+        assert_eq!(sidecar[0]["context"]["pair_index"], 4);
         assert_eq!(
-            sidecar[0]["ordered_failure"]["right_operational_timing"]
+            sidecar[0]["context"]["pair_order"],
+            sidecar[0]["failure"]["pair_order"]
+        );
+        assert_eq!(sidecar[0]["failure"]["repetition_index"], 0);
+        assert_eq!(
+            sidecar[0]["failure"]["ordered_failure"]["error_class"],
+            "io"
+        );
+        assert_eq!(
+            sidecar[0]["failure"]["ordered_failure"]["right_operational_timing"]
                 ["compaction_stall_failure_samples"][0]["duration_ns"],
             123
         );
@@ -845,7 +862,7 @@ mod tests {
             &fs::read(args.archive_dir.join("environment.json")).expect("read environment"),
         )
         .expect("parse environment");
-        assert_eq!(environment["format_version"], 8);
+        assert_eq!(environment["format_version"], 10);
         assert_eq!(
             environment["comparison_failure_protocol"],
             BATCH_COMPARISON_FAILURE_PROTOCOL
@@ -854,7 +871,7 @@ mod tests {
             &fs::read(args.archive_dir.join("index.json")).expect("read index"),
         )
         .expect("parse index");
-        assert_eq!(index["format_version"], 8);
+        assert_eq!(index["format_version"], 10);
         assert_eq!(
             index["comparison_failure_protocol"],
             BATCH_COMPARISON_FAILURE_PROTOCOL
