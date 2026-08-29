@@ -16,6 +16,10 @@ name = "db-lab-batch"
 path = "src/bin/db-lab-batch.rs"
 
 [[bin]]
+name = "db-lab-batch-verify"
+path = "src/bin/db-lab-batch-verify.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 
