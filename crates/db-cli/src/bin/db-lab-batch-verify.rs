@@ -122,16 +122,21 @@ fn verify(args: &Cli) -> Result<VerificationSummary, VerifyError> {
     } else {
         &["trace.json", "batch.json", "environment.json"]
     };
-    verify_index(&index, format_version, publication, contextual_failures, expected_files)?;
+    verify_index(
+        &index,
+        format_version,
+        publication,
+        contextual_failures,
+        expected_files,
+    )?;
     verify_directory_entries(&args.archive_dir, expected_files)?;
 
     let trace_json = read_json(&args.archive_dir, "trace.json")?;
-    let trace: ExperimentTrace = serde_json::from_value(trace_json.clone()).map_err(|source| {
-        VerifyError::Json {
+    let trace: ExperimentTrace =
+        serde_json::from_value(trace_json.clone()).map_err(|source| VerifyError::Json {
             path: args.archive_dir.join("trace.json"),
             source,
-        }
-    })?;
+        })?;
     trace.validate().map_err(VerifyError::Trace)?;
 
     let batch = read_json(&args.archive_dir, "batch.json")?;
@@ -181,7 +186,12 @@ fn verify_index(
     contextual_failures: bool,
     expected_files: &[&str],
 ) -> Result<(), VerifyError> {
-    require_equal_str(index, "execution_protocol", EXECUTION_PROTOCOL, "index.json")?;
+    require_equal_str(
+        index,
+        "execution_protocol",
+        EXECUTION_PROTOCOL,
+        "index.json",
+    )?;
     require_equal_str(index, "attempt_protocol", ATTEMPT_PROTOCOL, "index.json")?;
     let files = required_array(index, "files", "index.json")?;
     if files.len() != expected_files.len() {
@@ -214,7 +224,12 @@ fn verify_index(
     }
 
     if publication {
-        require_equal_str(index, "admission_protocol", PUBLICATION_PROTOCOL, "index.json")?;
+        require_equal_str(
+            index,
+            "admission_protocol",
+            PUBLICATION_PROTOCOL,
+            "index.json",
+        )?;
     } else if index_object.contains_key("admission_protocol") {
         return invalid(format!(
             "exploratory format v{format_version} index.json must not declare admission_protocol"
@@ -282,12 +297,19 @@ fn verify_environment(
         ATTEMPT_PROTOCOL,
         "environment.json",
     )?;
-    require_equal_str(environment, "engine_layout", ENGINE_LAYOUT, "environment.json")?;
+    require_equal_str(
+        environment,
+        "engine_layout",
+        ENGINE_LAYOUT,
+        "environment.json",
+    )?;
 
     let revision = required_str(environment, "repository_revision", "environment.json")?;
     let index_revision = required_str(index, "repository_revision", "index.json")?;
     if revision != index_revision {
-        return invalid("repository_revision differs between environment.json and index.json".to_owned());
+        return invalid(
+            "repository_revision differs between environment.json and index.json".to_owned(),
+        );
     }
     if let Some(expected) = expected_revision {
         if revision != expected {
@@ -303,7 +325,9 @@ fn verify_environment(
         return invalid("pair_seed differs between environment.json and batch.json".to_owned());
     }
     if requested_pairs != required_u32(batch, "requested_pairs", "batch.json")? {
-        return invalid("requested_pairs differs between environment.json and batch.json".to_owned());
+        return invalid(
+            "requested_pairs differs between environment.json and batch.json".to_owned(),
+        );
     }
 
     let env_object = required_object(environment, "environment.json")?;
@@ -416,7 +440,9 @@ fn verify_batch_ledger(batch: &Value) -> Result<BatchCounts, VerifyError> {
         .and_then(|value| value.checked_add(declared.excluded_pairs))
         != Some(requested_pairs)
     {
-        return invalid("batch.json declared disposition counts do not sum to requested_pairs".to_owned());
+        return invalid(
+            "batch.json declared disposition counts do not sum to requested_pairs".to_owned(),
+        );
     }
 
     let attempts = required_array(batch, "attempts", "batch.json")?;
@@ -439,15 +465,13 @@ fn verify_batch_ledger(batch: &Value) -> Result<BatchCounts, VerifyError> {
             other => return invalid(format!("unknown batch attempt disposition {other:?}")),
         }
     }
-    if (
-        actual_included,
-        actual_failed,
-        actual_excluded,
-    ) != (
-        declared.included_pairs,
-        declared.failed_pairs,
-        declared.excluded_pairs,
-    ) {
+    if (actual_included, actual_failed, actual_excluded)
+        != (
+            declared.included_pairs,
+            declared.failed_pairs,
+            declared.excluded_pairs,
+        )
+    {
         return invalid(format!(
             "batch.json declared counts ({}, {}, {}) differ from attempt rows ({actual_included}, {actual_failed}, {actual_excluded})",
             declared.included_pairs, declared.failed_pairs, declared.excluded_pairs
@@ -478,9 +502,7 @@ fn verify_attempt(attempt: &Value, pair_index: u32, pair_seed: u64) -> Result<()
     match disposition {
         "included" => {
             if !report.is_object() || !failure.is_null() || !exclusion_reason.is_null() {
-                return invalid(format!(
-                    "included pair {pair_index} must have report only"
-                ));
+                return invalid(format!("included pair {pair_index} must have report only"));
             }
             require_equal_str(report, "pair_order", expected_order, "included pair report")?;
             verify_ordered_report(
@@ -511,7 +533,8 @@ fn verify_attempt(attempt: &Value, pair_index: u32, pair_seed: u64) -> Result<()
                     "left" | "right" => {}
                     other => return invalid(format!("invalid engine factory role {other:?}")),
                 }
-                let repetition = required_u64(failure, "repetition_index", "engine factory failure")?;
+                let repetition =
+                    required_u64(failure, "repetition_index", "engine factory failure")?;
                 if repetition > 1 {
                     return invalid(format!(
                         "engine factory failure repetition_index {repetition} is outside 0..=1"
@@ -525,7 +548,10 @@ fn verify_attempt(attempt: &Value, pair_index: u32, pair_seed: u64) -> Result<()
                     "excluded pair {pair_index} must not contain report/failure"
                 ));
             }
-            if exclusion_reason.as_str().is_none_or(|reason| reason.trim().is_empty()) {
+            if exclusion_reason
+                .as_str()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
                 return invalid(format!(
                     "excluded pair {pair_index} must retain a non-empty exclusion_reason"
                 ));
@@ -549,9 +575,9 @@ fn verify_contextual_sidecars(
     batch: &Value,
     requested_pairs: u32,
 ) -> Result<usize, VerifyError> {
-    let sidecars = sidecars
-        .as_array()
-        .ok_or_else(|| VerifyError::Invalid("comparison-failures.json must be an array".to_owned()))?;
+    let sidecars = sidecars.as_array().ok_or_else(|| {
+        VerifyError::Invalid("comparison-failures.json must be an array".to_owned())
+    })?;
     let attempts = required_array(batch, "attempts", "batch.json")?;
     let mut seen = BTreeSet::new();
     for (position, sidecar) in sidecars.iter().enumerate() {
@@ -580,7 +606,12 @@ fn verify_contextual_sidecars(
             ));
         }
         let attempt_failure = required_field(attempt, "failure", "batch attempt")?;
-        require_equal_str(attempt_failure, "stage", "comparison", "batch attempt failure")?;
+        require_equal_str(
+            attempt_failure,
+            "stage",
+            "comparison",
+            "batch attempt failure",
+        )?;
 
         let pair_order = required_str(context, "pair_order", "comparison failure context")?;
         if required_str(failure, "pair_order", "comparison failure")? != pair_order {
@@ -690,7 +721,10 @@ fn read_json(archive_dir: &Path, name: &str) -> Result<Value, VerifyError> {
     serde_json::from_slice(&encoded).map_err(|source| VerifyError::Json { path, source })
 }
 
-fn required_object<'a>(value: &'a Value, label: &str) -> Result<&'a Map<String, Value>, VerifyError> {
+fn required_object<'a>(
+    value: &'a Value,
+    label: &str,
+) -> Result<&'a Map<String, Value>, VerifyError> {
     value
         .as_object()
         .ok_or_else(|| VerifyError::Invalid(format!("{label} must be a JSON object")))
@@ -716,11 +750,7 @@ fn required_array<'a>(
         .ok_or_else(|| VerifyError::Invalid(format!("{label} {field} must be an array")))
 }
 
-fn required_str<'a>(
-    value: &'a Value,
-    field: &str,
-    label: &str,
-) -> Result<&'a str, VerifyError> {
+fn required_str<'a>(value: &'a Value, field: &str, label: &str) -> Result<&'a str, VerifyError> {
     required_field(value, field, label)?
         .as_str()
         .ok_or_else(|| VerifyError::Invalid(format!("{label} {field} must be a string")))
@@ -746,16 +776,14 @@ fn required_u64(value: &Value, field: &str, label: &str) -> Result<u64, VerifyEr
 
 fn required_u32(value: &Value, field: &str, label: &str) -> Result<u32, VerifyError> {
     let integer = required_u64(value, field, label)?;
-    u32::try_from(integer).map_err(|_| {
-        VerifyError::Invalid(format!("{label} {field} value {integer} exceeds u32"))
-    })
+    u32::try_from(integer)
+        .map_err(|_| VerifyError::Invalid(format!("{label} {field} value {integer} exceeds u32")))
 }
 
 fn required_u16(value: &Value, field: &str, label: &str) -> Result<u16, VerifyError> {
     let integer = required_u64(value, field, label)?;
-    u16::try_from(integer).map_err(|_| {
-        VerifyError::Invalid(format!("{label} {field} value {integer} exceeds u16"))
-    })
+    u16::try_from(integer)
+        .map_err(|_| VerifyError::Invalid(format!("{label} {field} value {integer} exceeds u16")))
 }
 
 fn require_equal_str(
