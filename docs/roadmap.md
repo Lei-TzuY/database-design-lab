@@ -150,7 +150,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   reset at the same experiment measurement boundary as amplification counters and are embedded in each
   engine evidence record. They are archival telemetry, not cross-engine performance claims until the host
   and cache/filesystem conditions are pinned.
-- [ ] Archive raw data and environment manifests; publish no result before this evidence exists.
+- [x] Archive raw data and environment manifests before any result is publishable. `db-lab
+  experiment-archive` runs the same shared comparison but writes a create-new archive directory containing
+  `trace.json`, `comparison.json`, `environment.json`, and `index.json`. The environment manifest records the
+  exact caller-supplied source revision plus binary version, target OS/architecture, debug/release profile,
+  best-effort `rustc --version`, B+ tree cache setting, declared cache state, and optional host/filesystem/
+  storage labels. Partial archive writes are removed on failure; existing archive paths are never overwritten.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
 
 ## Phase 5+ — selected extensions

@@ -112,3 +112,17 @@ This runner establishes identical logical inputs, explicit setup/measurement bou
 equality, and shared structural amplification reporting. It does **not** establish a fair latency benchmark by
 itself. Controlled-host CPU/device/filesystem settings, cache-state protocol, latency distributions, recovery
 cost, compaction stalls, and archived environment manifests remain separate Phase 4 work.
+
+## Evidence archives
+
+`db-lab experiment-archive` is the publication boundary for raw Phase 4 evidence. It consumes one existing
+trace, creates fresh B+ tree and LSM targets, runs the exact shared comparison, and then creates a new archive
+directory containing four JSON files: `trace.json`, `comparison.json`, `environment.json`, and `index.json`.
+The caller must provide `--revision`; the archive also records the db-lab package version, target OS/arch,
+build profile, best-effort Rust compiler version, B+ tree cache capacity, a declared cache state, and optional
+host/filesystem/storage labels. Existing archive paths are rejected and a failed multi-file write removes the
+partial archive directory. Do not put credentials, serial numbers, or other secrets into labels/notes.
+
+The manifest does not make timings comparable by itself. `cold_best_effort` is only a declaration, not proof
+that kernel/device caches were flushed. Controlled-host pinning remains mandatory before latency claims or
+regression thresholds.

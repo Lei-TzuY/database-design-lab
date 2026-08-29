@@ -103,7 +103,8 @@ in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; th
 does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
 serializes point/lifecycle regression steps only. Phase 4 uses a separate `ExperimentTrace` v1 schema with
 setup/measured windows and stable point-read, range-scan, sequential-write, random-write, and mixed profiles;
-`experiment-compare` proves identical measured outcomes before archiving both engines' amplification evidence.
+`experiment-compare` proves identical measured outcomes before archiving both engines' amplification evidence;
+`experiment-archive` adds a create-new raw evidence directory plus an explicit environment manifest.
 See `docs/experiment-traces.md` for the frozen generation rules. Transactions,
 multi-process writers, snapshot/replication-aware tombstone GC, generalized multi-run/multi-level compaction,
 replication, SQL, MVCC, Raft, graph, time-series, and columnar execution are not implemented.
