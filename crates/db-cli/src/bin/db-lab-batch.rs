@@ -257,10 +257,8 @@ fn run(args: Cli) -> Result<(), CliError> {
         },
     )?;
     let has_comparison_failures = !captured.comparison_failures.is_empty();
-    let archive_format_version = select_archive_format_version(
-        publication_admission.is_some(),
-        has_comparison_failures,
-    );
+    let archive_format_version =
+        select_archive_format_version(publication_admission.is_some(), has_comparison_failures);
     let environment = build_environment(
         &args,
         archive_format_version,
@@ -285,10 +283,7 @@ fn run(args: Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-const fn select_archive_format_version(
-    publication: bool,
-    has_comparison_failures: bool,
-) -> u16 {
+const fn select_archive_format_version(publication: bool, has_comparison_failures: bool) -> u16 {
     match (publication, has_comparison_failures) {
         (false, false) => BATCH_ARCHIVE_FORMAT_VERSION,
         (true, false) => BATCH_PUBLICATION_ARCHIVE_FORMAT_VERSION,
@@ -782,10 +777,9 @@ mod tests {
     fn captured_comparison_failure_writes_immutable_sidecar() {
         let directory = tempdir().expect("temporary directory");
         let trace_path = write_trace(&directory);
-        let trace: db_core::ExperimentTrace = serde_json::from_slice(
-            &fs::read(&trace_path).expect("read generated trace"),
-        )
-        .expect("decode generated trace");
+        let trace: db_core::ExperimentTrace =
+            serde_json::from_slice(&fs::read(&trace_path).expect("read generated trace"))
+                .expect("decode generated trace");
         let args = base_args(
             &directory,
             trace_path,
