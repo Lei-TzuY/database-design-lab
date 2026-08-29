@@ -148,19 +148,21 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   explicitly non-device-I/O.
 - [ ] Complete recovery-cost and compaction-stall distributions. Successful samples pair duration with exact
   measured trace-step indices and deterministic data-path work. Whole-run order is explicit, fresh AB/BA pairs
-  are first-class, and one counterbalanced invocation is archived as successful format-v2 evidence or immutable
-  format-v3 `failed`/`excluded` attempt evidence. The reusable repeated-batch layer additionally alternates outer
-  pair order from a recorded seed and retains every requested pair as included, failed, or explicitly excluded,
-  continuing after pair failure; factory failures carry left/right plus repetition provenance. An enforced
-  cache/filesystem preparation protocol, immutable archive wiring for the repeated-batch ledger, and duration/work
-  capture for failed internal recovery or compaction operations remain required before this item is complete.
-- [x] Archive raw data and environment manifests before any result is publishable. The backward-compatible
-  `db-lab experiment-archive` format v1 writes `trace.json`, `comparison.json`, `environment.json`, and
-  `index.json` for one fresh lockstep comparison. Successful `db-lab experiment-archive-counterbalanced` runs
-  write format-v2 `counterbalanced.json` with both raw ordered runs and explicit pair/execution provenance;
-  execution failures or `--exclude-reason` write format-v3 `attempt.json` with stable failure class or bounded
-  exclusion reason. Partial archive writes are removed on failure and existing targets are never overwritten.
-- [ ] Establish a controlled pinned performance host before adding regression gates.
+  are first-class, and repeated batches alternate outer pair order from a recorded seed while retaining every
+  requested pair as included, failed, or explicitly excluded. `db-lab-batch` archives the complete ledger with
+  deterministic fresh-instance layout; publication mode additionally enforces release-only `publication_warm_v1`
+  admission, complete host/storage/filesystem/build/analysis/noise metadata, and rejects unverified cold-cache
+  claims. Remaining blockers are duration/work capture for an individual failed internal REOPEN or compaction
+  operation plus controlled-host data collection and reviewed distribution analysis.
+- [x] Archive raw data and environment manifests before any result is publishable. The archive family remains
+  versioned rather than silently mutating old evidence: single-run lockstep v1; exploratory counterbalanced
+  success v2 and failed/excluded v3; single-pair publication success v4 and failed/excluded v5; exploratory
+  repeated batch v6; and publication-admitted repeated batch v7. Every counterbalanced/repeated path preserves
+  raw order/attempt provenance, rejects existing archive targets, and removes partial archive directories on
+  multi-file write failure.
+- [ ] Establish a controlled pinned performance host before adding regression gates. Publication admission
+  records complete host/filesystem/build/noise metadata but does not itself pin CPU affinity, thermals, turbo,
+  background load, or device/controller conditions; hosted CI remains correctness/build validation only.
 
 ## Phase 5+ — selected extensions
 
