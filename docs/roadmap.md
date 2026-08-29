@@ -148,15 +148,16 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   explicitly non-device-I/O.
 - [ ] Complete recovery-cost and compaction-stall distributions. Successful samples now pair duration with
   the exact measured trace-step index and deterministic data-path work: B+ tree reopen page accesses/bytes,
-  LSM reopen WAL+SSTable record versions/bytes, and LSM full-set compaction input record versions/bytes. Tests
-  pin trace association and the legacy raw-nanosecond projections. Failed/excluded attempts, counterbalanced
-  engine order, and an enforced cache/filesystem protocol are still required before this item is complete.
-- [x] Archive raw data and environment manifests before any result is publishable. `db-lab
-  experiment-archive` runs the same shared comparison but writes a create-new archive directory containing
-  `trace.json`, `comparison.json`, `environment.json`, and `index.json`. The environment manifest records the
-  exact caller-supplied source revision plus binary version, target OS/architecture, debug/release profile,
-  best-effort `rustc --version`, B+ tree cache setting, declared cache state, and optional host/filesystem/
-  storage labels. Partial archive writes are removed on failure; existing archive paths are never overwritten.
+  LSM reopen WAL+SSTable record versions/bytes, and LSM full-set compaction input record versions/bytes. Whole-run
+  execution order is explicit, fresh AB/BA pairs are first-class in `db-core`, and
+  `experiment-archive-counterbalanced` preserves both repetitions plus pair-order provenance. Failed/excluded
+  attempts and an enforced cache/filesystem preparation protocol are still required before this item is complete.
+- [x] Archive raw data and environment manifests before any result is publishable. The backward-compatible
+  `db-lab experiment-archive` format v1 writes `trace.json`, `comparison.json`, `environment.json`, and
+  `index.json` for one fresh lockstep comparison. `db-lab experiment-archive-counterbalanced` adds a separate
+  format v2 requiring four fresh engine targets; it writes `counterbalanced.json` with both raw ordered runs and
+  records `pair_order` plus `execution_protocol = fresh_counterbalanced_ab_ba` while retaining the source/build/
+  host/cache metadata. Partial archive writes are removed on failure and existing targets are never overwritten.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
 
 ## Phase 5+ — selected extensions

@@ -77,21 +77,34 @@ PUT/GET/DELETE ids are uniformly selected from the key space. Range generation m
 profile. Optional REOPEN steps are inserted after every configured number of measured logical operations and
 do not change the configured logical-operation count.
 
-## Comparison runner
+## Comparison runners
 
 `compare_experiment_trace` first applies `validate_experiment_compatibility`. Logical model,
 caller-serialization contract, persistence class, standalone distribution, ordered-range support, and key/value
 limits must match. Storage architecture and crash-recovery mechanism are deliberately allowed to differ.
 
-Both candidates execute each setup action in lockstep and compare its complete logical outcome before moving
-to the next action. Only after all setup outcomes agree are both instrumentation windows reset. Measured
-actions are likewise executed and checked in lockstep; the first mismatch fails the experiment without
-emitting amplification evidence. A successful `ExperimentComparisonReport` stores the full trace once, the
-proven common measured-outcome vector once, and per-engine capabilities plus the exact common
-`AmplificationReport` and operational report. Successful REOPEN/compaction samples carry the exact measured
-step index plus deterministic bytes/record-or-page work without issuing extra measurement I/O.
-Read-work units remain architecture-specific (`btree_page_access`, `lsm_sstable_consult`, and
-`lsm_sstable_version_decoded`) and must not be interpreted as interchangeable device I/O.
+The original comparison runner executes both candidates in lockstep. Each setup action is compared before the
+next action starts. Only after all setup outcomes agree are both instrumentation windows reset. Measured actions
+are likewise executed and checked in lockstep; the first mismatch fails the experiment without emitting
+amplification evidence. A successful `ExperimentComparisonReport` stores the full trace once, the proven common
+measured-outcome vector once, and per-engine capabilities plus the exact common `AmplificationReport` and
+operational report. Successful REOPEN/compaction samples carry the exact measured step index plus deterministic
+bytes/record-or-page work without issuing extra measurement I/O. Read-work units remain architecture-specific
+(`btree_page_access`, `lsm_sstable_consult`, and `lsm_sstable_version_decoded`) and must not be interpreted as
+interchangeable device I/O.
+
+`compare_experiment_trace_ordered` adds explicit whole-run execution order without changing left/right engine
+identity. With `left_then_right`, the left engine completes setup, reset, and the complete measured window before
+the right engine starts; `right_then_left` does the reverse. The second engine is still checked against the
+first engine's exact setup and measured outcomes at the same indices, so order control does not weaken logical
+correctness.
+
+`compare_experiment_trace_counterbalanced` composes exactly two ordered comparisons into one fresh pair: one
+`left_then_right` and one `right_then_left`. Callers provide engine factories, and each factory is invoked once
+per repetition, requiring four fresh instances total. The pair fails closed if left/right capabilities or the
+proven measured logical outcomes change between repetitions. Pair sequencing itself is explicit provenance:
+`left_then_right_first` means AB then BA; `right_then_left_first` means BA then AB. Both raw repetitions are
+retained and no duration aggregation or performance claim is performed by the core runner.
 
 ## CLI
 
@@ -109,7 +122,7 @@ db-lab experiment-generate \
   --output mixed-42.json
 ```
 
-Run it against fresh candidates and write a self-contained report:
+Run it against fresh candidates and write a self-contained lockstep report:
 
 ```text
 db-lab experiment-compare \
@@ -123,24 +136,57 @@ db-lab experiment-compare \
 The three output/storage paths must be distinct and must not already exist. This prevents an experiment from
 silently inheriting old engine state or overwriting prior evidence.
 
+For publication-oriented order control, archive one fresh AB/BA pair directly:
+
+```text
+db-lab experiment-archive-counterbalanced \
+  --trace mixed-42.json \
+  --first-btree-path btree-42-a.db \
+  --first-lsm-path lsm-42-a \
+  --second-btree-path btree-42-b.db \
+  --second-lsm-path lsm-42-b \
+  --pair-order left-then-right-first \
+  --btree-cache-pages 64 \
+  --revision 0123456789abcdef0123456789abcdef01234567 \
+  --archive-dir evidence/mixed-42-abba \
+  --cache-state warm \
+  --host-label lab-host-a \
+  --filesystem ext4 \
+  --storage-device nvme-model
+```
+
+All four engine targets plus the archive directory must be pairwise distinct and absent before execution. This
+preflight occurs before either repetition is created, preventing the second half of a pair from silently reusing
+state or overwriting the first half.
+
 ## Scope boundary
 
-This runner establishes canonical bounded logical inputs, explicit setup/measurement boundaries, lockstep
-setup/measured outcome equality, shared structural amplification reporting, and deterministic measured-step
-association for successful recovery/compaction work samples. It does **not** establish a fair latency benchmark
-by itself. Failed/excluded samples, counterbalanced engine order, an enforced cache/filesystem protocol, and
-controlled-host pinning remain separate Phase 4 work.
+The trace and comparison layer now establishes canonical bounded logical inputs, explicit setup/measurement
+boundaries, lockstep outcome equality, optional whole-run order control, fresh AB/BA counterbalanced pairs,
+shared structural amplification reporting, and deterministic measured-step association for successful
+recovery/compaction work samples. It does **not** establish a fair latency benchmark by itself. Failed/excluded
+samples, an enforced cache/filesystem preparation protocol, and controlled-host pinning remain separate Phase 4
+work.
 
 ## Evidence archives
 
-`db-lab experiment-archive` is the publication boundary for raw Phase 4 evidence. It consumes one existing
-trace, creates fresh B+ tree and LSM targets, runs the exact shared comparison, and then creates a new archive
-directory containing four JSON files: `trace.json`, `comparison.json`, `environment.json`, and `index.json`.
-The caller must provide `--revision`; the archive also records the db-lab package version, target OS/arch,
-build profile, best-effort Rust compiler version, B+ tree cache capacity, a declared cache state, and optional
-host/filesystem/storage labels. Existing archive paths are rejected and a failed multi-file write removes the
-partial archive directory. Do not put credentials, serial numbers, or other secrets into labels/notes.
+`db-lab experiment-archive` remains the backward-compatible single-comparison publication boundary. It consumes
+one existing trace, creates fresh B+ tree and LSM targets, runs the exact shared lockstep comparison, and then
+creates a new format-v1 archive directory containing four JSON files: `trace.json`, `comparison.json`,
+`environment.json`, and `index.json`. The caller must provide `--revision`; the archive also records the db-lab
+package version, target OS/arch, build profile, best-effort Rust compiler version, B+ tree cache capacity, a
+declared cache state, and optional host/filesystem/storage labels. Existing archive paths are rejected and a
+failed multi-file write removes the partial archive directory. Do not put credentials, serial numbers, or other
+secrets into labels/notes.
 
-The manifest does not make timings comparable by itself. `cold_best_effort` is only a declaration, not proof
-that kernel/device caches were flushed. Controlled-host pinning remains mandatory before latency claims or
-regression thresholds.
+`db-lab experiment-archive-counterbalanced` creates a separate format-v2 archive rather than changing v1
+semantics. It requires four fresh engine targets, runs one complete comparison in each whole-engine order, and
+writes `trace.json`, `counterbalanced.json`, `environment.json`, and `index.json`. The counterbalanced report
+retains both raw ordered comparisons. The environment repeats `pair_order`, records
+`execution_protocol = "fresh_counterbalanced_ab_ba"`, and carries the same source/build/host/cache metadata as
+v1. The v2 index names the counterbalanced payload explicitly, so archived evidence is self-describing without
+inferring methodology from filenames.
+
+Neither archive format makes timings comparable by itself. `cold_best_effort` is only a declaration, not proof
+that kernel/device caches were flushed. A controlled cache/filesystem procedure, explicit failed/excluded-attempt
+accounting, and controlled-host pinning remain mandatory before latency claims or regression thresholds.
