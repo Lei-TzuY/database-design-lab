@@ -84,11 +84,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
         ));
     }
     let workload = load_workload(&cli.workload)?;
-    let target = replay_signature(cli.engine, cli.btree_cache_pages, &workload)?.ok_or_else(|| {
-        CliError::Usage(
-            "the input workload does not currently reproduce a differential failure".to_owned(),
-        )
-    })?;
+    let target =
+        replay_signature(cli.engine, cli.btree_cache_pages, &workload)?.ok_or_else(|| {
+            CliError::Usage(
+                "the input workload does not currently reproduce a differential failure".to_owned(),
+            )
+        })?;
 
     let minimized = minimize_failing_workload(&workload, |candidate| {
         Ok::<_, CliError>(
@@ -117,10 +118,8 @@ fn replay_signature(
             Ok(compare_candidate(candidate, workload))
         }
         CandidateKind::Btree => {
-            let candidate = BPlusTree::create_new(
-                directory.path().join("candidate.btree"),
-                btree_cache_pages,
-            )?;
+            let candidate =
+                BPlusTree::create_new(directory.path().join("candidate.btree"), btree_cache_pages)?;
             Ok(compare_candidate(candidate, workload))
         }
         CandidateKind::Lsm => {
@@ -130,7 +129,10 @@ fn replay_signature(
     }
 }
 
-fn compare_candidate<E: KvEngine>(mut candidate: E, workload: &Workload) -> Option<FailureSignature> {
+fn compare_candidate<E: KvEngine>(
+    mut candidate: E,
+    workload: &Workload,
+) -> Option<FailureSignature> {
     let mut reference = MemoryEngine::new();
     compare_workload(&mut reference, &mut candidate, workload)
         .err()
@@ -139,10 +141,18 @@ fn compare_candidate<E: KvEngine>(mut candidate: E, workload: &Workload) -> Opti
 
 fn failure_signature(error: &DifferentialError) -> FailureSignature {
     match error {
-        DifferentialError::InvalidWorkload(source) => FailureSignature::InvalidWorkload(source.class()),
-        DifferentialError::IncompatibleCapabilities(_) => FailureSignature::IncompatibleCapabilities,
-        DifferentialError::LeftEngine { source, .. } => FailureSignature::LeftEngine(source.class()),
-        DifferentialError::RightEngine { source, .. } => FailureSignature::RightEngine(source.class()),
+        DifferentialError::InvalidWorkload(source) => {
+            FailureSignature::InvalidWorkload(source.class())
+        }
+        DifferentialError::IncompatibleCapabilities(_) => {
+            FailureSignature::IncompatibleCapabilities
+        }
+        DifferentialError::LeftEngine { source, .. } => {
+            FailureSignature::LeftEngine(source.class())
+        }
+        DifferentialError::RightEngine { source, .. } => {
+            FailureSignature::RightEngine(source.class())
+        }
         DifferentialError::Mismatch { .. } => FailureSignature::Mismatch,
     }
 }
@@ -209,7 +219,8 @@ mod tests {
             FailureSignature::RightEngine(ErrorClass::Poisoned)
         );
 
-        let incompatible = DifferentialError::IncompatibleCapabilities("different limits".to_owned());
+        let incompatible =
+            DifferentialError::IncompatibleCapabilities("different limits".to_owned());
         assert_eq!(
             failure_signature(&incompatible),
             FailureSignature::IncompatibleCapabilities
