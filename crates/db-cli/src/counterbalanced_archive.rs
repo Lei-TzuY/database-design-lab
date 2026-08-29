@@ -19,7 +19,7 @@ use super::{
 const COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 2;
 const COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION: u16 = 3;
 const COUNTERBALANCED_EXECUTION_PROTOCOL: &str = "fresh_counterbalanced_ab_ba";
-const COUNTERBALANCED_ATTEMPT_PROTOCOL: &str = "record_all_counterbalanced_attempts";
+const COUNTERBALANCED_ATTEMPT_PROTOCOL: &str = "record_non_success_counterbalanced_attempts";
 const MAX_EXCLUSION_REASON_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -83,19 +83,12 @@ pub(super) struct CounterbalancedArchiveArgs {
     /// Declared cache preparation state for both repetitions.
     #[arg(long, value_enum, default_value_t = CacheStateKind::Unspecified)]
     cache_state: CacheStateKind,
+    /// Record a methodological exclusion without creating either repetition.
+    #[arg(long)]
+    exclude_reason: Option<String>,
     /// Optional free-form experiment note. Do not include secrets.
     #[arg(long)]
     notes: Option<String>,
-}
-
-/// Arguments for a counterbalanced attempt archive that records success, failure, or exclusion.
-#[derive(Debug, Args)]
-pub(super) struct CounterbalancedAttemptArgs {
-    #[command(flatten)]
-    archive: CounterbalancedArchiveArgs,
-    /// Record a methodological exclusion instead of creating engines or executing the trace.
-    #[arg(long)]
-    exclude_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,9 +139,6 @@ struct CounterbalancedAttemptRecord {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum CounterbalancedAttemptOutcome {
-    Success {
-        comparison: CounterbalancedExperimentComparisonReport,
-    },
     Failed {
         error_class: ErrorClass,
         error: String,
@@ -159,70 +149,59 @@ enum CounterbalancedAttemptOutcome {
 }
 
 pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
-    validate_archive_inputs(&args)?;
+    validate_revision(&args.revision)?;
     let trace = read_experiment_trace(&args.trace)?;
-    let pair_order: CounterbalancedPairOrder = args.pair_order.into();
-    let comparison = execute_counterbalanced(&trace, pair_order, &args)?;
-    let environment = build_environment(
-        COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION,
-        pair_order,
-        &args,
-    )?;
-    write_counterbalanced_evidence_archive(
+    ensure_fresh_counterbalanced_archive_targets(
+        &args.first_btree_path,
+        &args.first_lsm_path,
+        &args.second_btree_path,
+        &args.second_lsm_path,
         &args.archive_dir,
-        &args.revision,
-        &trace,
-        &comparison,
-        &environment,
-    )
-}
-
-pub(super) fn run_attempt(args: CounterbalancedAttemptArgs) -> Result<(), CliError> {
-    let CounterbalancedAttemptArgs {
-        archive,
-        exclude_reason,
-    } = args;
-    validate_archive_inputs(&archive)?;
-    let trace = read_experiment_trace(&archive.trace)?;
-    let pair_order: CounterbalancedPairOrder = archive.pair_order.into();
-    let environment = build_environment(
-        COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
-        pair_order,
-        &archive,
     )?;
+    let pair_order: CounterbalancedPairOrder = args.pair_order.into();
 
-    if let Some(reason) = exclude_reason {
+    if let Some(reason) = args.exclude_reason.as_deref() {
         let reason = validate_exclusion_reason(reason)?;
+        let environment = build_environment(
+            COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+            pair_order,
+            &args,
+        )?;
         let attempt = CounterbalancedAttemptRecord {
             format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
             pair_order,
             outcome: CounterbalancedAttemptOutcome::Excluded { reason },
         };
         return write_counterbalanced_attempt_archive(
-            &archive.archive_dir,
-            &archive.revision,
+            &args.archive_dir,
+            &args.revision,
             &trace,
             &attempt,
             &environment,
         );
     }
 
-    match execute_counterbalanced(&trace, pair_order, &archive) {
+    match execute_counterbalanced(&trace, pair_order, &args) {
         Ok(comparison) => {
-            let attempt = CounterbalancedAttemptRecord {
-                format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+            let environment = build_environment(
+                COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION,
                 pair_order,
-                outcome: CounterbalancedAttemptOutcome::Success { comparison },
-            };
-            write_counterbalanced_attempt_archive(
-                &archive.archive_dir,
-                &archive.revision,
+                &args,
+            )?;
+            write_counterbalanced_evidence_archive(
+                &args.archive_dir,
+                &args.revision,
                 &trace,
-                &attempt,
+                &comparison,
                 &environment,
             )
         }
         Err(error) => {
+            let environment = build_environment(
+                COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                pair_order,
+                &args,
+            )?;
             let attempt = CounterbalancedAttemptRecord {
                 format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
                 pair_order,
@@ -232,8 +211,8 @@ pub(super) fn run_attempt(args: CounterbalancedAttemptArgs) -> Result<(), CliErr
                 },
             };
             write_counterbalanced_attempt_archive(
-                &archive.archive_dir,
-                &archive.revision,
+                &args.archive_dir,
+                &args.revision,
                 &trace,
                 &attempt,
                 &environment,
@@ -243,18 +222,7 @@ pub(super) fn run_attempt(args: CounterbalancedAttemptArgs) -> Result<(), CliErr
     }
 }
 
-fn validate_archive_inputs(args: &CounterbalancedArchiveArgs) -> Result<(), CliError> {
-    validate_revision(&args.revision)?;
-    ensure_fresh_counterbalanced_archive_targets(
-        &args.first_btree_path,
-        &args.first_lsm_path,
-        &args.second_btree_path,
-        &args.second_lsm_path,
-        &args.archive_dir,
-    )
-}
-
-fn validate_exclusion_reason(reason: String) -> Result<String, CliError> {
+fn validate_exclusion_reason(reason: &str) -> Result<String, CliError> {
     let reason = reason.trim();
     if reason.is_empty() || reason.len() > MAX_EXCLUSION_REASON_BYTES {
         return Err(CliError::Usage(format!(
@@ -449,8 +417,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ensure_fresh_counterbalanced_archive_targets, run, run_attempt, CounterbalancedArchiveArgs,
-        CounterbalancedAttemptArgs, CounterbalancedPairOrderKind,
+        ensure_fresh_counterbalanced_archive_targets, run, CounterbalancedArchiveArgs,
+        CounterbalancedPairOrderKind,
     };
     use crate::CacheStateKind;
 
@@ -514,15 +482,12 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let trace_path = write_trace(&directory);
         let archive_dir = directory.path().join("excluded-archive");
-        let base = base_args(&directory, trace_path, archive_dir.clone());
-        let first_btree_path = base.first_btree_path.clone();
-        let first_lsm_path = base.first_lsm_path.clone();
+        let mut args = base_args(&directory, trace_path, archive_dir.clone());
+        args.exclude_reason = Some("host load exceeded the frozen admission threshold".to_owned());
+        let first_btree_path = args.first_btree_path.clone();
+        let first_lsm_path = args.first_lsm_path.clone();
 
-        run_attempt(CounterbalancedAttemptArgs {
-            archive: base,
-            exclude_reason: Some("host load exceeded the frozen admission threshold".to_owned()),
-        })
-        .expect("record excluded attempt");
+        run(args).expect("record excluded attempt");
 
         assert!(!first_btree_path.exists());
         assert!(!first_lsm_path.exists());
@@ -536,6 +501,15 @@ mod tests {
             attempt["reason"],
             "host load exceeded the frozen admission threshold"
         );
+
+        let index: Value =
+            serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
+                .expect("parse index");
+        assert_eq!(index["format_version"], 3);
+        assert_eq!(
+            index["attempt_protocol"],
+            "record_non_success_counterbalanced_attempts"
+        );
     }
 
     #[test]
@@ -543,14 +517,10 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let trace_path = write_trace(&directory);
         let archive_dir = directory.path().join("failed-archive");
-        let mut base = base_args(&directory, trace_path, archive_dir.clone());
-        base.first_btree_path = directory.path().join("missing-parent").join("tree.db");
+        let mut args = base_args(&directory, trace_path, archive_dir.clone());
+        args.first_btree_path = directory.path().join("missing-parent").join("tree.db");
 
-        let error = run_attempt(CounterbalancedAttemptArgs {
-            archive: base,
-            exclude_reason: None,
-        })
-        .expect_err("execution failure must retain non-zero CLI semantics");
+        let error = run(args).expect_err("execution failure must retain non-zero CLI semantics");
         assert!(error.to_string().contains("I/O error"));
 
         let attempt: Value = serde_json::from_slice(
@@ -604,6 +574,7 @@ mod tests {
             filesystem: None,
             storage_device: None,
             cache_state: CacheStateKind::Warm,
+            exclude_reason: None,
             notes: None,
         }
     }
