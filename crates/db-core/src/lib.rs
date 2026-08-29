@@ -9,6 +9,7 @@ mod differential;
 mod engine;
 mod error;
 mod experiment;
+mod experiment_batch;
 mod operation;
 mod ordered_experiment;
 mod workload;
@@ -35,6 +36,12 @@ pub use experiment::{
     ExperimentRunReport, ExperimentStep, ExperimentTrace, EXPERIMENT_TRACE_FORMAT_VERSION,
     MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES, MAX_EXPERIMENT_RANGE_LIMIT, MAX_EXPERIMENT_STEPS,
     MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
+};
+pub use experiment_batch::{
+    run_counterbalanced_experiment_batch, CounterbalancedExperimentBatchReport,
+    ExperimentAttemptAdmission, ExperimentAttemptContext, ExperimentAttemptDisposition,
+    ExperimentAttemptFailure, ExperimentAttemptFailureStage, ExperimentAttemptRecord,
+    ExperimentEngineRole, ExperimentInstanceContext, MAX_EXPERIMENT_BATCH_PAIRS,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use ordered_experiment::{
