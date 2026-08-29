@@ -20,7 +20,8 @@ fn generator_revision_one_has_stable_trace_fingerprints() {
     ];
 
     for (profile, expected) in cases {
-        let trace = generate_experiment_trace(profile, GOLDEN_CONFIG).expect("generate golden trace");
+        let trace =
+            generate_experiment_trace(profile, GOLDEN_CONFIG).expect("generate golden trace");
         let encoded = serde_json::to_vec(&trace).expect("serialize golden trace");
         assert_eq!(fnv1a64_hex(&encoded), expected, "profile {profile:?}");
     }

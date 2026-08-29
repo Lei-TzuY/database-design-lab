@@ -26,6 +26,7 @@ pub use experiment::{
     ExperimentComparisonReport, ExperimentConfig, ExperimentOutcome, ExperimentProfile,
     ExperimentStep, ExperimentTrace, EXPERIMENT_GENERATOR_REVISION,
     EXPERIMENT_TRACE_FORMAT_VERSION, MAX_EXPERIMENT_KEY_SPACE, MAX_EXPERIMENT_RANGE_WIDTH,
+    MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use workload::{

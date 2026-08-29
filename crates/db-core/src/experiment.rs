@@ -14,6 +14,10 @@ pub const EXPERIMENT_GENERATOR_REVISION: u16 = 1;
 pub const MAX_EXPERIMENT_KEY_SPACE: u32 = 1_000_000;
 /// Defensive upper bound for one generated range-scan limit.
 pub const MAX_EXPERIMENT_RANGE_WIDTH: u32 = 1_000_000;
+/// Maximum combined key/value bytes materialized by one experiment trace.
+pub const MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+
+const EXPERIMENT_KEY_BYTES: u64 = 8;
 
 /// Reproducible operation family used by the Phase 4 storage comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,20 +73,17 @@ pub enum ExperimentStep {
 }
 
 /// Versioned trace split into setup and measured phases.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Fields are read-only outside `db-core`; construction is restricted to the versioned generator so
+/// the declared profile/configuration cannot be detached from the encoded steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExperimentTrace {
-    /// Trace schema version.
-    pub format_version: u16,
-    /// Stable generator implementation revision.
-    pub generator_revision: u16,
-    /// Operation family represented by this generated trace.
-    pub profile: ExperimentProfile,
-    /// Complete generator configuration.
-    pub config: ExperimentConfig,
-    /// Deterministic state preparation excluded from amplification counters.
-    pub setup: Vec<ExperimentStep>,
-    /// Deterministic operations included in amplification counters.
-    pub measured: Vec<ExperimentStep>,
+    format_version: u16,
+    generator_revision: u16,
+    profile: ExperimentProfile,
+    config: ExperimentConfig,
+    setup: Vec<ExperimentStep>,
+    measured: Vec<ExperimentStep>,
 }
 
 /// Observable logical result of one experiment action.
@@ -179,9 +180,79 @@ impl ExperimentConfig {
         }
         Ok(())
     }
+
+    fn validate_generated_payload(self, profile: ExperimentProfile) -> Result<()> {
+        let put_bytes = EXPERIMENT_KEY_BYTES
+            .checked_add(u64::from(self.value_bytes))
+            .ok_or_else(|| {
+                DbError::InvalidInput("experiment payload size overflowed".to_owned())
+            })?;
+        let setup_bytes = if profile_needs_seeded_state(profile) {
+            u64::from(self.key_space)
+                .checked_mul(put_bytes)
+                .ok_or_else(|| {
+                    DbError::InvalidInput("experiment payload size overflowed".to_owned())
+                })?
+        } else {
+            0
+        };
+        let range_bytes = EXPERIMENT_KEY_BYTES.checked_mul(2).ok_or_else(|| {
+            DbError::InvalidInput("experiment payload size overflowed".to_owned())
+        })?;
+        let measured_bytes_per_operation = match profile {
+            ExperimentProfile::PointRead => EXPERIMENT_KEY_BYTES,
+            ExperimentProfile::RangeScan => range_bytes,
+            ExperimentProfile::SequentialWrite | ExperimentProfile::RandomWrite => put_bytes,
+            ExperimentProfile::Mixed => put_bytes.max(range_bytes),
+        };
+        let measured_bytes = u64::from(self.operations)
+            .checked_mul(measured_bytes_per_operation)
+            .ok_or_else(|| {
+                DbError::InvalidInput("experiment payload size overflowed".to_owned())
+            })?;
+        let payload_bytes = setup_bytes.checked_add(measured_bytes).ok_or_else(|| {
+            DbError::InvalidInput("experiment payload size overflowed".to_owned())
+        })?;
+        if payload_bytes > MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES {
+            return Err(DbError::InvalidInput(format!(
+                "generated experiment may materialize {payload_bytes} key/value bytes; maximum is {MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl ExperimentTrace {
+    /// Returns the trace schema version.
+    pub const fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    /// Returns the stable generator implementation revision.
+    pub const fn generator_revision(&self) -> u16 {
+        self.generator_revision
+    }
+
+    /// Returns the operation family represented by this generated trace.
+    pub const fn profile(&self) -> ExperimentProfile {
+        self.profile
+    }
+
+    /// Returns the complete generator configuration.
+    pub const fn config(&self) -> ExperimentConfig {
+        self.config
+    }
+
+    /// Returns deterministic state preparation excluded from amplification counters.
+    pub fn setup(&self) -> &[ExperimentStep] {
+        &self.setup
+    }
+
+    /// Returns deterministic operations included in amplification counters.
+    pub fn measured(&self) -> &[ExperimentStep] {
+        &self.measured
+    }
+
     /// Validates versioning, configured bounds, total step count, and every encoded operation.
     pub fn validate(&self) -> Result<()> {
         if self.format_version != EXPERIMENT_TRACE_FORMAT_VERSION {
@@ -214,8 +285,11 @@ impl ExperimentTrace {
                 "experiment measured phase must not be empty".to_owned(),
             ));
         }
+        let mut payload_bytes = 0_u64;
         for step in self.setup.iter().chain(&self.measured) {
             validate_experiment_step(step)?;
+            payload_bytes =
+                checked_add_trace_payload(payload_bytes, experiment_step_payload_bytes(step)?)?;
         }
         Ok(())
     }
@@ -234,6 +308,7 @@ pub fn generate_experiment_trace(
     config: ExperimentConfig,
 ) -> Result<ExperimentTrace> {
     config.validate()?;
+    config.validate_generated_payload(profile)?;
 
     let setup_logical = if profile_needs_seeded_state(profile) {
         u64::from(config.key_space) + 1
@@ -454,6 +529,49 @@ fn validate_experiment_step(step: &ExperimentStep) -> Result<()> {
     }
 }
 
+fn experiment_step_payload_bytes(step: &ExperimentStep) -> Result<u64> {
+    match step {
+        ExperimentStep::Put { key, value } => {
+            checked_payload_lengths(&[key.as_slice().len(), value.as_slice().len()])
+        }
+        ExperimentStep::Get { key } | ExperimentStep::Delete { key } => {
+            checked_payload_lengths(&[key.as_slice().len()])
+        }
+        ExperimentStep::RangeScan {
+            start,
+            end: Some(end),
+            ..
+        } => checked_payload_lengths(&[start.as_slice().len(), end.as_slice().len()]),
+        ExperimentStep::RangeScan {
+            start, end: None, ..
+        } => checked_payload_lengths(&[start.as_slice().len()]),
+        ExperimentStep::Reopen => Ok(0),
+    }
+}
+
+fn checked_payload_lengths(lengths: &[usize]) -> Result<u64> {
+    lengths.iter().try_fold(0_u64, |total, length| {
+        let length = u64::try_from(*length).map_err(|_| {
+            DbError::InvalidInput("experiment payload length does not fit u64".to_owned())
+        })?;
+        total
+            .checked_add(length)
+            .ok_or_else(|| DbError::InvalidInput("experiment payload size overflowed".to_owned()))
+    })
+}
+
+fn checked_add_trace_payload(total: u64, step_bytes: u64) -> Result<u64> {
+    let total = total
+        .checked_add(step_bytes)
+        .ok_or_else(|| DbError::InvalidInput("experiment payload size overflowed".to_owned()))?;
+    if total > MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES {
+        return Err(DbError::InvalidInput(format!(
+            "experiment has {total} key/value bytes; maximum is {MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES}"
+        )));
+    }
+    Ok(total)
+}
+
 fn execute_experiment_step<E: KvEngine>(
     engine: &mut E,
     step: &ExperimentStep,
@@ -601,8 +719,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        generate_experiment_trace, run_amplification_comparison, ExperimentConfig,
-        ExperimentProfile, ExperimentStep,
+        checked_add_trace_payload, generate_experiment_trace, run_amplification_comparison,
+        ExperimentConfig, ExperimentProfile, ExperimentStep, MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
     };
     use crate::{
         validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
@@ -612,12 +730,12 @@ mod tests {
     };
 
     const CONFIG: ExperimentConfig = ExperimentConfig {
-        seed: 0x5eed_cafe_d15c_a11e,
-        operations: 64,
-        key_space: 32,
-        value_bytes: 24,
-        range_width: 5,
-        reopen_every: Some(11),
+        seed: 15_111_065_706_836_454_659,
+        operations: 256,
+        key_space: 512,
+        value_bytes: 512,
+        range_width: 32,
+        reopen_every: Some(64),
     };
 
     #[test]
@@ -659,19 +777,77 @@ mod tests {
     }
 
     #[test]
-    fn matching_engines_produce_one_common_outcome_fingerprint() {
-        let trace =
-            generate_experiment_trace(ExperimentProfile::Mixed, CONFIG).expect("generate trace");
-        let mut left = MapEngine::new("left", StorageArchitecture::BPlusTree);
-        let mut right = MapEngine::new("right", StorageArchitecture::LsmTree);
-        let report = run_amplification_comparison(&mut left, &mut right, &trace)
-            .expect("matching engines compare");
-        assert_eq!(report.setup_steps_checked, trace.setup.len());
-        assert_eq!(report.measured_steps_checked, trace.measured.len());
-        assert_eq!(report.left.capabilities.name, "left");
-        assert_eq!(report.right.capabilities.name, "right");
-        assert_eq!(report.trace_fingerprint.len(), 16);
-        assert_eq!(report.measured_outcome_fingerprint.len(), 16);
+    fn generated_payload_budget_is_checked_before_materializing_setup() {
+        let oversized = ExperimentConfig {
+            operations: 1,
+            key_space: 65,
+            value_bytes: MAX_VALUE_BYTES as u32,
+            range_width: 1,
+            reopen_every: None,
+            ..CONFIG
+        };
+        let error = generate_experiment_trace(ExperimentProfile::PointRead, oversized)
+            .expect_err("oversized trace payload must fail");
+        assert!(error.to_string().contains("may materialize"));
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn trace_validation_payload_accumulator_fails_at_the_exact_boundary() {
+        assert_eq!(
+            checked_add_trace_payload(MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES, 0)
+                .expect("the exact budget is valid"),
+            MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES
+        );
+        let error = checked_add_trace_payload(MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES, 1)
+            .expect_err("one byte beyond the budget must fail");
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn every_profile_has_pinned_common_outcome_fingerprints() {
+        let cases = [
+            (
+                ExperimentProfile::PointRead,
+                "a72cf3dc3882a139",
+                "a48fffad94c7c8d9",
+            ),
+            (
+                ExperimentProfile::RangeScan,
+                "a72cf3dc3882a139",
+                "f74bbda442f421e5",
+            ),
+            (
+                ExperimentProfile::SequentialWrite,
+                "cbf29ce484222325",
+                "4d41386e2ce550d5",
+            ),
+            (
+                ExperimentProfile::RandomWrite,
+                "cbf29ce484222325",
+                "d7ca7b0c2bbbf612",
+            ),
+            (
+                ExperimentProfile::Mixed,
+                "a72cf3dc3882a139",
+                "31e7fc0270b57ecf",
+            ),
+        ];
+
+        for (profile, expected_setup, expected_measured) in cases {
+            let trace = generate_experiment_trace(profile, CONFIG).expect("generate trace");
+            let mut left = MapEngine::new("left", StorageArchitecture::BPlusTree);
+            let mut right = MapEngine::new("right", StorageArchitecture::LsmTree);
+            let report = run_amplification_comparison(&mut left, &mut right, &trace)
+                .expect("matching engines compare");
+            assert_eq!(report.setup_steps_checked, trace.setup.len());
+            assert_eq!(report.measured_steps_checked, trace.measured.len());
+            assert_eq!(report.left.capabilities.name, "left");
+            assert_eq!(report.right.capabilities.name, "right");
+            assert_eq!(report.trace_fingerprint.len(), 16);
+            assert_eq!(report.setup_outcome_fingerprint, expected_setup);
+            assert_eq!(report.measured_outcome_fingerprint, expected_measured);
+        }
     }
 
     #[test]

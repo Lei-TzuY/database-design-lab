@@ -19,6 +19,11 @@ Every generated trace is versioned and records:
 - range width/result limit; and
 - optional measured-operation reopen cadence.
 
+Trace construction is bounded before allocation. A trace may contain at most one million steps and
+64 MiB of materialized key/value payload. The generator checks a conservative profile-specific upper
+bound before creating any step vectors, and trace validation checks the actual encoded key/value bytes
+with checked arithmetic. This is a resource-safety bound, not a recommended benchmark size.
+
 The trace is split into `setup` and `measured` phases. Setup establishes identical state on both engines
 and is intentionally excluded from the process-local amplification window. The harness executes setup
 step by step on both engines, refuses any logical mismatch, resets both amplification counters, and only
@@ -42,7 +47,9 @@ SplitMix64 stream derived from the trace seed, key id, and mutation revision. Th
 repeatable without making the operation-selection stream depend on value length.
 
 Changing any generator rule requires a new generator revision. Existing archived evidence must continue
-to identify the revision that produced it.
+to identify the revision that produced it. The Rust trace type exposes read-only accessors and can only
+be constructed by the versioned generator, preventing callers from pairing a declared profile/config
+with unrelated steps. Arbitrary trace-file ingestion is not implemented in this slice.
 
 ## Profiles
 
@@ -96,7 +103,9 @@ for different logical database histories.
 
 To make archived evidence easy to identify, the report includes FNV-1a fingerprints of the exact JSON
 trace and of the framed setup/measured outcome streams. These fingerprints are reproducibility labels,
-not cryptographic integrity claims.
+not cryptographic integrity claims. Golden regressions pin all five serialized revision-1 traces and
+their common setup/measured outcome streams for the committed fixed configuration; an intentional
+semantic or serialization change therefore requires explicit review.
 
 ## Amplification evidence
 
