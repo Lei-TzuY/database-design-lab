@@ -1,7 +1,9 @@
 use db_core::{
     AmplificationInstrumented, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, StorageArchitecture,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
+    OperationalTimingReport, Persistence, StorageArchitecture,
 };
+use std::time::Instant;
 
 use super::{BPlusTree, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
 use crate::BtreeError;
@@ -60,9 +62,15 @@ impl KvEngine for BPlusTree {
     fn reopen(&mut self) -> db_core::Result<()> {
         let path = self.path().to_path_buf();
         let instrumentation = self.instrumentation;
+        let mut operational_timing = self.operational_timing.clone();
+        let started = Instant::now();
         match BPlusTree::open(&path, self.cache_capacity) {
             Ok(mut reopened) => {
+                operational_timing
+                    .reopen_ns
+                    .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
                 reopened.instrumentation = instrumentation;
+                reopened.operational_timing = operational_timing;
                 *self = reopened;
                 Ok(())
             }
@@ -71,6 +79,16 @@ impl KvEngine for BPlusTree {
                 Err(common_error(error))
             }
         }
+    }
+}
+
+impl OperationalTimingInstrumented for BPlusTree {
+    fn reset_operational_timing(&mut self) {
+        self.operational_timing = OperationalTimingReport::default();
+    }
+
+    fn operational_timing_report(&self) -> OperationalTimingReport {
+        self.operational_timing.clone()
     }
 }
 
