@@ -21,12 +21,12 @@ engine:
 
 | Crate | Implemented role |
 | --- | --- |
-| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution/differential harness, experiment compatibility preflight, and common amplification report schema |
+| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generators, execution/differential harnesses, versioned Phase 4 experiment traces, experiment compatibility preflight, and common amplification report schema |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, bounded validated-page caching, and exact structural amplification instrumentation |
 | `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, half-open range scans, deterministic compaction differential tests, and the shared exact amplification report contract |
-| `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
+| `db-cli` | Correctness `generate`/`run`/`differential`, Phase 4 `experiment-generate`/`experiment-compare`, plus append-log `verify`/`inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
 The B+ tree uses a separate page file whose two mirrored superblocks define the committed physical
@@ -101,7 +101,10 @@ at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`,
 and a bounded half-open ordered range API `[start, end)`, with `end = None` meaning unbounded. The
 in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
 does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
-serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
+serializes point/lifecycle regression steps only. Phase 4 uses a separate `ExperimentTrace` v1 schema with
+setup/measured windows and stable point-read, range-scan, sequential-write, random-write, and mixed profiles;
+`experiment-compare` proves identical measured outcomes before archiving both engines' amplification evidence.
+See `docs/experiment-traces.md` for the frozen generation rules. Transactions,
 multi-process writers, snapshot/replication-aware tombstone GC, generalized multi-run/multi-level compaction,
 replication, SQL, MVCC, Raft, graph, time-series, and columnar execution are not implemented.
 
@@ -115,6 +118,10 @@ cargo run -p db-cli -- generate --seed 24301 --operations 1000 \
   --reopen-every 17 --output workload.json
 cargo run -p db-cli -- differential --path experiment.db workload.json
 cargo run -p db-cli -- differential --engine lsm --path experiment-lsm workload.json
+cargo run -p db-cli -- experiment-generate --profile mixed --seed 42 \
+  --operations 1000 --key-space 4096 --output mixed-42.json
+cargo run -p db-cli -- experiment-compare --trace mixed-42.json \
+  --btree-path btree-42.db --lsm-path lsm-42 --output mixed-42-report.json
 cargo run -p db-cli -- verify experiment.db
 cargo run -p db-cli -- inspect experiment.db --show-values
 ```

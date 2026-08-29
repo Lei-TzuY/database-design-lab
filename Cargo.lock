@@ -125,11 +125,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "db-core",
+ "db-storage-btree",
  "db-storage-log",
  "db-storage-lsm",
  "db-storage-memory",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

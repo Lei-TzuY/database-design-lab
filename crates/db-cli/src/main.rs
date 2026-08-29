@@ -5,16 +5,19 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use db_core::{
-    compare_workload, execute_workload, generate_workload, DbError, DifferentialError,
-    GeneratorConfig, KvEngine, Outcome, Workload,
+    compare_experiment_trace, compare_workload, execute_workload, generate_experiment_trace,
+    generate_workload, DbError, DifferentialError, ExperimentComparisonReport,
+    ExperimentGeneratorConfig, ExperimentProfile, ExperimentTrace, GeneratorConfig, KvEngine,
+    Outcome, Workload,
 };
+use db_storage_btree::{BPlusTree, BtreeError};
 use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
 use db_storage_lsm::LsmEngine;
 use db_storage_memory::MemoryEngine;
 use serde::Serialize;
 use thiserror::Error;
 
-const MAX_WORKLOAD_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_JSON_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,6 +75,51 @@ enum Command {
         /// Versioned workload JSON file.
         workload: PathBuf,
     },
+    /// Generate a versioned Phase 4 experiment trace with setup and measured windows.
+    ExperimentGenerate {
+        /// Stable experiment family.
+        #[arg(long, value_enum)]
+        profile: ExperimentProfileKind,
+        /// Recorded SplitMix64 seed.
+        #[arg(long)]
+        seed: u64,
+        /// Number of measured logical operations, excluding inserted reopen steps.
+        #[arg(long, default_value_t = 1_000)]
+        operations: u32,
+        /// Number of reusable logical key ids.
+        #[arg(long, default_value_t = 4_096)]
+        key_space: u32,
+        /// Fixed generated value size.
+        #[arg(long, default_value_t = 128)]
+        value_bytes: u32,
+        /// Maximum rows requested by generated range scans.
+        #[arg(long, default_value_t = 16)]
+        range_limit: u32,
+        /// Insert a measured reopen after this many logical operations.
+        #[arg(long)]
+        reopen_every: Option<u32>,
+        /// New trace JSON file to create; existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Run one shared trace against fresh B+ tree and LSM candidates and archive exact evidence.
+    ExperimentCompare {
+        /// Versioned experiment trace JSON file.
+        #[arg(long)]
+        trace: PathBuf,
+        /// New B+ tree page file to create.
+        #[arg(long)]
+        btree_path: PathBuf,
+        /// New LSM directory to create.
+        #[arg(long)]
+        lsm_path: PathBuf,
+        /// B+ tree validated-page cache capacity, recorded in the output wrapper.
+        #[arg(long, default_value_t = 64)]
+        btree_cache_pages: usize,
+        /// New self-contained comparison report JSON file.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Validate an append-log file without modifying it.
     Verify {
         /// Append-log file.
@@ -100,6 +148,27 @@ enum PersistentEngineKind {
     Lsm,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExperimentProfileKind {
+    PointRead,
+    RangeScan,
+    SequentialWrite,
+    RandomWrite,
+    Mixed,
+}
+
+impl From<ExperimentProfileKind> for ExperimentProfile {
+    fn from(value: ExperimentProfileKind) -> Self {
+        match value {
+            ExperimentProfileKind::PointRead => Self::PointRead,
+            ExperimentProfileKind::RangeScan => Self::RangeScan,
+            ExperimentProfileKind::SequentialWrite => Self::SequentialWrite,
+            ExperimentProfileKind::RandomWrite => Self::RandomWrite,
+            ExperimentProfileKind::Mixed => Self::Mixed,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RunReport {
     engine: &'static str,
@@ -118,12 +187,20 @@ struct DifferentialCliReport {
     steps_checked: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct ExperimentCliReport {
+    btree_cache_pages: usize,
+    comparison: ExperimentComparisonReport,
+}
+
 #[derive(Debug, Error)]
 enum CliError {
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
     Database(#[from] DbError),
+    #[error(transparent)]
+    Btree(#[from] BtreeError),
     #[error(transparent)]
     Differential(#[from] DifferentialError),
     #[error("I/O error: {0}")]
@@ -209,6 +286,47 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
                 }
             }
         }
+        Command::ExperimentGenerate {
+            profile,
+            seed,
+            operations,
+            key_space,
+            value_bytes,
+            range_limit,
+            reopen_every,
+            output,
+        } => {
+            let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+                seed,
+                profile: profile.into(),
+                operations,
+                key_space,
+                value_bytes,
+                range_limit,
+                reopen_every,
+            })?;
+            write_new_json(&output, &trace)
+        }
+        Command::ExperimentCompare {
+            trace,
+            btree_path,
+            lsm_path,
+            btree_cache_pages,
+            output,
+        } => {
+            let trace = read_experiment_trace(&trace)?;
+            ensure_fresh_experiment_targets(&btree_path, &lsm_path, &output)?;
+            let mut btree = BPlusTree::create_new(&btree_path, btree_cache_pages)?;
+            let mut lsm = LsmEngine::create_new(&lsm_path)?;
+            let comparison = compare_experiment_trace(&mut btree, &mut lsm, &trace)?;
+            write_new_json(
+                &output,
+                &ExperimentCliReport {
+                    btree_cache_pages,
+                    comparison,
+                },
+            )
+        }
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
             write_stdout_json(&report)
@@ -250,17 +368,53 @@ fn print_differential_report<E: KvEngine>(
 }
 
 fn read_workload(path: &Path) -> Result<Workload, CliError> {
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_WORKLOAD_FILE_BYTES {
-        return Err(CliError::Usage(format!(
-            "workload file has {} bytes; maximum is {MAX_WORKLOAD_FILE_BYTES}",
-            metadata.len()
-        )));
-    }
-    let encoded = fs::read(path)?;
+    let encoded = read_bounded_json(path, "workload")?;
     let workload: Workload = serde_json::from_slice(&encoded)?;
     workload.validate()?;
     Ok(workload)
+}
+
+fn read_experiment_trace(path: &Path) -> Result<ExperimentTrace, CliError> {
+    let encoded = read_bounded_json(path, "experiment trace")?;
+    let trace: ExperimentTrace = serde_json::from_slice(&encoded)?;
+    trace.validate()?;
+    Ok(trace)
+}
+
+fn read_bounded_json(path: &Path, kind: &str) -> Result<Vec<u8>, CliError> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_JSON_INPUT_BYTES {
+        return Err(CliError::Usage(format!(
+            "{kind} file has {} bytes; maximum is {MAX_JSON_INPUT_BYTES}",
+            metadata.len()
+        )));
+    }
+    Ok(fs::read(path)?)
+}
+
+fn ensure_fresh_experiment_targets(
+    btree_path: &Path,
+    lsm_path: &Path,
+    output: &Path,
+) -> Result<(), CliError> {
+    if btree_path == lsm_path || btree_path == output || lsm_path == output {
+        return Err(CliError::Usage(
+            "experiment B+ tree, LSM, and output paths must be distinct".to_owned(),
+        ));
+    }
+    for (label, path) in [
+        ("B+ tree", btree_path),
+        ("LSM", lsm_path),
+        ("output", output),
+    ] {
+        if path.exists() {
+            return Err(CliError::Usage(format!(
+                "experiment {label} path already exists: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), CliError> {
@@ -285,9 +439,15 @@ fn write_stdout_json(value: &impl Serialize) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use db_core::Workload;
+    use db_core::{
+        compare_experiment_trace, generate_experiment_trace, ExperimentGeneratorConfig,
+        ExperimentProfile, ReadWorkUnit, Workload,
+    };
+    use db_storage_btree::BPlusTree;
+    use db_storage_lsm::LsmEngine;
+    use tempfile::tempdir;
 
-    use super::{Cli, Command, EngineKind, PersistentEngineKind};
+    use super::{Cli, Command, EngineKind, ExperimentProfileKind, PersistentEngineKind};
 
     #[test]
     fn suggested_run_shape_parses() {
@@ -355,5 +515,72 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn experiment_command_shapes_parse() {
+        let generate = Cli::try_parse_from([
+            "db-lab",
+            "experiment-generate",
+            "--profile",
+            "mixed",
+            "--seed",
+            "42",
+            "--output",
+            "trace.json",
+        ])
+        .expect("parse experiment generation");
+        assert!(matches!(
+            generate.command,
+            Command::ExperimentGenerate {
+                profile: ExperimentProfileKind::Mixed,
+                ..
+            }
+        ));
+
+        let compare = Cli::try_parse_from([
+            "db-lab",
+            "experiment-compare",
+            "--trace",
+            "trace.json",
+            "--btree-path",
+            "tree.db",
+            "--lsm-path",
+            "lsm-dir",
+            "--output",
+            "report.json",
+        ])
+        .expect("parse experiment comparison");
+        assert!(matches!(compare.command, Command::ExperimentCompare { .. }));
+    }
+
+    #[test]
+    fn real_btree_and_lsm_consume_the_exact_same_mixed_trace() {
+        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 0x2026_0829,
+            profile: ExperimentProfile::Mixed,
+            operations: 48,
+            key_space: 24,
+            value_bytes: 64,
+            range_limit: 4,
+            reopen_every: Some(13),
+        })
+        .expect("generate shared trace");
+        let directory = tempdir().expect("temporary directory");
+        let mut btree =
+            BPlusTree::create_new(directory.path().join("tree.db"), 8).expect("create B+ tree");
+        let mut lsm =
+            LsmEngine::create_new(directory.path().join("lsm")).expect("create LSM engine");
+        let report =
+            compare_experiment_trace(&mut btree, &mut lsm, &trace).expect("compare engines");
+        assert_eq!(report.outcomes.len(), trace.measured_steps.len());
+        assert_eq!(
+            report.left.amplification.point_read.unit,
+            ReadWorkUnit::BtreePageAccess
+        );
+        assert_eq!(
+            report.right.amplification.point_read.unit,
+            ReadWorkUnit::LsmSstableConsult
+        );
     }
 }

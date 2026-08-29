@@ -72,6 +72,26 @@ by those SSTables. Unflushed WAL/MemTable state is excluded from both sides. Exi
 prove WAL framing, flush/output byte totals, first full-set compaction input, `5/3` point SSTable consults,
 and `10/9` decoded range versions per logical result on a layered L0/L1 state.
 
+## Shared trace and measurement-window protocol
+
+Phase 4 generated experiments use `ExperimentTrace` v1 rather than changing the Phase 1 correctness-workload
+schema. Every trace stores its profile, SplitMix64 seed, complete generator config, deterministic `setup_steps`,
+and exact `measured_steps`. The runner validates all common bounds, executes setup on each fresh candidate,
+resets process-local amplification exactly once, and only then enters the measured window. Optional REOPEN
+actions may occur inside that window and preserve the existing same-handle counters.
+
+The stable profiles are point-read, range-scan, sequential-write, random-write, and mixed. Generated keys are
+eight-byte big-endian ids so numeric order is exactly bytewise order. Point reads use a deterministic 80/20
+hit/miss split after a fully seeded setup. Range scans use `[start, min(start + range_limit, key_space))`.
+Sequential writes use distinct ascending ids; random writes uniformly select the configured key space; mixed
+traces seed even ids and then use 40% PUT, 30% GET, 15% range, and 15% DELETE. Exact rules live in
+`docs/experiment-traces.md`.
+
+`compare_experiment_trace` refuses to emit comparison evidence unless measured logical outcomes match exactly.
+A successful report stores the full trace once, the common measured outcomes once, and per-engine capabilities
+plus raw numerator/denominator amplification evidence. This proves identical logical input and output; it still
+does not turn unlike structural read units into device-I/O measurements.
+
 ## Capability preflight
 
 `validate_experiment_compatibility` rejects a comparison when engines disagree on the common logical model,
