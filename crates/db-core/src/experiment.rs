@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     validate_experiment_compatibility, validate_key, validate_key_value, validate_range_scan,
-    AmplificationInstrumented, AmplificationRatio, AmplificationReport, ByteString, DbError,
-    EngineCapabilities, KvEngine, ReadWorkUnit, Result, StructuralReadAmplification,
-    MAX_VALUE_BYTES, MAX_WORKLOAD_STEPS,
+    AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities, KvEngine,
+    Result, MAX_VALUE_BYTES, MAX_WORKLOAD_STEPS,
 };
 
 /// JSON schema version for Phase 4 experiment traces.
@@ -20,7 +19,7 @@ pub const MAX_EXPERIMENT_RANGE_WIDTH: u32 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExperimentProfile {
-    /// Preload a common key set, then issue random successful/missing point reads.
+    /// Preload a common key set, then issue random successful point reads.
     PointRead,
     /// Preload a common ordered key set, then issue bounded half-open range scans.
     RangeScan,
@@ -382,8 +381,9 @@ const fn profile_salt(profile: ExperimentProfile) -> u64 {
 }
 
 fn put_step(seed: u64, key_id: u64, revision: u64, value_bytes: u32) -> Result<ExperimentStep> {
-    let value_len = usize::try_from(value_bytes)
-        .map_err(|_| DbError::InvalidInput("experiment value length does not fit usize".to_owned()))?;
+    let value_len = usize::try_from(value_bytes).map_err(|_| {
+        DbError::InvalidInput("experiment value length does not fit usize".to_owned())
+    })?;
     let mut value = vec![0_u8; value_len];
     let mut value_random = SplitMix64::new(
         seed ^ key_id.wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -439,7 +439,9 @@ fn experiment_key(key_id: u64) -> Vec<u8> {
 fn validate_experiment_step(step: &ExperimentStep) -> Result<()> {
     match step {
         ExperimentStep::Put { key, value } => validate_key_value(key.as_slice(), value.as_slice()),
-        ExperimentStep::Get { key } | ExperimentStep::Delete { key } => validate_key(key.as_slice()),
+        ExperimentStep::Get { key } | ExperimentStep::Delete { key } => {
+            validate_key(key.as_slice())
+        }
         ExperimentStep::RangeScan { start, end, limit } => {
             if *limit == 0 || *limit > MAX_EXPERIMENT_RANGE_WIDTH {
                 return Err(DbError::InvalidInput(format!(
@@ -457,11 +459,13 @@ fn execute_experiment_step<E: KvEngine>(
     step: &ExperimentStep,
 ) -> Result<ExperimentOutcome> {
     match step {
-        ExperimentStep::Put { key, value } => engine
-            .put(key.as_slice(), value.as_slice())
-            .map(|previous| ExperimentOutcome::Put {
-                previous: previous.map(ByteString::from),
-            }),
+        ExperimentStep::Put { key, value } => {
+            engine
+                .put(key.as_slice(), value.as_slice())
+                .map(|previous| ExperimentOutcome::Put {
+                    previous: previous.map(ByteString::from),
+                })
+        }
         ExperimentStep::Get { key } => {
             engine
                 .get(key.as_slice())
@@ -676,9 +680,10 @@ mod tests {
             .expect("generate trace");
         let mut left = MapEngine::new("left", StorageArchitecture::BPlusTree);
         let mut right = MapEngine::new("right", StorageArchitecture::LsmTree);
-        right
-            .values
-            .insert(0_u64.to_be_bytes().to_vec(), b"different previous value".to_vec());
+        right.values.insert(
+            0_u64.to_be_bytes().to_vec(),
+            b"different previous value".to_vec(),
+        );
         let error = run_amplification_comparison(&mut left, &mut right, &trace)
             .expect_err("mismatch must fail");
         assert!(error.to_string().contains("logical mismatch"));
