@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     validate_experiment_compatibility, validate_key, validate_key_value, validate_range_scan,
-    AmplificationInstrumented, AmplificationRatio, AmplificationReport, ByteString, DbError,
-    EngineCapabilities, KvEngine, ReadWorkUnit, Result, StructuralReadAmplification, MAX_KEY_BYTES,
-    MAX_VALUE_BYTES,
+    AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,
+    KvEngine, Result, MAX_VALUE_BYTES,
 };
 
 /// JSON schema version for Phase 4 experiment traces.
@@ -90,7 +89,7 @@ impl ExperimentGeneratorConfig {
             ExperimentProfile::PointRead | ExperimentProfile::RangeScan => {
                 u64::from(self.key_space)
             }
-            ExperimentProfile::Mixed => (u64::from(self.key_space) + 1) / 2,
+            ExperimentProfile::Mixed => u64::from(self.key_space).div_ceil(2),
             ExperimentProfile::SequentialWrite | ExperimentProfile::RandomWrite => 0,
         };
         let reopen_steps = self
@@ -281,7 +280,9 @@ pub fn generate_experiment_trace(config: ExperimentGeneratorConfig) -> Result<Ex
         .reopen_every
         .map_or(0, |every| config.operations / every);
     let measured_capacity = usize::try_from(u64::from(config.operations) + u64::from(reopen_count))
-        .map_err(|_| DbError::InvalidInput("experiment measured step count overflowed".to_owned()))?;
+        .map_err(|_| {
+            DbError::InvalidInput("experiment measured step count overflowed".to_owned())
+        })?;
     let mut measured_steps = Vec::with_capacity(measured_capacity);
     for operation_index in 0..config.operations {
         let step = match config.profile {
@@ -290,8 +291,7 @@ pub fn generate_experiment_trace(config: ExperimentGeneratorConfig) -> Result<Ex
                 let key_id = if hit {
                     random.bounded(u64::from(config.key_space))
                 } else {
-                    u64::from(config.key_space)
-                        + random.bounded(u64::from(config.key_space))
+                    u64::from(config.key_space) + random.bounded(u64::from(config.key_space))
                 };
                 ExperimentStep::Get {
                     key: ByteString::from(experiment_key(key_id)),
@@ -305,9 +305,7 @@ pub fn generate_experiment_trace(config: ExperimentGeneratorConfig) -> Result<Ex
                 value: ByteString::from(random_value(&mut random, config.value_bytes)),
             },
             ExperimentProfile::RandomWrite => ExperimentStep::Put {
-                key: ByteString::from(experiment_key(
-                    random.bounded(u64::from(config.key_space)),
-                )),
+                key: ByteString::from(experiment_key(random.bounded(u64::from(config.key_space)))),
                 value: ByteString::from(random_value(&mut random, config.value_bytes)),
             },
             ExperimentProfile::Mixed => match random.bounded(100) {
@@ -322,9 +320,7 @@ pub fn generate_experiment_trace(config: ExperimentGeneratorConfig) -> Result<Ex
                         random.bounded(u64::from(config.key_space)),
                     )),
                 },
-                70..=84 => {
-                    generated_range_step(&mut random, config.key_space, config.range_limit)
-                }
+                70..=84 => generated_range_step(&mut random, config.key_space, config.range_limit),
                 _ => ExperimentStep::Delete {
                     key: ByteString::from(experiment_key(
                         random.bounded(u64::from(config.key_space)),
@@ -359,21 +355,27 @@ pub fn execute_experiment_step<E: KvEngine>(
     step: &ExperimentStep,
 ) -> Result<ExperimentOutcome> {
     match step {
-        ExperimentStep::Put { key, value } => engine
-            .put(key.as_slice(), value.as_slice())
-            .map(|previous| ExperimentOutcome::Put {
-                previous: previous.map(ByteString::from),
-            }),
-        ExperimentStep::Get { key } => engine
-            .get(key.as_slice())
-            .map(|value| ExperimentOutcome::Get {
-                value: value.map(ByteString::from),
-            }),
-        ExperimentStep::Delete { key } => engine
-            .delete(key.as_slice())
-            .map(|previous| ExperimentOutcome::Delete {
-                previous: previous.map(ByteString::from),
-            }),
+        ExperimentStep::Put { key, value } => {
+            engine
+                .put(key.as_slice(), value.as_slice())
+                .map(|previous| ExperimentOutcome::Put {
+                    previous: previous.map(ByteString::from),
+                })
+        }
+        ExperimentStep::Get { key } => {
+            engine
+                .get(key.as_slice())
+                .map(|value| ExperimentOutcome::Get {
+                    value: value.map(ByteString::from),
+                })
+        }
+        ExperimentStep::Delete { key } => {
+            engine
+                .delete(key.as_slice())
+                .map(|previous| ExperimentOutcome::Delete {
+                    previous: previous.map(ByteString::from),
+                })
+        }
         ExperimentStep::RangeScan { start, end, limit } => engine
             .range_scan(
                 start.as_slice(),
@@ -476,7 +478,9 @@ where
 fn validate_experiment_step(step: &ExperimentStep) -> Result<()> {
     match step {
         ExperimentStep::Put { key, value } => validate_key_value(key.as_slice(), value.as_slice()),
-        ExperimentStep::Get { key } | ExperimentStep::Delete { key } => validate_key(key.as_slice()),
+        ExperimentStep::Get { key } | ExperimentStep::Delete { key } => {
+            validate_key(key.as_slice())
+        }
         ExperimentStep::RangeScan { start, end, .. } => {
             validate_range_scan(start.as_slice(), end.as_ref().map(ByteString::as_slice))
         }
@@ -601,10 +605,10 @@ mod tests {
             .iter()
             .all(|step| matches!(step, ExperimentStep::Put { .. })));
         assert_eq!(trace.measured_steps.len(), 12);
-        assert!(trace.measured_steps.iter().all(|step| matches!(
-            step,
-            ExperimentStep::Get { .. } | ExperimentStep::Reopen
-        )));
+        assert!(trace
+            .measured_steps
+            .iter()
+            .all(|step| matches!(step, ExperimentStep::Get { .. } | ExperimentStep::Reopen)));
     }
 
     #[test]

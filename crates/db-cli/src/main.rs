@@ -567,8 +567,8 @@ mod tests {
         })
         .expect("generate shared trace");
         let directory = tempdir().expect("temporary directory");
-        let mut btree = BPlusTree::create_new(directory.path().join("tree.db"), 8)
-            .expect("create B+ tree");
+        let mut btree =
+            BPlusTree::create_new(directory.path().join("tree.db"), 8).expect("create B+ tree");
         let mut lsm =
             LsmEngine::create_new(directory.path().join("lsm")).expect("create LSM engine");
         let report =
