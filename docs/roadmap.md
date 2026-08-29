@@ -29,8 +29,10 @@ because later work has begun.
   and pre-existing truncated headers.
 - [x] CLI generation, execution, differential comparison, non-mutating verification, and inspection.
 - [x] Stable-Rust formatting, Clippy, tests, docs, and cross-platform CI.
-- [ ] Automated shrinking/minimization command for newly discovered failing traces. Until implemented,
-  minimization is manual and the constitution still requires a committed deterministic regression.
+- [x] Add automated deterministic shrinking/minimization for newly discovered failing traces.
+  `db-core::minimize_failing_workload` performs chunk-removal delta debugging plus 1-minimal cleanup;
+  `db-lab-shrink` replays every probe against a fresh persistent candidate, preserves the original
+  differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
 - [ ] Compaction. This remains deliberately absent from the append foundation.
 
 ## Phase 2 — B+ tree engine
