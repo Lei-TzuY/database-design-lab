@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use db_core::{DbError, KvEngine, MAX_KEY_BYTES};
+use db_core::{
+    DbError, ErrorClass, KvEngine, OperationalTimingInstrumented, OperationalWorkUnit,
+    MAX_KEY_BYTES,
+};
 use tempfile::{tempdir, TempDir};
 
 use super::{CompactionFaultMode, CompactionWriteKind, LsmEngine, MUTABLE_MEMTABLE_BYTES_LIMIT};
@@ -107,6 +110,8 @@ fn assert_fault_case(
     expected.push((key6, value6));
     let key7 = b"k-06".to_vec();
     let value7 = large_value(0x46);
+    engine.reset_operational_timing();
+    engine.set_operational_step_index(Some(41));
     let error = engine
         .put(&key7, &value7)
         .expect_err("injected compaction fault must escape the triggering mutation");
@@ -115,6 +120,36 @@ fn assert_fault_case(
         "{kind:?} {mode:?}: {error}"
     );
     expected.push((key7, value7));
+
+    let timing = engine.operational_timing_report();
+    assert!(timing.compaction_stall_ns.is_empty(), "{kind:?} {mode:?}");
+    assert!(
+        timing.compaction_stall_samples.is_empty(),
+        "{kind:?} {mode:?}"
+    );
+    assert_eq!(
+        timing.compaction_stall_failure_samples.len(),
+        1,
+        "{kind:?} {mode:?}"
+    );
+    let failure = timing.compaction_stall_failure_samples[0];
+    assert_eq!(failure.measured_step_index, Some(41), "{kind:?} {mode:?}");
+    assert_eq!(failure.error_class, ErrorClass::Io, "{kind:?} {mode:?}");
+    let work = failure
+        .work
+        .expect("durable-write faults happen after the complete input scan");
+    assert_eq!(
+        work.unit,
+        OperationalWorkUnit::LsmSstableRecordVersion,
+        "{kind:?} {mode:?}"
+    );
+    assert!(work.units_examined > 0, "{kind:?} {mode:?}");
+    assert_eq!(
+        work.bytes_examined,
+        engine.instrumentation().compaction_input_sstable_bytes,
+        "{kind:?} {mode:?}"
+    );
+
     assert!(matches!(engine.get(b"k-00"), Err(DbError::Poisoned)));
     drop(engine);
 
