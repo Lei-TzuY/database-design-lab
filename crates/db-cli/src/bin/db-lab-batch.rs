@@ -620,6 +620,7 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), CliError> {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
 
     use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
     use serde_json::Value;
