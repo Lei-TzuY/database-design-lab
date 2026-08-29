@@ -18,11 +18,17 @@ silently assumed.
   format-v5 failed/excluded attempt evidence.
 
 The repeated `db-lab-batch` runner applies the same admission boundary while retaining every requested pair.
-Its normal archives remain format v6 for exploratory runs and format v7 for `publication-warm-v1`. If a pair
-fails after both fresh engines exist and an ordered comparison has started, the runner additionally preserves
-that failure-boundary timing evidence in immutable `comparison-failures.json`; such archives use format v8
-(exploratory) or v9 (publication). Factory failures do not fabricate a sidecar because no complete pair of
-engine-local timing reports exists. The stable `batch.json` denominator remains present in all four formats.
+Normal archives remain format v6 for exploratory runs and format v7 for `publication-warm-v1`. Factory failures
+remain in that stable batch ledger and do not fabricate engine timing evidence when one or both fresh instances
+never existed.
+
+If a pair fails after both fresh engines exist and an ordered comparison has started, the runner preserves
+failure-boundary timing evidence in immutable `comparison-failures.json`. The first sidecar formats v8/v9 are
+permanently frozen legacy evidence: they recorded pair order but not the repeated-batch `pair_index`, so repeated
+outer orders cannot always be joined unambiguously to one failed ledger row. They are not silently redefined.
+New contextual sidecars therefore use format v10 (exploratory) or v11 (publication) and record
+`comparison_failure_protocol = "ordered_comparison_failure_sidecar_v2"`, including the exact pair index/order.
+The stable `batch.json` denominator remains present in every repeated format.
 
 The publication protocol is intentionally warm-only. `cold_best_effort` remains valid descriptive metadata for
 exploratory work, but it is rejected by `publication-warm-v1`; writing “cold” into JSON is not proof that kernel,
@@ -88,18 +94,20 @@ invocation fails or is explicitly excluded, the same admission record is retaine
 archive, so the denominator of attempted publication runs remains auditable.
 
 For repeated batches, `batch.json` always retains included, failed, and explicitly excluded pair dispositions.
-When comparison-boundary evidence exists, `comparison-failures.json` separately retains pair order, repetition
-index, any already-completed first repetition, the failing ordered execution order, stable error class/message,
-and both engines' operational timing reports. `environment.json` and `index.json` record
-`comparison_failure_protocol = "ordered_comparison_failure_sidecar_v1"`. A failed operation's deterministic
+Contextual v10/v11 `comparison-failures.json` entries additionally retain `context.pair_index` and
+`context.pair_order`, the failed repetition index, any already-completed first repetition, the failing ordered
+execution order, stable error class/message, and both engines' operational timing reports. The nested pair-order
+value must match the surrounding context. `environment.json` and `index.json` record
+`comparison_failure_protocol = "ordered_comparison_failure_sidecar_v2"`. A failed operation's deterministic
 `work` remains `null` when the engine cannot prove completed work without guessing.
 
 ## What the gate proves — and what it does not
 
 The gate proves that the repository refused to label a run `publication_warm_v1` unless the required metadata,
 release-build condition, warm-only cache policy, target triple, and AB/BA repetition protocol were present. It
-does not independently verify that a human-supplied CPU/model/mount-options string is truthful, nor does it
-pin CPU affinity, disable turbo, control thermals, or establish a stable noise budget by itself.
+also preserves exact repeated-pair identity for newly captured failure sidecars. It does not independently verify
+that a human-supplied CPU/model/mount-options string is truthful, nor does it pin CPU affinity, disable turbo,
+control thermals, or establish a stable noise budget by itself.
 
 A real performance regression gate still requires a named pinned host and externally controlled operating
 conditions as required by the experimental constitution. Hosted CI remains correctness/build validation only;
