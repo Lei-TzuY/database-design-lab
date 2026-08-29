@@ -43,28 +43,33 @@ ENGINE.write_text(text)
 
 text = BTREE_COMMON.read_text()
 old = '''                let page_accesses = reopened.pager.read_page_calls();
-                operational_timing.reopen_samples.push(OperationalTimingSample {
-                    measured_step_index: operational_step_index,
-                    duration_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                    work: OperationalWork {
-                        unit: OperationalWorkUnit::BtreePageAccess,
-                        units_examined: page_accesses,
-                        bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
-                    },
-                });
+                operational_timing
+                    .reopen_samples
+                    .push(OperationalTimingSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns: u64::try_from(started.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX),
+                        work: OperationalWork {
+                            unit: OperationalWorkUnit::BtreePageAccess,
+                            units_examined: page_accesses,
+                            bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
+                        },
+                    });
 '''
 new = '''                let page_accesses = reopened.pager.read_page_calls();
                 let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 operational_timing.reopen_ns.push(duration_ns);
-                operational_timing.reopen_samples.push(OperationalTimingSample {
-                    measured_step_index: operational_step_index,
-                    duration_ns,
-                    work: OperationalWork {
-                        unit: OperationalWorkUnit::BtreePageAccess,
-                        units_examined: page_accesses,
-                        bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
-                    },
-                });
+                operational_timing
+                    .reopen_samples
+                    .push(OperationalTimingSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: OperationalWork {
+                            unit: OperationalWorkUnit::BtreePageAccess,
+                            units_examined: page_accesses,
+                            bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
+                        },
+                    });
 '''
 text = replace_once(text, old, new, "btree legacy timing projection")
 BTREE_COMMON.write_text(text)
@@ -127,17 +132,21 @@ LSM.write_text(text)
 
 text = EXPERIMENT.read_text()
 old = '''        fn reopen(&mut self) -> Result<()> {
-            self.operational_timing.reopen_samples.push(OperationalTimingSample {
-                measured_step_index: self.operational_step_index,
-                duration_ns: 1,
-                work: OperationalWork {
+            self.operational_timing
+                .reopen_samples
+                .push(OperationalTimingSample {
+                    measured_step_index: self.operational_step_index,
+                    duration_ns: 1,
+                    work: OperationalWork {
 '''
 new = '''        fn reopen(&mut self) -> Result<()> {
             self.operational_timing.reopen_ns.push(1);
-            self.operational_timing.reopen_samples.push(OperationalTimingSample {
-                measured_step_index: self.operational_step_index,
-                duration_ns: 1,
-                work: OperationalWork {
+            self.operational_timing
+                .reopen_samples
+                .push(OperationalTimingSample {
+                    measured_step_index: self.operational_step_index,
+                    duration_ns: 1,
+                    work: OperationalWork {
 '''
 text = replace_once(text, old, new, "fake legacy timing projection")
 EXPERIMENT.write_text(text)
