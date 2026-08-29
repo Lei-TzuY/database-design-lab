@@ -135,15 +135,17 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   reusable preflight rejects mismatched logical model, caller/concurrency contract, persistence class,
   distribution mode, ordered-range support, or key/value limits while allowing storage architecture and
   recovery mechanism to remain the experimental variables.
-- [ ] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.
-- [ ] Drive the common amplification contract from shared cross-engine traces. B+ tree and LSM now both
-  implement `AmplificationInstrumented` and return the same exact report shape; hand-computable tests
-  validate B+ tree page-access/data-page/retained-page accounting and the existing LSM consult/version/
-  WAL+SSTable accounting. Read work carries an explicit architecture-specific unit so structural counters
-  cannot be mislabeled as comparable device I/O. The remaining work is one shared trace runner and archived
-  per-engine raw evidence under identical trace inputs.
+- [x] Implement versioned reproducible point-read, range-scan, sequential-write, random-write, and mixed
+  traces. Generator revision 1 records the SplitMix64 seed and complete configuration, uses fixed-width
+  ordered binary keys and deterministic exact-length values, and separates setup from the measured window.
+- [x] Drive the common amplification contract from shared cross-engine traces. One runner now executes
+  setup and measured phases step by step against fresh B+ tree and LSM engines, refuses any logical
+  outcome mismatch, resets counters only after common setup, and emits exact common reports plus trace
+  and outcome fingerprints. Read work retains architecture-specific units so structural counters cannot
+  be mislabeled as comparable device I/O (`docs/phase4-trace-methodology.md`).
 - [ ] Measure recovery cost and compaction stall distributions.
-- [ ] Archive raw data and environment manifests; publish no result before this evidence exists.
+- [x] Archive raw structural evidence and environment manifests from all five fixed-seed profiles in CI.
+  Hosted-runner timings are not treated as performance results and no performance regression is gated.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
 
 ## Phase 5+ — selected extensions
