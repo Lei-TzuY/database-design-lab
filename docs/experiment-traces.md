@@ -159,14 +159,37 @@ All four engine targets plus the archive directory must be pairwise distinct and
 preflight occurs before either repetition is created, preventing the second half of a pair from silently reusing
 state or overwriting the first half.
 
+A methodological exclusion uses the same immutable publication boundary and the same planned target names, but
+adds `--exclude-reason`. The reason must contain 1..=4096 UTF-8 bytes after trimming. After trace/revision/path
+preflight succeeds, no engine is created and no measured operation executes. The command writes a format-v3
+`attempt.json` with `status = "excluded"` and the reason, plus the trace/environment/index. For example:
+
+```text
+db-lab experiment-archive-counterbalanced \
+  --trace mixed-42.json \
+  --first-btree-path btree-42-a.db \
+  --first-lsm-path lsm-42-a \
+  --second-btree-path btree-42-b.db \
+  --second-lsm-path lsm-42-b \
+  --revision 0123456789abcdef0123456789abcdef01234567 \
+  --archive-dir evidence/mixed-42-excluded \
+  --cache-state warm \
+  --exclude-reason "host load exceeded the frozen admission threshold"
+```
+
+If execution itself fails after preflight, the command also writes a format-v3 non-success attempt archive before
+returning the original database error with a non-zero exit status. `attempt.json` records `status = "failed"`,
+the stable `ErrorClass`, and the full error message. Partially created engine targets are intentionally left in
+place as forensic state; only a partially written evidence archive is removed if archive serialization fails.
+
 ## Scope boundary
 
 The trace and comparison layer now establishes canonical bounded logical inputs, explicit setup/measurement
 boundaries, lockstep outcome equality, optional whole-run order control, fresh AB/BA counterbalanced pairs,
-shared structural amplification reporting, and deterministic measured-step association for successful
-recovery/compaction work samples. It does **not** establish a fair latency benchmark by itself. Failed/excluded
-samples, an enforced cache/filesystem preparation protocol, and controlled-host pinning remain separate Phase 4
-work.
+shared structural amplification reporting, deterministic measured-step association for successful
+recovery/compaction work samples, and immutable run-level accounting for failed or explicitly excluded
+counterbalanced attempts. It does **not** establish a fair latency benchmark by itself. An enforced
+cache/filesystem preparation protocol and controlled-host pinning remain separate Phase 4 work.
 
 ## Evidence archives
 
@@ -179,7 +202,7 @@ declared cache state, and optional host/filesystem/storage labels. Existing arch
 failed multi-file write removes the partial archive directory. Do not put credentials, serial numbers, or other
 secrets into labels/notes.
 
-`db-lab experiment-archive-counterbalanced` creates a separate format-v2 archive rather than changing v1
+A successful `db-lab experiment-archive-counterbalanced` creates format-v2 evidence rather than changing v1
 semantics. It requires four fresh engine targets, runs one complete comparison in each whole-engine order, and
 writes `trace.json`, `counterbalanced.json`, `environment.json`, and `index.json`. The counterbalanced report
 retains both raw ordered comparisons. The environment repeats `pair_order`, records
@@ -187,6 +210,13 @@ retains both raw ordered comparisons. The environment repeats `pair_order`, reco
 v1. The v2 index names the counterbalanced payload explicitly, so archived evidence is self-describing without
 inferring methodology from filenames.
 
-Neither archive format makes timings comparable by itself. `cold_best_effort` is only a declaration, not proof
-that kernel/device caches were flushed. A controlled cache/filesystem procedure, explicit failed/excluded-attempt
-accounting, and controlled-host pinning remain mandatory before latency claims or regression thresholds.
+A non-success invocation of the same counterbalanced command creates format-v3 attempt evidence instead. The
+archive contains `trace.json`, `attempt.json`, `environment.json`, and `index.json`; the index records
+`attempt_protocol = "record_non_success_counterbalanced_attempts"`. An explicit exclusion records its bounded
+reason and does not instantiate engines. An execution failure records the common error class and message and
+still propagates the original error after the immutable archive is written. Thus a dataset can count successful
+v2 runs together with failed/excluded v3 attempts instead of silently conditioning on survivors.
+
+None of these archive formats makes timings comparable by itself. `cold_best_effort` is only a declaration, not
+proof that kernel/device caches were flushed. A controlled cache/filesystem procedure and controlled-host pinning
+remain mandatory before latency claims or regression thresholds.

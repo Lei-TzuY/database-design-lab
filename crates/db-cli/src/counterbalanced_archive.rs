@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, ValueEnum};
 use db_core::{
     compare_experiment_trace_counterbalanced, CounterbalancedExperimentComparisonReport,
-    CounterbalancedPairOrder, DbError, ExperimentTrace,
+    CounterbalancedPairOrder, DbError, ErrorClass, ExperimentTrace,
 };
 use db_storage_btree::{BPlusTree, BtreeError};
 use db_storage_lsm::LsmEngine;
@@ -17,7 +17,10 @@ use super::{
 };
 
 const COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 2;
+const COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION: u16 = 3;
 const COUNTERBALANCED_EXECUTION_PROTOCOL: &str = "fresh_counterbalanced_ab_ba";
+const COUNTERBALANCED_ATTEMPT_PROTOCOL: &str = "record_non_success_counterbalanced_attempts";
+const MAX_EXCLUSION_REASON_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CounterbalancedPairOrderKind {
@@ -80,6 +83,9 @@ pub(super) struct CounterbalancedArchiveArgs {
     /// Declared cache preparation state for both repetitions.
     #[arg(long, value_enum, default_value_t = CacheStateKind::Unspecified)]
     cache_state: CacheStateKind,
+    /// Record a methodological exclusion without creating either repetition.
+    #[arg(long)]
+    exclude_reason: Option<String>,
     /// Optional free-form experiment note. Do not include secrets.
     #[arg(long)]
     notes: Option<String>,
@@ -113,6 +119,35 @@ struct CounterbalancedEvidenceArchiveIndex {
     files: [&'static str; 3],
 }
 
+#[derive(Debug, Serialize)]
+struct CounterbalancedAttemptArchiveIndex {
+    format_version: u16,
+    repository_revision: String,
+    execution_protocol: &'static str,
+    attempt_protocol: &'static str,
+    files: [&'static str; 3],
+}
+
+#[derive(Debug, Serialize)]
+struct CounterbalancedAttemptRecord {
+    format_version: u16,
+    pair_order: CounterbalancedPairOrder,
+    #[serde(flatten)]
+    outcome: CounterbalancedAttemptOutcome,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CounterbalancedAttemptOutcome {
+    Failed {
+        error_class: ErrorClass,
+        error: String,
+    },
+    Excluded {
+        reason: String,
+    },
+}
+
 pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
     validate_revision(&args.revision)?;
     let trace = read_experiment_trace(&args.trace)?;
@@ -123,13 +158,94 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
         &args.second_lsm_path,
         &args.archive_dir,
     )?;
-
     let pair_order: CounterbalancedPairOrder = args.pair_order.into();
-    let mut btree_paths = [args.first_btree_path, args.second_btree_path].into_iter();
-    let mut lsm_paths = [args.first_lsm_path, args.second_lsm_path].into_iter();
+
+    if let Some(reason) = args.exclude_reason.as_deref() {
+        let reason = validate_exclusion_reason(reason)?;
+        let environment = build_environment(
+            COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+            pair_order,
+            &args,
+        )?;
+        let attempt = CounterbalancedAttemptRecord {
+            format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+            pair_order,
+            outcome: CounterbalancedAttemptOutcome::Excluded { reason },
+        };
+        return write_counterbalanced_attempt_archive(
+            &args.archive_dir,
+            &args.revision,
+            &trace,
+            &attempt,
+            &environment,
+        );
+    }
+
+    match execute_counterbalanced(&trace, pair_order, &args) {
+        Ok(comparison) => {
+            let environment = build_environment(
+                COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                pair_order,
+                &args,
+            )?;
+            write_counterbalanced_evidence_archive(
+                &args.archive_dir,
+                &args.revision,
+                &trace,
+                &comparison,
+                &environment,
+            )
+        }
+        Err(error) => {
+            let environment = build_environment(
+                COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                pair_order,
+                &args,
+            )?;
+            let attempt = CounterbalancedAttemptRecord {
+                format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                pair_order,
+                outcome: CounterbalancedAttemptOutcome::Failed {
+                    error_class: error.class(),
+                    error: error.to_string(),
+                },
+            };
+            write_counterbalanced_attempt_archive(
+                &args.archive_dir,
+                &args.revision,
+                &trace,
+                &attempt,
+                &environment,
+            )?;
+            Err(CliError::Database(error))
+        }
+    }
+}
+
+fn validate_exclusion_reason(reason: &str) -> Result<String, CliError> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.len() > MAX_EXCLUSION_REASON_BYTES {
+        return Err(CliError::Usage(format!(
+            "--exclude-reason must contain 1..={MAX_EXCLUSION_REASON_BYTES} UTF-8 bytes after trimming"
+        )));
+    }
+    Ok(reason.to_owned())
+}
+
+fn execute_counterbalanced(
+    trace: &ExperimentTrace,
+    pair_order: CounterbalancedPairOrder,
+    args: &CounterbalancedArchiveArgs,
+) -> Result<CounterbalancedExperimentComparisonReport, DbError> {
+    let mut btree_paths = [
+        args.first_btree_path.clone(),
+        args.second_btree_path.clone(),
+    ]
+    .into_iter();
+    let mut lsm_paths = [args.first_lsm_path.clone(), args.second_lsm_path.clone()].into_iter();
     let btree_cache_pages = args.btree_cache_pages;
-    let comparison = compare_experiment_trace_counterbalanced(
-        &trace,
+    compare_experiment_trace_counterbalanced(
+        trace,
         pair_order,
         || {
             let path = btree_paths.next().ok_or_else(|| {
@@ -149,10 +265,16 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
             })?;
             LsmEngine::create_new(path)
         },
-    )?;
+    )
+}
 
-    let environment = CounterbalancedEvidenceArchiveEnvironment {
-        format_version: COUNTERBALANCED_EVIDENCE_ARCHIVE_FORMAT_VERSION,
+fn build_environment(
+    format_version: u16,
+    pair_order: CounterbalancedPairOrder,
+    args: &CounterbalancedArchiveArgs,
+) -> Result<CounterbalancedEvidenceArchiveEnvironment, CliError> {
+    Ok(CounterbalancedEvidenceArchiveEnvironment {
+        format_version,
         repository_revision: args.revision.clone(),
         execution_protocol: COUNTERBALANCED_EXECUTION_PROTOCOL,
         pair_order,
@@ -165,24 +287,17 @@ pub(super) fn run(args: CounterbalancedArchiveArgs) -> Result<(), CliError> {
             "release"
         },
         rustc_version: rustc_version(),
-        host_label: args.host_label,
-        filesystem: args.filesystem,
-        storage_device: args.storage_device,
+        host_label: args.host_label.clone(),
+        filesystem: args.filesystem.clone(),
+        storage_device: args.storage_device.clone(),
         cache_state: args.cache_state.as_str(),
-        btree_cache_pages,
+        btree_cache_pages: args.btree_cache_pages,
         recorded_unix_seconds: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| CliError::Usage(format!("system clock precedes Unix epoch: {error}")))?
             .as_secs(),
-        notes: args.notes,
-    };
-    write_counterbalanced_evidence_archive(
-        &args.archive_dir,
-        &args.revision,
-        &trace,
-        &comparison,
-        &environment,
-    )
+        notes: args.notes.clone(),
+    })
 }
 
 fn ensure_fresh_counterbalanced_archive_targets(
@@ -264,9 +379,39 @@ fn write_counterbalanced_evidence_archive(
     result
 }
 
+fn write_counterbalanced_attempt_archive(
+    archive_dir: &Path,
+    revision: &str,
+    trace: &ExperimentTrace,
+    attempt: &CounterbalancedAttemptRecord,
+    environment: &CounterbalancedEvidenceArchiveEnvironment,
+) -> Result<(), CliError> {
+    fs::create_dir(archive_dir)?;
+    let result = (|| {
+        write_new_json(&archive_dir.join("trace.json"), trace)?;
+        write_new_json(&archive_dir.join("attempt.json"), attempt)?;
+        write_new_json(&archive_dir.join("environment.json"), environment)?;
+        write_new_json(
+            &archive_dir.join("index.json"),
+            &CounterbalancedAttemptArchiveIndex {
+                format_version: COUNTERBALANCED_ATTEMPT_ARCHIVE_FORMAT_VERSION,
+                repository_revision: revision.to_owned(),
+                execution_protocol: COUNTERBALANCED_EXECUTION_PROTOCOL,
+                attempt_protocol: COUNTERBALANCED_ATTEMPT_PROTOCOL,
+                files: ["trace.json", "attempt.json", "environment.json"],
+            },
+        )
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(archive_dir);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
     use serde_json::Value;
@@ -296,41 +441,11 @@ mod tests {
     #[test]
     fn real_counterbalanced_archive_records_pair_provenance() {
         let directory = tempdir().expect("temporary directory");
-        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
-            seed: 0x2026_0829,
-            profile: ExperimentProfile::RandomWrite,
-            operations: 4,
-            key_space: 8,
-            value_bytes: 8,
-            range_limit: 1,
-            reopen_every: None,
-        })
-        .expect("generate trace");
-        let trace_path = directory.path().join("trace.json");
-        fs::write(
-            &trace_path,
-            serde_json::to_vec_pretty(&trace).expect("serialize trace"),
-        )
-        .expect("write trace");
+        let trace_path = write_trace(&directory);
         let archive_dir = directory.path().join("archive");
 
-        run(CounterbalancedArchiveArgs {
-            trace: trace_path,
-            first_btree_path: directory.path().join("btree-a.db"),
-            first_lsm_path: directory.path().join("lsm-a"),
-            second_btree_path: directory.path().join("btree-b.db"),
-            second_lsm_path: directory.path().join("lsm-b"),
-            pair_order: CounterbalancedPairOrderKind::RightThenLeftFirst,
-            btree_cache_pages: 8,
-            revision: "test-revision".to_owned(),
-            archive_dir: archive_dir.clone(),
-            host_label: Some("test-host".to_owned()),
-            filesystem: None,
-            storage_device: None,
-            cache_state: CacheStateKind::Warm,
-            notes: None,
-        })
-        .expect("write counterbalanced archive");
+        run(base_args(&directory, trace_path, archive_dir.clone()))
+            .expect("write counterbalanced archive");
 
         let comparison: Value = serde_json::from_slice(
             &fs::read(archive_dir.join("counterbalanced.json")).expect("read comparison"),
@@ -361,5 +476,107 @@ mod tests {
             index["files"],
             serde_json::json!(["trace.json", "counterbalanced.json", "environment.json"])
         );
+    }
+
+    #[test]
+    fn excluded_attempt_is_archived_without_creating_engines() {
+        let directory = tempdir().expect("temporary directory");
+        let trace_path = write_trace(&directory);
+        let archive_dir = directory.path().join("excluded-archive");
+        let mut args = base_args(&directory, trace_path, archive_dir.clone());
+        args.exclude_reason = Some("host load exceeded the frozen admission threshold".to_owned());
+        let first_btree_path = args.first_btree_path.clone();
+        let first_lsm_path = args.first_lsm_path.clone();
+
+        run(args).expect("record excluded attempt");
+
+        assert!(!first_btree_path.exists());
+        assert!(!first_lsm_path.exists());
+        let attempt: Value = serde_json::from_slice(
+            &fs::read(archive_dir.join("attempt.json")).expect("read attempt"),
+        )
+        .expect("parse attempt");
+        assert_eq!(attempt["format_version"], 3);
+        assert_eq!(attempt["status"], "excluded");
+        assert_eq!(
+            attempt["reason"],
+            "host load exceeded the frozen admission threshold"
+        );
+
+        let index: Value =
+            serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
+                .expect("parse index");
+        assert_eq!(index["format_version"], 3);
+        assert_eq!(
+            index["attempt_protocol"],
+            "record_non_success_counterbalanced_attempts"
+        );
+    }
+
+    #[test]
+    fn failed_attempt_is_archived_and_still_returns_an_error() {
+        let directory = tempdir().expect("temporary directory");
+        let trace_path = write_trace(&directory);
+        let archive_dir = directory.path().join("failed-archive");
+        let mut args = base_args(&directory, trace_path, archive_dir.clone());
+        args.first_btree_path = directory.path().join("missing-parent").join("tree.db");
+
+        let error = run(args).expect_err("execution failure must retain non-zero CLI semantics");
+        assert!(error.to_string().contains("I/O error"));
+
+        let attempt: Value = serde_json::from_slice(
+            &fs::read(archive_dir.join("attempt.json")).expect("read attempt"),
+        )
+        .expect("parse attempt");
+        assert_eq!(attempt["format_version"], 3);
+        assert_eq!(attempt["status"], "failed");
+        assert_eq!(attempt["error_class"], "io");
+        assert!(attempt["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("I/O error")));
+    }
+
+    fn write_trace(directory: &tempfile::TempDir) -> PathBuf {
+        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 0x2026_0829,
+            profile: ExperimentProfile::RandomWrite,
+            operations: 4,
+            key_space: 8,
+            value_bytes: 8,
+            range_limit: 1,
+            reopen_every: None,
+        })
+        .expect("generate trace");
+        let trace_path = directory.path().join("trace.json");
+        fs::write(
+            &trace_path,
+            serde_json::to_vec_pretty(&trace).expect("serialize trace"),
+        )
+        .expect("write trace");
+        trace_path
+    }
+
+    fn base_args(
+        directory: &tempfile::TempDir,
+        trace: PathBuf,
+        archive_dir: PathBuf,
+    ) -> CounterbalancedArchiveArgs {
+        CounterbalancedArchiveArgs {
+            trace,
+            first_btree_path: directory.path().join("btree-a.db"),
+            first_lsm_path: directory.path().join("lsm-a"),
+            second_btree_path: directory.path().join("btree-b.db"),
+            second_lsm_path: directory.path().join("lsm-b"),
+            pair_order: CounterbalancedPairOrderKind::RightThenLeftFirst,
+            btree_cache_pages: 8,
+            revision: "test-revision".to_owned(),
+            archive_dir,
+            host_label: Some("test-host".to_owned()),
+            filesystem: None,
+            storage_device: None,
+            cache_state: CacheStateKind::Warm,
+            exclude_reason: None,
+            notes: None,
+        }
     }
 }

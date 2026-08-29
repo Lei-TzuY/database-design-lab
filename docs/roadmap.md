@@ -150,14 +150,15 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   the exact measured trace-step index and deterministic data-path work: B+ tree reopen page accesses/bytes,
   LSM reopen WAL+SSTable record versions/bytes, and LSM full-set compaction input record versions/bytes. Whole-run
   execution order is explicit, fresh AB/BA pairs are first-class in `db-core`, and
-  `experiment-archive-counterbalanced` preserves both repetitions plus pair-order provenance. Failed/excluded
-  attempts and an enforced cache/filesystem preparation protocol are still required before this item is complete.
+  `experiment-archive-counterbalanced` preserves both repetitions plus pair-order provenance. Non-success
+  invocations are now retained as immutable format-v3 `failed`/`excluded` attempt evidence rather than being
+  silently dropped. An enforced cache/filesystem preparation protocol is still required before this item is complete.
 - [x] Archive raw data and environment manifests before any result is publishable. The backward-compatible
   `db-lab experiment-archive` format v1 writes `trace.json`, `comparison.json`, `environment.json`, and
-  `index.json` for one fresh lockstep comparison. `db-lab experiment-archive-counterbalanced` adds a separate
-  format v2 requiring four fresh engine targets; it writes `counterbalanced.json` with both raw ordered runs and
-  records `pair_order` plus `execution_protocol = fresh_counterbalanced_ab_ba` while retaining the source/build/
-  host/cache metadata. Partial archive writes are removed on failure and existing targets are never overwritten.
+  `index.json` for one fresh lockstep comparison. Successful `db-lab experiment-archive-counterbalanced` runs
+  write format-v2 `counterbalanced.json` with both raw ordered runs and explicit pair/execution provenance;
+  execution failures or `--exclude-reason` write format-v3 `attempt.json` with stable failure class or bounded
+  exclusion reason. Partial archive writes are removed on failure and existing targets are never overwritten.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
 
 ## Phase 5+ — selected extensions
