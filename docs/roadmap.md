@@ -135,13 +135,15 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   reusable preflight rejects mismatched logical model, caller/concurrency contract, persistence class,
   distribution mode, ordered-range support, or key/value limits while allowing storage architecture and
   recovery mechanism to remain the experimental variables.
-- [ ] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.
-- [ ] Drive the common amplification contract from shared cross-engine traces. B+ tree and LSM now both
-  implement `AmplificationInstrumented` and return the same exact report shape; hand-computable tests
-  validate B+ tree page-access/data-page/retained-page accounting and the existing LSM consult/version/
-  WAL+SSTable accounting. Read work carries an explicit architecture-specific unit so structural counters
-  cannot be mislabeled as comparable device I/O. The remaining work is one shared trace runner and archived
-  per-engine raw evidence under identical trace inputs.
+- [x] Implement reproducible point-read, range-scan, sequential-write, random-write, and mixed traces.
+  `ExperimentTrace` v1 records the full generator config and stable SplitMix64 seed, separates deterministic
+  setup from the measured window, uses byte-order-preserving fixed-width keys, supports measured REOPEN,
+  and is exposed through `db-lab experiment-generate`.
+- [x] Drive the common amplification contract from shared cross-engine traces. `compare_experiment_trace`
+  applies capability preflight, executes identical setup, resets both instrumentation windows, runs the exact
+  same measured vector, rejects any logical-outcome divergence, and returns one self-contained trace/outcome
+  record plus per-engine capabilities and exact amplification evidence. A real B+ tree/LSM mixed-trace test
+  covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain explicitly non-device-I/O.
 - [ ] Measure recovery cost and compaction stall distributions.
 - [ ] Archive raw data and environment manifests; publish no result before this evidence exists.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
