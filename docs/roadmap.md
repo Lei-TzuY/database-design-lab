@@ -149,19 +149,21 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   B+ tree/LSM mixed-trace test covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain
   explicitly non-device-I/O.
 - [ ] Complete recovery-cost and compaction-stall distributions. Successful samples pair duration with exact
-  measured trace-step indices and deterministic data-path work. Whole-run order is explicit, fresh AB/BA pairs
-  are first-class, and repeated batches alternate outer pair order from a recorded seed while retaining every
-  requested pair as included, failed, or explicitly excluded. `db-lab-batch` archives the complete ledger with
-  deterministic fresh-instance layout; publication mode additionally enforces release-only `publication_warm_v1`
-  admission, complete host/storage/filesystem/build/analysis/noise metadata, and rejects unverified cold-cache
-  claims. Remaining blockers are duration/work capture for an individual failed internal REOPEN or compaction
-  operation plus controlled-host data collection and reviewed distribution analysis.
+  measured trace-step indices and deterministic data-path work. Failed B+ tree REOPEN and LSM compaction
+  operations retain duration, step, stable error class, and deterministic work only when completed work can be
+  proven without guessing. Whole-run order is explicit; fresh AB/BA pairs and repeated batches preserve the
+  failing ordered-run timing reports, the failed repetition index, and an already-completed first repetition.
+  `db-lab-batch` retains every requested pair as included, failed, or explicitly excluded and publication mode
+  enforces release-only `publication_warm_v1`, complete host/storage/filesystem/build/analysis/noise metadata,
+  and rejects unverified cold-cache claims. Remaining blockers are controlled-host data collection and reviewed
+  distribution analysis; repository/hosted-CI timing is not a performance baseline.
 - [x] Archive raw data and environment manifests before any result is publishable. The archive family remains
   versioned rather than silently mutating old evidence: single-run lockstep v1; exploratory counterbalanced
-  success v2 and failed/excluded v3; single-pair publication success v4 and failed/excluded v5; exploratory
-  repeated batch v6; and publication-admitted repeated batch v7. Every counterbalanced/repeated path preserves
-  raw order/attempt provenance, rejects existing archive targets, and removes partial archive directories on
-  multi-file write failure.
+  success v2 and failed/excluded v3; single-pair publication success v4 and failed/excluded v5; normal
+  exploratory/publication repeated batches v6/v7; and repeated batches with captured ordered-comparison failure
+  timing sidecars v8/v9. `comparison-failures.json` preserves pair/repetition/order provenance, any completed
+  first repetition, stable failure identity, and both engine timing reports without changing v6/v7 success
+  schemas. Every path rejects existing archive targets and removes partial multi-file archives on write failure.
 - [ ] Establish a controlled pinned performance host before adding regression gates. Publication admission
   records complete host/filesystem/build/noise metadata but does not itself pin CPU affinity, thermals, turbo,
   background load, or device/controller conditions; hosted CI remains correctness/build validation only.

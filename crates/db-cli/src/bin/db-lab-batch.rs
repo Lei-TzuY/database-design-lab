@@ -7,9 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use db_core::{
-    run_counterbalanced_experiment_batch, CounterbalancedExperimentBatchReport, DbError,
-    ExperimentAttemptAdmission, ExperimentInstanceContext, ExperimentTrace,
-    MAX_EXPERIMENT_BATCH_PAIRS,
+    run_counterbalanced_experiment_batch_captured, CounterbalancedComparisonFailureEvidence,
+    CounterbalancedExperimentBatchReport, DbError, ExperimentAttemptAdmission,
+    ExperimentInstanceContext, ExperimentTrace, MAX_EXPERIMENT_BATCH_PAIRS,
 };
 use db_storage_btree::{BPlusTree, BtreeError};
 use db_storage_lsm::LsmEngine;
@@ -21,8 +21,11 @@ const MAX_EXCLUSION_REASON_BYTES: usize = 4 * 1024;
 const MAX_PUBLICATION_METADATA_BYTES: usize = 4 * 1024;
 const BATCH_ARCHIVE_FORMAT_VERSION: u16 = 6;
 const BATCH_PUBLICATION_ARCHIVE_FORMAT_VERSION: u16 = 7;
+const BATCH_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION: u16 = 8;
+const BATCH_PUBLICATION_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION: u16 = 9;
 const BATCH_EXECUTION_PROTOCOL: &str = "fresh_counterbalanced_repeated_batch_v1";
 const BATCH_ATTEMPT_PROTOCOL: &str = "retain_all_requested_pairs_v1";
+const BATCH_COMPARISON_FAILURE_PROTOCOL: &str = "ordered_comparison_failure_sidecar_v1";
 const ENGINE_LAYOUT: &str = "pair-{pair_index:06}/repetition-{repetition_index}/{btree.db|lsm}";
 const PUBLICATION_ADMISSION_PROTOCOL: &str = "publication_warm_v1";
 const PUBLICATION_CACHE_POLICY: &str = "trace_induced_warm";
@@ -150,6 +153,8 @@ struct BatchArchiveEnvironment {
     repository_revision: String,
     execution_protocol: &'static str,
     attempt_protocol: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison_failure_protocol: Option<&'static str>,
     pair_seed: u64,
     requested_pairs: u32,
     engine_layout: &'static str,
@@ -176,8 +181,10 @@ struct BatchArchiveIndex {
     execution_protocol: &'static str,
     attempt_protocol: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    comparison_failure_protocol: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     admission_protocol: Option<&'static str>,
-    files: [&'static str; 3],
+    files: Vec<&'static str>,
 }
 
 #[derive(Debug, Error)]
@@ -224,16 +231,11 @@ fn run(args: Cli) -> Result<(), CliError> {
         current_build_profile(),
         rustc_host_triple(),
     )?;
-    let archive_format_version = if publication_admission.is_some() {
-        BATCH_PUBLICATION_ARCHIVE_FORMAT_VERSION
-    } else {
-        BATCH_ARCHIVE_FORMAT_VERSION
-    };
 
     fs::create_dir_all(&args.engine_root)?;
     let engine_root = args.engine_root.clone();
     let btree_cache_pages = args.btree_cache_pages;
-    let report = run_counterbalanced_experiment_batch(
+    let captured = run_counterbalanced_experiment_batch_captured(
         &trace,
         args.pair_seed,
         args.pairs,
@@ -254,23 +256,40 @@ fn run(args: Cli) -> Result<(), CliError> {
             None => ExperimentAttemptAdmission::Include,
         },
     )?;
-
-    let environment = build_environment(&args, archive_format_version, publication_admission)?;
+    let has_comparison_failures = !captured.comparison_failures.is_empty();
+    let archive_format_version =
+        select_archive_format_version(publication_admission.is_some(), has_comparison_failures);
+    let environment = build_environment(
+        &args,
+        archive_format_version,
+        publication_admission,
+        has_comparison_failures,
+    )?;
     write_batch_archive(
         &args.archive_dir,
         &args.revision,
         &trace,
-        &report,
+        &captured.batch,
+        &captured.comparison_failures,
         &environment,
     )?;
 
-    if report.failed_pairs > 0 {
+    if captured.batch.failed_pairs > 0 {
         return Err(CliError::BatchFailures {
-            failed_pairs: report.failed_pairs,
+            failed_pairs: captured.batch.failed_pairs,
             archive_dir: args.archive_dir.display().to_string(),
         });
     }
     Ok(())
+}
+
+const fn select_archive_format_version(publication: bool, has_comparison_failures: bool) -> u16 {
+    match (publication, has_comparison_failures) {
+        (false, false) => BATCH_ARCHIVE_FORMAT_VERSION,
+        (true, false) => BATCH_PUBLICATION_ARCHIVE_FORMAT_VERSION,
+        (false, true) => BATCH_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION,
+        (true, true) => BATCH_PUBLICATION_FAILURE_SIDECAR_ARCHIVE_FORMAT_VERSION,
+    }
 }
 
 fn read_experiment_trace(path: &Path) -> Result<ExperimentTrace, CliError> {
@@ -507,12 +526,15 @@ fn build_environment(
     args: &Cli,
     format_version: u16,
     publication_admission: Option<BatchPublicationAdmissionRecord>,
+    has_comparison_failures: bool,
 ) -> Result<BatchArchiveEnvironment, CliError> {
     Ok(BatchArchiveEnvironment {
         format_version,
         repository_revision: args.revision.clone(),
         execution_protocol: BATCH_EXECUTION_PROTOCOL,
         attempt_protocol: BATCH_ATTEMPT_PROTOCOL,
+        comparison_failure_protocol: has_comparison_failures
+            .then_some(BATCH_COMPARISON_FAILURE_PROTOCOL),
         pair_seed: args.pair_seed,
         requested_pairs: args.pairs,
         engine_layout: ENGINE_LAYOUT,
@@ -578,6 +600,7 @@ fn write_batch_archive(
     revision: &str,
     trace: &ExperimentTrace,
     report: &CounterbalancedExperimentBatchReport,
+    comparison_failures: &[CounterbalancedComparisonFailureEvidence],
     environment: &BatchArchiveEnvironment,
 ) -> Result<(), CliError> {
     fs::create_dir(archive_dir)?;
@@ -585,6 +608,14 @@ fn write_batch_archive(
         write_new_json(&archive_dir.join("trace.json"), trace)?;
         write_new_json(&archive_dir.join("batch.json"), report)?;
         write_new_json(&archive_dir.join("environment.json"), environment)?;
+        let mut files = vec!["trace.json", "batch.json", "environment.json"];
+        if !comparison_failures.is_empty() {
+            write_new_json(
+                &archive_dir.join("comparison-failures.json"),
+                &comparison_failures,
+            )?;
+            files.push("comparison-failures.json");
+        }
         write_new_json(
             &archive_dir.join("index.json"),
             &BatchArchiveIndex {
@@ -592,11 +623,12 @@ fn write_batch_archive(
                 repository_revision: revision.to_owned(),
                 execution_protocol: BATCH_EXECUTION_PROTOCOL,
                 attempt_protocol: BATCH_ATTEMPT_PROTOCOL,
+                comparison_failure_protocol: environment.comparison_failure_protocol,
                 admission_protocol: environment
                     .publication_admission
                     .as_ref()
                     .map(|_| PUBLICATION_ADMISSION_PROTOCOL),
-                files: ["trace.json", "batch.json", "environment.json"],
+                files,
             },
         )
     })();
@@ -622,14 +654,20 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
+    use db_core::{
+        generate_experiment_trace, CounterbalancedComparisonFailureEvidence,
+        CounterbalancedExperimentBatchReport, CounterbalancedPairOrder, ErrorClass,
+        ExperimentExecutionOrder, ExperimentGeneratorConfig, ExperimentProfile,
+        OperationalTimingFailureSample, OperationalTimingReport, OrderedExperimentFailureEvidence,
+    };
     use serde_json::Value;
     use tempfile::tempdir;
 
     use super::{
-        parse_exclusions, run, validate_publication_admission, AdmissionKind, CacheStateKind, Cli,
-        PUBLICATION_ADMISSION_PROTOCOL, PUBLICATION_CACHE_POLICY, PUBLICATION_DURABILITY_MODE,
-        PUBLICATION_PAIR_ORDER_POLICY,
+        build_environment, parse_exclusions, run, select_archive_format_version,
+        validate_publication_admission, write_batch_archive, AdmissionKind, CacheStateKind, Cli,
+        BATCH_COMPARISON_FAILURE_PROTOCOL, PUBLICATION_ADMISSION_PROTOCOL,
+        PUBLICATION_CACHE_POLICY, PUBLICATION_DURABILITY_MODE, PUBLICATION_PAIR_ORDER_POLICY,
     };
 
     #[test]
@@ -705,12 +743,15 @@ mod tests {
         assert_eq!(environment["requested_pairs"], 3);
         assert_eq!(environment["cache_state"], "warm");
         assert!(environment.get("publication_admission").is_none());
+        assert!(environment.get("comparison_failure_protocol").is_none());
+        assert!(!archive_dir.join("comparison-failures.json").exists());
 
         let index: Value =
             serde_json::from_slice(&fs::read(archive_dir.join("index.json")).expect("read index"))
                 .expect("parse index");
         assert_eq!(index["format_version"], 6);
         assert!(index.get("admission_protocol").is_none());
+        assert!(index.get("comparison_failure_protocol").is_none());
         assert_eq!(
             index["files"],
             serde_json::json!(["trace.json", "batch.json", "environment.json"])
@@ -722,6 +763,111 @@ mod tests {
         assert!(engine_root.join("pair-000000/repetition-0/lsm").exists());
         assert!(!engine_root.join("pair-000001").exists());
         assert!(engine_root.join("pair-000002/repetition-1/lsm").exists());
+    }
+
+    #[test]
+    fn archive_format_only_bumps_when_captured_failure_evidence_exists() {
+        assert_eq!(select_archive_format_version(false, false), 6);
+        assert_eq!(select_archive_format_version(true, false), 7);
+        assert_eq!(select_archive_format_version(false, true), 8);
+        assert_eq!(select_archive_format_version(true, true), 9);
+    }
+
+    #[test]
+    fn captured_comparison_failure_writes_immutable_sidecar() {
+        let directory = tempdir().expect("temporary directory");
+        let trace_path = write_trace(&directory);
+        let trace: db_core::ExperimentTrace =
+            serde_json::from_slice(&fs::read(&trace_path).expect("read generated trace"))
+                .expect("decode generated trace");
+        let args = base_args(
+            &directory,
+            trace_path,
+            directory.path().join("unused-engines"),
+            directory.path().join("archive"),
+        );
+        let failure_sample = OperationalTimingFailureSample {
+            measured_step_index: Some(1),
+            duration_ns: 123,
+            work: None,
+            error_class: ErrorClass::Io,
+        };
+        let mut right_timing = OperationalTimingReport::default();
+        right_timing
+            .compaction_stall_failure_samples
+            .push(failure_sample);
+        let failures = vec![CounterbalancedComparisonFailureEvidence {
+            pair_order: CounterbalancedPairOrder::LeftThenRightFirst,
+            repetition_index: 0,
+            completed_first: None,
+            ordered_failure: Box::new(OrderedExperimentFailureEvidence {
+                execution_order: ExperimentExecutionOrder::LeftThenRight,
+                error_class: ErrorClass::Io,
+                message: "synthetic compaction fault".to_owned(),
+                left_operational_timing: OperationalTimingReport::default(),
+                right_operational_timing: right_timing,
+            }),
+        }];
+        let report = CounterbalancedExperimentBatchReport {
+            trace: trace.clone(),
+            pair_seed: 0,
+            requested_pairs: 1,
+            included_pairs: 0,
+            failed_pairs: 1,
+            excluded_pairs: 0,
+            attempts: Vec::new(),
+        };
+        let environment = build_environment(&args, 8, None, true).expect("build v8 environment");
+        write_batch_archive(
+            &args.archive_dir,
+            &args.revision,
+            &trace,
+            &report,
+            &failures,
+            &environment,
+        )
+        .expect("write captured failure archive");
+
+        let sidecar: Value = serde_json::from_slice(
+            &fs::read(args.archive_dir.join("comparison-failures.json"))
+                .expect("read comparison failure sidecar"),
+        )
+        .expect("parse comparison failure sidecar");
+        assert_eq!(sidecar[0]["repetition_index"], 0);
+        assert_eq!(sidecar[0]["ordered_failure"]["error_class"], "io");
+        assert_eq!(
+            sidecar[0]["ordered_failure"]["right_operational_timing"]
+                ["compaction_stall_failure_samples"][0]["duration_ns"],
+            123
+        );
+
+        let environment: Value = serde_json::from_slice(
+            &fs::read(args.archive_dir.join("environment.json")).expect("read environment"),
+        )
+        .expect("parse environment");
+        assert_eq!(environment["format_version"], 8);
+        assert_eq!(
+            environment["comparison_failure_protocol"],
+            BATCH_COMPARISON_FAILURE_PROTOCOL
+        );
+        let index: Value = serde_json::from_slice(
+            &fs::read(args.archive_dir.join("index.json")).expect("read index"),
+        )
+        .expect("parse index");
+        assert_eq!(index["format_version"], 8);
+        assert_eq!(
+            index["comparison_failure_protocol"],
+            BATCH_COMPARISON_FAILURE_PROTOCOL
+        );
+        assert_eq!(
+            index["files"],
+            serde_json::json!([
+                "trace.json",
+                "batch.json",
+                "environment.json",
+                "comparison-failures.json"
+            ])
+        );
     }
 
     #[test]
