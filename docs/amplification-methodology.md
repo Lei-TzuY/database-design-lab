@@ -129,8 +129,24 @@ Operational work is architecture-specific and explicitly unit-tagged:
   samples.
 
 The compatibility duration vectors and structured vectors are appended together and tests require their
-indices/durations to agree. Successful-sample work accounting is therefore deterministic and trace-associated,
-but the roadmap item remains incomplete: failed/excluded recovery or compaction attempts are not retained,
-engine execution order is not counterbalanced, and the archive's declared cache/filesystem state is not an
-enforced protocol. Scheduler noise, build profile, host identity, cache state, filesystem, and storage device
-must still be controlled before timing distributions can support a performance claim.
+indices/durations to agree. Successful-sample work accounting is therefore deterministic and trace-associated.
+Whole-engine ordering is also explicit: ordered comparisons run one candidate's complete setup/measured window
+before the other, and a counterbalanced pair uses four fresh engine instances to execute one AB and one BA run.
+
+## Repeated-attempt ledger and exclusion boundary
+
+`run_counterbalanced_experiment_batch` is the non-lossy repeated-sampling primitive above one fresh AB/BA pair.
+The low bit of a recorded `pair_seed` chooses the first outer pair order and later pairs alternate deterministically.
+Every requested pair receives a zero-based pair index and one of three dispositions: `included`, `failed`, or
+`excluded`. Included entries retain the complete two-run counterbalanced report. Failed entries retain a stable
+`ErrorClass` plus diagnostic text; fresh-engine factory failures additionally identify left/right side and the
+0/1 repetition, while later comparison/runtime failures are labeled `comparison` without inventing a side.
+Excluded entries are decided before engine creation and require a non-empty caller-supplied reason. A failed pair
+does not abort later requested pairs, so the harness can preserve the sampling process instead of silently
+constructing a success-only distribution.
+
+This ledger closes only the pair-level survivorship/provenance gap. It does **not** yet measure duration/work for
+an individual failed REOPEN or compaction operation, and it is not yet the payload written by the immutable
+`experiment-archive` command. The archive's declared cache/filesystem state is also still metadata rather than an
+enforced preparation protocol. Scheduler noise, build profile, host identity, cache state, filesystem, and storage
+device must therefore still be controlled before timing distributions can support a performance claim.
