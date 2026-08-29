@@ -1,0 +1,44 @@
+name: Repeated attempt ledger finalizer
+
+on:
+  push:
+    branches:
+      - phase4-attempt-ledger
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase4-attempt-ledger
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply complementary methodology docs
+        run: python .github/scripts/finalize_repeated_attempt_docs.py
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+      - name: Commit validated docs
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/roadmap.md docs/amplification-methodology.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: validate repeated attempt ledger docs"
+          git push origin HEAD:phase4-attempt-ledger
