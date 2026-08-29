@@ -1,8 +1,8 @@
 use db_core::{
     AmplificationInstrumented, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
     DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingFailureSample,
-    OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample, OperationalWork,
-    OperationalWorkUnit, Persistence, StorageArchitecture,
+    OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample,
+    OperationalWork, OperationalWorkUnit, Persistence, StorageArchitecture,
 };
 use std::time::Instant;
 
@@ -135,8 +135,8 @@ impl AmplificationInstrumented for BPlusTree {
 #[cfg(test)]
 mod tests {
     use db_core::{
-        compare_workload, ByteString, ErrorClass, KvEngine, OperationalTimingInstrumented, Workload,
-        WorkloadStep, MAX_KEY_BYTES, MAX_VALUE_BYTES, WORKLOAD_FORMAT_VERSION,
+        compare_workload, ByteString, ErrorClass, KvEngine, OperationalTimingInstrumented,
+        Workload, WorkloadStep, MAX_KEY_BYTES, MAX_VALUE_BYTES, WORKLOAD_FORMAT_VERSION,
     };
     use db_storage_memory::MemoryEngine;
     use tempfile::tempdir;
@@ -167,7 +167,8 @@ mod tests {
         tree.set_operational_step_index(Some(17));
 
         tree.cache_capacity = 0;
-        let error = KvEngine::reopen(&mut tree).expect_err("zero cache capacity must reject reopen");
+        let error =
+            KvEngine::reopen(&mut tree).expect_err("zero cache capacity must reject reopen");
         assert_eq!(error.class(), ErrorClass::InvalidInput);
 
         let timing = tree.operational_timing_report();
@@ -179,7 +180,12 @@ mod tests {
         assert_eq!(failure.error_class, ErrorClass::InvalidInput);
         assert_eq!(failure.work, None);
         assert!(timing.compaction_stall_failure_samples.is_empty());
-        assert_eq!(tree.get(b"key").expect_err("failed reopen poisons handle").class(), ErrorClass::Poisoned);
+        assert_eq!(
+            tree.get(b"key")
+                .expect_err("failed reopen poisons handle")
+                .class(),
+            ErrorClass::Poisoned
+        );
     }
 
     #[test]
