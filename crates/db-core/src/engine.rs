@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{ByteString, DbError, Outcome, Result, Workload, WorkloadStep};
+use crate::{ByteString, DbError, ErrorClass, Outcome, Result, Workload, WorkloadStep};
 
 /// Maximum key size in the first common KV semantics.
 pub const MAX_KEY_BYTES: usize = 4 * 1024;
@@ -183,10 +183,29 @@ pub struct OperationalTimingSample {
     pub work: OperationalWork,
 }
 
-/// Raw process-local successful recovery and compaction-stall samples.
+/// One failed synchronous operation sample associated with an experiment step when available.
 ///
-/// Duration plus deterministic work is evidence to archive, not a performance claim: failed/excluded attempts,
-/// execution-order counterbalancing, cache/filesystem protocol, host pinning, and scheduler/device controls remain
+/// `work` is optional by design. A failed operation may not expose enough validated state to reconstruct
+/// deterministic work without guessing; callers must preserve `None` rather than substituting planned or
+/// partially observed work under a successful-sample accounting unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OperationalTimingFailureSample {
+    /// Zero-based measured experiment step that triggered this sample, or `None` outside a measured runner.
+    pub measured_step_index: Option<u64>,
+    /// Wall-clock time elapsed before the operation returned an error.
+    pub duration_ns: u64,
+    /// Deterministic completed work when the failing path can prove it under the normal accounting boundary.
+    pub work: Option<OperationalWork>,
+    /// Stable coarse class of the returned operation error.
+    pub error_class: ErrorClass,
+}
+
+/// Raw process-local recovery and compaction-stall samples.
+///
+/// Successful samples preserve the original nanosecond projections plus deterministic work. Failed
+/// samples are kept separately so they cannot enter a success-only latency distribution by accident.
+/// Duration/work evidence is not a performance claim: attempt retention, execution-order
+/// counterbalancing, cache/filesystem protocol, host pinning, and scheduler/device controls remain
 /// required before durations are compared across engines or revisions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct OperationalTimingReport {
@@ -198,6 +217,12 @@ pub struct OperationalTimingReport {
     pub reopen_samples: Vec<OperationalTimingSample>,
     /// Successful synchronous compaction samples with deterministic work and measured-step association.
     pub compaction_stall_samples: Vec<OperationalTimingSample>,
+    /// Failed same-handle `REOPEN` attempts. Omitted from serialized reports when empty for schema compatibility.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reopen_failure_samples: Vec<OperationalTimingFailureSample>,
+    /// Failed synchronous compactions. Omitted from serialized reports when empty for schema compatibility.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub compaction_stall_failure_samples: Vec<OperationalTimingFailureSample>,
 }
 
 /// Reset/context/report surface for operational samples collected during an experiment window.
