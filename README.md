@@ -21,12 +21,12 @@ engine:
 
 | Crate | Implemented role |
 | --- | --- |
-| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generator, execution/differential harness, experiment compatibility preflight, and common amplification report schema |
+| `db-core` | Binary KV semantics, explicit capabilities, versioned workload model, stable seeded generators, execution/differential harness, experiment compatibility preflight, versioned Phase 4 cross-engine traces, logical-equality comparison runner, and common amplification report schema |
 | `db-storage-memory` | Deterministic in-memory reference/oracle engine |
 | `db-storage-log` | Standalone, caller-serialized, checksummed append-only engine with tombstones, replay, reopen, inspection, verification, and incomplete-final-append recovery |
 | `db-storage-btree` | Common persistent `KvEngine` with fixed 4 KiB checksummed pages, mirrored superblocks, COW `GET`/`PUT`/`DELETE`/`REOPEN`, half-open ordered `range_scan`, split/rebalance/root contraction, reachability-derived page reuse, overflow-backed 4 KiB keys and 1 MiB values, reachable-tree validation, bounded validated-page caching, and exact structural amplification instrumentation |
 | `db-storage-lsm` | Common persistent `KvEngine` with checksummed segmented WALs, ordered MemTables, indexed/checksummed immutable SSTables, validated embedded Bloom filters, Manifest-v5 L0/L1, tombstone-GC, and SSTable-allocation metadata, crash-published full-set compaction, mirrored `CURRENT`, WAL/SSTable/manifest reclamation, half-open range scans, deterministic compaction differential tests, and the shared exact amplification report contract |
-| `db-cli` | `db-lab generate`, `run`, `differential`, `verify`, and `inspect` |
+| `db-cli` | `db-lab generate`, `run`, `differential`, `experiment`, `verify`, and `inspect` |
 
 The append log is the common persistent correctness foundation, not a disguised B+ tree or partial LSM.
 The B+ tree uses a separate page file whose two mirrored superblocks define the committed physical
@@ -83,9 +83,9 @@ reports raw integer numerator/denominator pairs for point SSTable consults per G
 decoded per range result, WAL+flush+compaction-output data bytes per acknowledged logical mutation byte,
 and authoritative SSTable bytes per durable live key+value byte. These are deliberately engine-level
 structural/data-path counters: manifest/CURRENT bytes, filesystem metadata, cache/device traffic, and
-hardware writeback are not silently folded into them. The current one-run L1 policy remains correctness
-evidence rather than a production leveled strategy, so this is still not a fair B+ tree performance
-comparison participant.
+hardware writeback are not silently folded into them. The current one-run L1 policy remains a
+correctness-first experimental design rather than a production leveled strategy; controlled timing and
+device-I/O comparison remain deliberately separate from the structural evidence below.
 
 Both persistent candidates now implement `db_core::AmplificationInstrumented` and return the same
 `AmplificationReport` shape. That does **not** make their structural read numerators interchangeable:
@@ -96,14 +96,26 @@ to agree while deliberately allowing storage architecture and recovery mechanism
 `docs/amplification-methodology.md` for exact accounting boundaries. Device I/O, cache-miss attribution,
 latency distributions, and controlled-host performance measurements remain later Phase 4 evidence.
 
+Phase 4 now adds a separate versioned experiment-trace schema for fair common inputs. Generator revision 1
+records the SplitMix64 seed and full configuration and produces point-read, range-scan, sequential-write,
+random-write, and mixed profiles over fixed-width ordered binary keys and deterministic exact-length
+values. Read/mixed profiles establish identical setup state outside the measured amplification window.
+The shared runner checks every setup outcome on both engines, resets both instrumentation windows, then
+checks every measured outcome before emitting either engine's report. Trace and common-outcome
+fingerprints make archived evidence identifiable without pretending that FNV-1a is a cryptographic
+integrity mechanism. CI executes all five profiles with a fixed configuration and archives the raw JSON
+plus a runner/toolchain manifest. These artifacts are reproducibility and structural/data-path evidence,
+not hosted-runner performance results; see `docs/phase4-trace-methodology.md`.
+
 Current common semantics allow empty and arbitrary binary keys/values, cap keys at 4 KiB and values
 at 1 MiB, distinguish missing values from empty values, and expose `PUT`, `GET`, `DELETE`, `REOPEN`,
 and a bounded half-open ordered range API `[start, end)`, with `end = None` meaning unbounded. The
 in-memory oracle, B+ tree, and LSM MemTables advertise ordered range support; the append log deliberately
-does not, because its replay `BTreeMap` is not an on-disk ordered access path. Workload schema v1 still
-serializes point/lifecycle steps only; reproducible generated range traces remain Phase 4 work. Transactions,
-multi-process writers, snapshot/replication-aware tombstone GC, generalized multi-run/multi-level compaction,
-replication, SQL, MVCC, Raft, graph, time-series, and columnar execution are not implemented.
+does not, because its replay `BTreeMap` is not an on-disk ordered access path. General workload schema v1
+still serializes point/lifecycle steps only; the separate Phase 4 experiment trace v1 carries the shared
+range and fair-write profiles used by the B+ tree/LSM comparison. Transactions, multi-process writers,
+snapshot/replication-aware tombstone GC, generalized multi-run/multi-level compaction, replication, SQL,
+MVCC, Raft, graph, time-series, and columnar execution are not implemented.
 
 ## Run the laboratory
 
@@ -129,9 +141,27 @@ cargo run -p db-cli -- run --engine lsm --path lsm-dir \
   fixtures/workloads/semantics-v1.json
 ```
 
+Run the same reproducible Phase 4 trace against fresh B+ tree and LSM state and write raw structural
+evidence:
+
+```console
+cargo run --locked -p db-cli -- experiment \
+  --profile mixed \
+  --seed 15111065706836454659 \
+  --operations 256 \
+  --key-space 512 \
+  --value-bytes 512 \
+  --range-width 32 \
+  --reopen-every 64 \
+  --btree-path target/mixed.btree \
+  --lsm-path target/mixed.lsm \
+  --output target/mixed-evidence.json
+```
+
 Workload byte strings are lowercase hexadecimal in JSON. Generated workloads record their seed and
 schema version. `differential` refuses to reuse an existing persistent path so prior state cannot
-silently contaminate a correctness comparison.
+silently contaminate a correctness comparison. `experiment` likewise requires fresh B+ tree and LSM
+paths through the underlying engine constructors.
 
 ## Persistence and recovery contract
 
@@ -202,13 +232,18 @@ handle is poisoned and must be reopened. See [the append-log format](docs/on-dis
   recovery, deterministic MemTable freezing, and reclamation boundary.
 - [LSM SSTable/manifest format](docs/lsm-sstable-manifest-format.md): immutable sorted tables, Manifest v2
   WAL binding, mirrored CURRENT publication, WAL rotation/reclamation, and recovery states.
+- [Amplification methodology](docs/amplification-methodology.md): common exact report schema and the
+  architecture-specific boundaries of current structural/data-path counters.
+- [Phase 4 trace methodology](docs/phase4-trace-methodology.md): reproducible cross-engine profiles,
+  logical-equality gating, setup/measurement separation, fingerprints, and the evidence boundary.
 - [Roadmap](docs/roadmap.md): evidence-linked completed items and deliberately deferred phases.
 
 GitHub Actions runs formatting, Clippy with warnings denied, tests, and rustdoc on stable Rust, checks
 the declared Rust 1.85 minimum, and runs tests on Linux, macOS, and Windows. Persistent formats use
-explicit endian conversion and no platform-specific filesystem API. Hosted CI timing is smoke evidence
-only; this repository publishes no performance result and gates no performance regression without a
-controlled host.
+explicit endian conversion and no platform-specific filesystem API. A dedicated Phase 4 CI job also
+runs all five fixed-seed B+ tree/LSM profiles and archives their raw structural evidence plus the runner
+and toolchain manifest. Hosted CI timing is smoke evidence only; this repository publishes no timing
+performance result and gates no performance regression without a controlled host.
 
 ## License
 
