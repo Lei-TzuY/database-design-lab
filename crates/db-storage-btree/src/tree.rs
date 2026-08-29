@@ -79,6 +79,7 @@ pub struct BPlusTree {
     cache_capacity: usize,
     instrumentation: BtreeInstrumentation,
     operational_timing: OperationalTimingReport,
+    operational_step_index: Option<u64>,
 }
 
 impl BPlusTree {
@@ -90,6 +91,7 @@ impl BPlusTree {
             cache_capacity,
             instrumentation: BtreeInstrumentation::default(),
             operational_timing: OperationalTimingReport::default(),
+            operational_step_index: None,
         })
     }
 
@@ -101,6 +103,7 @@ impl BPlusTree {
             cache_capacity,
             instrumentation: BtreeInstrumentation::default(),
             operational_timing: OperationalTimingReport::default(),
+            operational_step_index: None,
         };
         tree.validate_reachable_tree()?;
         tree.refresh_reusable_pages()?;
