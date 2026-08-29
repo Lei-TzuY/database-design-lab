@@ -146,10 +146,12 @@ where
                         failed_pairs = failed_pairs.saturating_add(1);
                         let (source, comparison_failure) = error.into_parts();
                         if let Some(evidence) = comparison_failure {
-                            comparison_failures.push(CounterbalancedBatchComparisonFailureEvidence {
-                                context,
-                                failure: *evidence,
-                            });
+                            comparison_failures.push(
+                                CounterbalancedBatchComparisonFailureEvidence {
+                                    context,
+                                    failure: *evidence,
+                                },
+                            );
                         }
                         let class = source.class();
                         let message = source.to_string();
