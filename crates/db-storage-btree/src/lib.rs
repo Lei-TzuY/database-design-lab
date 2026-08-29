@@ -19,7 +19,7 @@ use thiserror::Error;
 
 mod tree;
 
-pub use tree::{BPlusTree, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
+pub use tree::{BPlusTree, BtreeInstrumentation, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
 
 /// Fixed physical page size for B+ tree format v1.
 pub const PAGE_SIZE: usize = 4096;
@@ -374,6 +374,8 @@ pub struct Pager {
     active: Superblock,
     cache: PageCache,
     recovered_allocation: Option<RecoveredAllocation>,
+    read_page_calls: u64,
+    data_page_bytes_written: u64,
     poisoned: bool,
     #[cfg(test)]
     fault_spec: Option<FaultSpec>,
@@ -421,6 +423,8 @@ impl Pager {
             active: first,
             cache: PageCache::new(cache_capacity),
             recovered_allocation: None,
+            read_page_calls: 0,
+            data_page_bytes_written: 0,
             poisoned: false,
             #[cfg(test)]
             fault_spec: None,
@@ -488,6 +492,8 @@ impl Pager {
             active,
             cache: PageCache::new(cache_capacity),
             recovered_allocation,
+            read_page_calls: 0,
+            data_page_bytes_written: 0,
             poisoned: false,
             #[cfg(test)]
             fault_spec: None,
@@ -642,30 +648,30 @@ impl Pager {
         &mut self,
         offset: u64,
         bytes: &[u8],
-        _kind: DurableWriteKind,
+        kind: DurableWriteKind,
     ) -> Result<()> {
         #[cfg(test)]
         {
             let event_index = self.fault_trace.len();
-            self.fault_trace.push(_kind);
+            self.fault_trace.push(kind);
             if let Some(spec) = self.fault_spec {
                 if spec.event_index == event_index {
                     match spec.mode {
                         FaultMode::BeforeWrite => {
-                            return Err(injected_fault(_kind, spec.mode));
+                            return Err(injected_fault(kind, spec.mode));
                         }
                         FaultMode::TornWrite => {
                             let prefix = (bytes.len() / 2).max(1);
                             self.file.seek(SeekFrom::Start(offset))?;
                             self.file.write_all(&bytes[..prefix])?;
                             self.file.sync_data()?;
-                            return Err(injected_fault(_kind, spec.mode));
+                            return Err(injected_fault(kind, spec.mode));
                         }
                         FaultMode::AfterSync => {
                             self.file.seek(SeekFrom::Start(offset))?;
                             self.file.write_all(bytes)?;
                             self.file.sync_data()?;
-                            return Err(injected_fault(_kind, spec.mode));
+                            return Err(injected_fault(kind, spec.mode));
                         }
                     }
                 }
@@ -675,6 +681,14 @@ impl Pager {
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(bytes)?;
         self.file.sync_data()?;
+        if matches!(
+            kind,
+            DurableWriteKind::AppendPage(_) | DurableWriteKind::RecycledPage(_)
+        ) {
+            self.data_page_bytes_written = self
+                .data_page_bytes_written
+                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        }
         Ok(())
     }
 
@@ -695,10 +709,21 @@ impl Pager {
         &self.fault_trace
     }
 
+    /// Process-local logical page-access count used by higher-level instrumentation snapshots.
+    pub(crate) const fn read_page_calls(&self) -> u64 {
+        self.read_page_calls
+    }
+
+    /// Process-local successfully synchronized data-page bytes written since this pager was opened.
+    pub(crate) const fn data_page_bytes_written(&self) -> u64 {
+        self.data_page_bytes_written
+    }
+
     /// Reads and validates one committed data page.
     pub fn read_page(&mut self, page_id: u64) -> Result<Page> {
         self.ensure_usable()?;
         self.validate_committed_page_id(page_id)?;
+        self.read_page_calls = self.read_page_calls.saturating_add(1);
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
         }

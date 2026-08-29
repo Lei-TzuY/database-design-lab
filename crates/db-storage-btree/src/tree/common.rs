@@ -1,6 +1,6 @@
 use db_core::{
-    ConcurrencyMode, CrashRecovery, DbError, DistributionMode, EngineCapabilities, KvEngine,
-    LogicalModel, Persistence, StorageArchitecture,
+    AmplificationInstrumented, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, StorageArchitecture,
 };
 
 use super::{BPlusTree, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
@@ -59,8 +59,10 @@ impl KvEngine for BPlusTree {
 
     fn reopen(&mut self) -> db_core::Result<()> {
         let path = self.path().to_path_buf();
+        let instrumentation = self.instrumentation;
         match BPlusTree::open(&path, self.cache_capacity) {
-            Ok(reopened) => {
+            Ok(mut reopened) => {
+                reopened.instrumentation = instrumentation;
                 *self = reopened;
                 Ok(())
             }
@@ -69,6 +71,16 @@ impl KvEngine for BPlusTree {
                 Err(common_error(error))
             }
         }
+    }
+}
+
+impl AmplificationInstrumented for BPlusTree {
+    fn reset_amplification(&mut self) {
+        self.reset_instrumentation();
+    }
+
+    fn amplification_report(&mut self) -> db_core::Result<AmplificationReport> {
+        BPlusTree::amplification_report(self).map_err(common_error)
     }
 }
 

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use db_core::KvEngine;
+use db_core::{KvEngine, ReadWorkUnit};
 use db_storage_memory::MemoryEngine;
 use tempfile::tempdir;
 
@@ -156,7 +156,7 @@ fn amplification_counters_match_hand_computable_compaction_and_read_trace() {
         }
     );
     assert_eq!(
-        report.sorted_table_bytes_per_durable_live_byte,
+        report.primary_structure_bytes_per_live_byte,
         AmplificationRatio {
             numerator: physical_after_compaction,
             denominator: u64::try_from(8 * logical_per_put).expect("durable bytes fit u64"),
@@ -194,28 +194,36 @@ fn amplification_counters_match_hand_computable_compaction_and_read_trace() {
         .amplification_report()
         .expect("layered amplification report");
     assert_eq!(
-        layered_report.point_read_tables_per_get,
+        layered_report.point_read.ratio,
         AmplificationRatio {
             numerator: 5,
             denominator: 3,
         }
     );
     assert_eq!(
-        layered_report.range_versions_per_result,
+        layered_report.point_read.unit,
+        ReadWorkUnit::LsmSstableConsult
+    );
+    assert_eq!(
+        layered_report.range_read.ratio,
         AmplificationRatio {
             numerator: 10,
             denominator: 9,
         }
     );
     assert_eq!(
+        layered_report.range_read.unit,
+        ReadWorkUnit::LsmSstableVersionDecoded
+    );
+    assert_eq!(
         layered_report
-            .sorted_table_bytes_per_durable_live_byte
+            .primary_structure_bytes_per_live_byte
             .numerator,
         canonical_sstable_bytes(&path)
     );
     assert_eq!(
         layered_report
-            .sorted_table_bytes_per_durable_live_byte
+            .primary_structure_bytes_per_live_byte
             .denominator,
         u64::try_from(9 * logical_per_put).expect("layered durable bytes fit u64")
     );
