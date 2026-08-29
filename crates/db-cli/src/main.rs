@@ -5,9 +5,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use db_core::{
-    compare_workload, execute_workload, generate_workload, DbError, DifferentialError,
-    GeneratorConfig, KvEngine, Outcome, Workload,
+    compare_workload, execute_workload, generate_experiment_trace, generate_workload,
+    run_amplification_comparison, DbError, DifferentialError, ExperimentComparisonReport,
+    ExperimentConfig, ExperimentProfile, GeneratorConfig, KvEngine, Outcome, Workload,
 };
+use db_storage_btree::{BPlusTree, BtreeError};
 use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
 use db_storage_lsm::LsmEngine;
 use db_storage_memory::MemoryEngine;
@@ -72,6 +74,42 @@ enum Command {
         /// Versioned workload JSON file.
         workload: PathBuf,
     },
+    /// Run one deterministic Phase 4 trace against fresh B+ tree and LSM engines.
+    Experiment {
+        /// Reproducible operation family.
+        #[arg(long, value_enum)]
+        profile: ExperimentProfileKind,
+        /// Recorded SplitMix64 seed.
+        #[arg(long)]
+        seed: u64,
+        /// Number of measured logical operations, excluding inserted reopen actions.
+        #[arg(long, default_value_t = 256)]
+        operations: u32,
+        /// Cardinality of the ordered fixed-width key domain.
+        #[arg(long, default_value_t = 512)]
+        key_space: u32,
+        /// Exact generated value size.
+        #[arg(long, default_value_t = 512)]
+        value_bytes: u32,
+        /// Width and result limit of generated range scans.
+        #[arg(long, default_value_t = 32)]
+        range_width: u32,
+        /// Reopen both engines after this many measured logical operations.
+        #[arg(long)]
+        reopen_every: Option<u32>,
+        /// B+ tree validated-page cache capacity. Structural counters include cache hits.
+        #[arg(long, default_value_t = 128)]
+        btree_cache_pages: usize,
+        /// New B+ tree page file. Existing paths are rejected.
+        #[arg(long)]
+        btree_path: PathBuf,
+        /// New LSM directory. Existing paths are rejected.
+        #[arg(long)]
+        lsm_path: PathBuf,
+        /// Optional new JSON evidence file. When omitted, evidence is printed to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Validate an append-log file without modifying it.
     Verify {
         /// Append-log file.
@@ -100,6 +138,27 @@ enum PersistentEngineKind {
     Lsm,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExperimentProfileKind {
+    PointRead,
+    RangeScan,
+    SequentialWrite,
+    RandomWrite,
+    Mixed,
+}
+
+impl From<ExperimentProfileKind> for ExperimentProfile {
+    fn from(value: ExperimentProfileKind) -> Self {
+        match value {
+            ExperimentProfileKind::PointRead => Self::PointRead,
+            ExperimentProfileKind::RangeScan => Self::RangeScan,
+            ExperimentProfileKind::SequentialWrite => Self::SequentialWrite,
+            ExperimentProfileKind::RandomWrite => Self::RandomWrite,
+            ExperimentProfileKind::Mixed => Self::Mixed,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RunReport {
     engine: &'static str,
@@ -118,12 +177,22 @@ struct DifferentialCliReport {
     steps_checked: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct ExperimentCliReport {
+    harness: &'static str,
+    harness_version: &'static str,
+    btree_cache_pages: usize,
+    comparison: ExperimentComparisonReport,
+}
+
 #[derive(Debug, Error)]
 enum CliError {
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
     Database(#[from] DbError),
+    #[error(transparent)]
+    Btree(#[from] BtreeError),
     #[error(transparent)]
     Differential(#[from] DifferentialError),
     #[error("I/O error: {0}")]
@@ -209,6 +278,50 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
                 }
             }
         }
+        Command::Experiment {
+            profile,
+            seed,
+            operations,
+            key_space,
+            value_bytes,
+            range_width,
+            reopen_every,
+            btree_cache_pages,
+            btree_path,
+            lsm_path,
+            output,
+        } => {
+            if btree_cache_pages == 0 {
+                return Err(CliError::Usage(
+                    "--btree-cache-pages must be greater than zero".to_owned(),
+                ));
+            }
+            let trace = generate_experiment_trace(
+                profile.into(),
+                ExperimentConfig {
+                    seed,
+                    operations,
+                    key_space,
+                    value_bytes,
+                    range_width,
+                    reopen_every,
+                },
+            )?;
+            let mut btree = BPlusTree::create_new(btree_path, btree_cache_pages)?;
+            let mut lsm = LsmEngine::create_new(lsm_path)?;
+            let comparison = run_amplification_comparison(&mut btree, &mut lsm, &trace)?;
+            let report = ExperimentCliReport {
+                harness: "phase4-structural-amplification",
+                harness_version: env!("CARGO_PKG_VERSION"),
+                btree_cache_pages,
+                comparison,
+            };
+            if let Some(output) = output {
+                write_new_json(&output, &report)
+            } else {
+                write_stdout_json(&report)
+            }
+        }
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
             write_stdout_json(&report)
@@ -287,7 +400,9 @@ mod tests {
     use clap::Parser;
     use db_core::Workload;
 
-    use super::{Cli, Command, EngineKind, PersistentEngineKind};
+    use super::{
+        Cli, Command, EngineKind, ExperimentProfileKind, PersistentEngineKind,
+    };
 
     #[test]
     fn suggested_run_shape_parses() {
@@ -352,6 +467,43 @@ mod tests {
             differential.command,
             Command::Differential {
                 engine: PersistentEngineKind::Lsm,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn phase4_experiment_shape_parses() {
+        let experiment = Cli::try_parse_from([
+            "db-lab",
+            "experiment",
+            "--profile",
+            "mixed",
+            "--seed",
+            "1234",
+            "--operations",
+            "128",
+            "--key-space",
+            "256",
+            "--value-bytes",
+            "512",
+            "--range-width",
+            "16",
+            "--reopen-every",
+            "32",
+            "--btree-path",
+            "btree.db",
+            "--lsm-path",
+            "lsm-dir",
+            "--output",
+            "evidence.json",
+        ])
+        .expect("parse Phase 4 experiment command");
+        assert!(matches!(
+            experiment.command,
+            Command::Experiment {
+                profile: ExperimentProfileKind::Mixed,
+                seed: 1234,
                 ..
             }
         ));
