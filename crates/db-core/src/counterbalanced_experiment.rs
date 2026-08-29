@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    compare_experiment_trace_ordered, AmplificationInstrumented, DbError,
-    ExperimentExecutionOrder, ExperimentTrace, KvEngine, OperationalTimingInstrumented,
-    OrderedExperimentComparisonReport, Result,
+    compare_experiment_trace_ordered, AmplificationInstrumented, DbError, ExperimentExecutionOrder,
+    ExperimentTrace, KvEngine, OperationalTimingInstrumented, OrderedExperimentComparisonReport,
+    Result,
 };
 
 /// Which whole-run engine order is executed first in one two-run counterbalanced pair.
@@ -181,7 +181,10 @@ mod tests {
             report.second.execution_order,
             ExperimentExecutionOrder::RightThenLeft
         );
-        assert_eq!(report.first.comparison.outcomes, report.second.comparison.outcomes);
+        assert_eq!(
+            report.first.comparison.outcomes,
+            report.second.comparison.outcomes
+        );
         assert_eq!(
             events.borrow().as_slice(),
             ["left", "left", "right", "right", "right", "right", "left", "left"]
