@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     validate_experiment_compatibility, validate_key, validate_key_value, validate_range_scan,
     AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,
-    KvEngine, Result, MAX_VALUE_BYTES,
+    KvEngine, OperationalTimingInstrumented, OperationalTimingReport, Result, MAX_VALUE_BYTES,
 };
 
 /// JSON schema version for Phase 4 experiment traces.
@@ -226,6 +226,8 @@ pub enum ExperimentOutcome {
 pub struct ExperimentEngineEvidence {
     pub capabilities: EngineCapabilities,
     pub amplification: AmplificationReport,
+    /// Raw successful recovery/compaction durations for the measured window.
+    pub operational_timing: OperationalTimingReport,
 }
 
 /// Self-contained report for one engine run.
@@ -404,7 +406,7 @@ pub fn run_experiment_trace<E>(
     trace: &ExperimentTrace,
 ) -> Result<ExperimentRunReport>
 where
-    E: KvEngine + AmplificationInstrumented,
+    E: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
 {
     trace.validate()?;
     let capabilities = engine.capabilities();
@@ -418,12 +420,14 @@ where
         execute_experiment_step(engine, step)?;
     }
     engine.reset_amplification();
+    engine.reset_operational_timing();
     let outcomes = trace
         .measured_steps
         .iter()
         .map(|step| execute_experiment_step(engine, step))
         .collect::<Result<Vec<_>>>()?;
     let amplification = engine.amplification_report()?;
+    let operational_timing = engine.operational_timing_report();
     Ok(ExperimentRunReport {
         trace: trace.clone(),
         setup_steps_executed: trace.setup_steps.len(),
@@ -432,6 +436,7 @@ where
         engine: ExperimentEngineEvidence {
             capabilities,
             amplification,
+            operational_timing,
         },
     })
 }
@@ -443,8 +448,8 @@ pub fn compare_experiment_trace<L, R>(
     trace: &ExperimentTrace,
 ) -> Result<ExperimentComparisonReport>
 where
-    L: KvEngine + AmplificationInstrumented,
-    R: KvEngine + AmplificationInstrumented,
+    L: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
+    R: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
 {
     trace.validate()?;
     validate_experiment_compatibility(
@@ -555,9 +560,9 @@ mod tests {
     };
     use crate::{
         AmplificationInstrumented, AmplificationRatio, AmplificationReport, ConcurrencyMode,
-        CrashRecovery, DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence,
-        ReadWorkUnit, Result, StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES,
-        MAX_VALUE_BYTES,
+        CrashRecovery, DistributionMode, EngineCapabilities, KvEngine, LogicalModel,
+        OperationalTimingInstrumented, OperationalTimingReport, Persistence, ReadWorkUnit, Result,
+        StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
     };
 
     #[test]
@@ -644,6 +649,8 @@ mod tests {
         assert_eq!(report.outcomes.len(), trace.measured_steps.len());
         assert_eq!(left.reset_calls, 1);
         assert_eq!(right.reset_calls, 1);
+        assert_eq!(left.timing_reset_calls, 1);
+        assert_eq!(right.timing_reset_calls, 1);
         assert_eq!(
             report.left.amplification.point_read.unit,
             ReadWorkUnit::BtreePageAccess
@@ -681,6 +688,7 @@ mod tests {
         range_rows: u64,
         logical_bytes: u64,
         reset_calls: u64,
+        timing_reset_calls: u64,
     }
 
     impl FakeEngine {
@@ -693,6 +701,7 @@ mod tests {
                 range_rows: 0,
                 logical_bytes: 0,
                 reset_calls: 0,
+                timing_reset_calls: 0,
             }
         }
     }
@@ -757,6 +766,16 @@ mod tests {
 
         fn reopen(&mut self) -> Result<()> {
             Ok(())
+        }
+    }
+
+    impl OperationalTimingInstrumented for FakeEngine {
+        fn reset_operational_timing(&mut self) {
+            self.timing_reset_calls = self.timing_reset_calls.saturating_add(1);
+        }
+
+        fn operational_timing_report(&self) -> OperationalTimingReport {
+            OperationalTimingReport::default()
         }
     }
 

@@ -104,3 +104,13 @@ This preflight does not establish performance fairness by itself. Every future b
 the exact trace, engine settings, binary revision, operating system, filesystem/device context, cache state,
 and raw counters. No latency or device-level conclusion should be published from the structural ratios in
 this document alone.
+
+## Recovery and compaction duration samples
+
+Shared experiment evidence also carries `OperationalTimingReport`. `reopen_ns` records successful same-handle
+`REOPEN` wall-clock durations for both persistent candidates. `compaction_stall_ns` records the synchronous LSM
+full-set compaction path from trigger entry through publication and obsolete-file reclamation; B+ tree reports
+an empty compaction vector. Samples use integer nanoseconds from `std::time::Instant` and are reset after trace
+setup together with amplification counters. Failed recovery/compaction attempts are not included in these
+success distributions. These raw samples are intentionally ungated in CI: scheduler noise, filesystem/device,
+cache state, build profile, and host identity must be archived and pinned before latency comparisons are made.

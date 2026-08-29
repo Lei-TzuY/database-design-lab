@@ -26,12 +26,14 @@ use std::fs;
 use std::io;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use db_core::{
     validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
     AmplificationReport, ConcurrencyMode, CrashRecovery, DbError, DistributionMode,
-    EngineCapabilities, KvEngine, LogicalModel, Persistence, ReadWorkUnit, Result,
-    StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
+    OperationalTimingReport, Persistence, ReadWorkUnit, Result, StorageArchitecture,
+    StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 use serde::Serialize;
 
@@ -160,6 +162,7 @@ pub struct LsmEngine {
     next_manifest_id: u64,
     next_wal_id: u64,
     instrumentation: LsmInstrumentation,
+    operational_timing: OperationalTimingReport,
     poisoned: bool,
     #[cfg(test)]
     compaction_fault_spec: Option<CompactionFaultSpec>,
@@ -223,6 +226,7 @@ impl LsmEngine {
             next_manifest_id: 2,
             next_wal_id: 2,
             instrumentation: LsmInstrumentation::default(),
+            operational_timing: OperationalTimingReport::default(),
             poisoned: false,
             #[cfg(test)]
             compaction_fault_spec: None,
@@ -293,6 +297,7 @@ impl LsmEngine {
             next_wal_id: checked_next_id(layout.max_wal_id, "WAL")?,
             version,
             instrumentation: LsmInstrumentation::default(),
+            operational_timing: OperationalTimingReport::default(),
             poisoned: false,
             #[cfg(test)]
             compaction_fault_spec: None,
@@ -631,6 +636,7 @@ impl LsmEngine {
             return Ok(());
         }
 
+        let compaction_started = Instant::now();
         self.instrumentation.compactions = self.instrumentation.compactions.saturating_add(1);
         let input_bytes = self
             .version
@@ -734,6 +740,9 @@ impl LsmEngine {
         drop(old_tables);
         self.reclaim_obsolete_sstables(active_table_id);
         self.reclaim_obsolete_manifests(active_manifest_id);
+        self.operational_timing
+            .compaction_stall_ns
+            .push(u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX));
         Ok(())
     }
 
@@ -1025,10 +1034,16 @@ impl KvEngine for LsmEngine {
 
     fn reopen(&mut self) -> Result<()> {
         let instrumentation = self.instrumentation;
+        let mut operational_timing = self.operational_timing.clone();
+        let started = Instant::now();
         self.wal.take();
         match Self::open_existing(self.path.clone()) {
             Ok(mut reopened) => {
+                operational_timing
+                    .reopen_ns
+                    .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
                 reopened.instrumentation = instrumentation;
+                reopened.operational_timing = operational_timing;
                 *self = reopened;
                 Ok(())
             }
@@ -1037,6 +1052,16 @@ impl KvEngine for LsmEngine {
                 Err(error)
             }
         }
+    }
+}
+
+impl OperationalTimingInstrumented for LsmEngine {
+    fn reset_operational_timing(&mut self) {
+        self.operational_timing = OperationalTimingReport::default();
+    }
+
+    fn operational_timing_report(&self) -> OperationalTimingReport {
+        self.operational_timing.clone()
     }
 }
 

@@ -144,7 +144,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   same measured vector, rejects any logical-outcome divergence, and returns one self-contained trace/outcome
   record plus per-engine capabilities and exact amplification evidence. A real B+ tree/LSM mixed-trace test
   covers PUT/GET/DELETE/range/REOPEN under this runner. Structural read units remain explicitly non-device-I/O.
-- [ ] Measure recovery cost and compaction stall distributions.
+- [x] Capture recovery-cost and compaction-stall distributions as raw process-local nanosecond samples.
+  Both comparison engines record successful measured `REOPEN` durations; the synchronous LSM compaction
+  path additionally records one stall sample per successfully published full-set compaction. Samples are
+  reset at the same experiment measurement boundary as amplification counters and are embedded in each
+  engine evidence record. They are archival telemetry, not cross-engine performance claims until the host
+  and cache/filesystem conditions are pinned.
 - [ ] Archive raw data and environment manifests; publish no result before this evidence exists.
 - [ ] Establish a controlled pinned performance host before adding regression gates.
 

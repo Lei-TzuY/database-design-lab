@@ -147,6 +147,28 @@ pub struct AmplificationReport {
     pub primary_structure_bytes_per_live_byte: AmplificationRatio,
 }
 
+/// Raw process-local duration samples for synchronous recovery and compaction stalls.
+///
+/// Samples are integer nanoseconds measured with `std::time::Instant`. They are evidence to archive,
+/// not a performance claim: host, filesystem, cache state, build profile, and scheduler must be pinned
+/// before durations are compared across engines or revisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OperationalTimingReport {
+    /// Successful same-handle `REOPEN` durations in nanoseconds.
+    pub reopen_ns: Vec<u64>,
+    /// Successful synchronous compaction-path durations in nanoseconds. Empty for engines without compaction.
+    pub compaction_stall_ns: Vec<u64>,
+}
+
+/// Reset/report surface for raw operational timing samples collected during an experiment window.
+pub trait OperationalTimingInstrumented {
+    /// Clears process-local duration samples without changing database state.
+    fn reset_operational_timing(&mut self);
+
+    /// Returns a clone of the raw timing samples accumulated in the current window.
+    fn operational_timing_report(&self) -> OperationalTimingReport;
+}
+
 /// Common reset/report surface implemented by storage engines admitted to amplification experiments.
 pub trait AmplificationInstrumented {
     /// Clears process-local measurement counters without changing database state.

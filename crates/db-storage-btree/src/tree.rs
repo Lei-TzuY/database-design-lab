@@ -11,7 +11,10 @@ mod overflow;
 mod reuse;
 mod scan;
 
-use db_core::{AmplificationRatio, AmplificationReport, ReadWorkUnit, StructuralReadAmplification};
+use db_core::{
+    AmplificationRatio, AmplificationReport, OperationalTimingReport, ReadWorkUnit,
+    StructuralReadAmplification,
+};
 
 use super::{
     corruption, BtreeError, Page, PageKind, Pager, Result, CHECKSUM_OFFSET, DATA_HEADER_LEN,
@@ -75,6 +78,7 @@ pub struct BPlusTree {
     reusable_pages: VecDeque<u64>,
     cache_capacity: usize,
     instrumentation: BtreeInstrumentation,
+    operational_timing: OperationalTimingReport,
 }
 
 impl BPlusTree {
@@ -85,6 +89,7 @@ impl BPlusTree {
             reusable_pages: VecDeque::new(),
             cache_capacity,
             instrumentation: BtreeInstrumentation::default(),
+            operational_timing: OperationalTimingReport::default(),
         })
     }
 
@@ -95,6 +100,7 @@ impl BPlusTree {
             reusable_pages: VecDeque::new(),
             cache_capacity,
             instrumentation: BtreeInstrumentation::default(),
+            operational_timing: OperationalTimingReport::default(),
         };
         tree.validate_reachable_tree()?;
         tree.refresh_reusable_pages()?;
