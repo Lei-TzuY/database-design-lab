@@ -106,7 +106,10 @@ setup/measured windows and stable point-read, range-scan, sequential-write, rand
 `experiment-compare` proves identical setup and measured outcomes in lockstep before archiving both
 engines' amplification evidence. Successful REOPEN/LSM-compaction timings additionally carry their exact
 measured-step index and deterministic page/record plus data-path-byte work while retaining the original raw
-nanosecond vectors for compatibility; these samples are still not controlled-host performance claims.
+nanosecond vectors for compatibility. Complete operational-attempt streams now also retain failed REOPEN and
+triggered-compaction durations with stable error class/message; failures remain excluded from the old
+success-only vectors rather than silently disappearing. Fresh AB/BA counterbalanced pairs execute both whole-run
+engine orders on independent engine instances, but these samples are still not controlled-host performance claims.
 `experiment-archive` adds a create-new raw evidence directory plus an explicit environment manifest.
 See `docs/experiment-traces.md` for the frozen generation rules. Transactions,
 multi-process writers, snapshot/replication-aware tombstone GC, generalized multi-run/multi-level compaction,

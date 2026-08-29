@@ -1,8 +1,9 @@
 use db_core::{
     AmplificationInstrumented, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
-    Persistence, StorageArchitecture,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalAttemptOutcome,
+    OperationalAttemptSample, OperationalTimingInstrumented, OperationalTimingReport,
+    OperationalTimingSample, OperationalWork, OperationalWorkUnit, Persistence,
+    StorageArchitecture,
 };
 use std::time::Instant;
 
@@ -70,17 +71,26 @@ impl KvEngine for BPlusTree {
             Ok(mut reopened) => {
                 let page_accesses = reopened.pager.read_page_calls();
                 let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let work = OperationalWork {
+                    unit: OperationalWorkUnit::BtreePageAccess,
+                    units_examined: page_accesses,
+                    bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
+                };
                 operational_timing.reopen_ns.push(duration_ns);
                 operational_timing
                     .reopen_samples
                     .push(OperationalTimingSample {
                         measured_step_index: operational_step_index,
                         duration_ns,
-                        work: OperationalWork {
-                            unit: OperationalWorkUnit::BtreePageAccess,
-                            units_examined: page_accesses,
-                            bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
-                        },
+                        work,
+                    });
+                operational_timing
+                    .reopen_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: Some(work),
+                        outcome: OperationalAttemptOutcome::Succeeded,
                     });
                 reopened.instrumentation = instrumentation;
                 reopened.operational_timing = operational_timing;
@@ -89,8 +99,21 @@ impl KvEngine for BPlusTree {
                 Ok(())
             }
             Err(error) => {
+                let error = common_error(error);
+                let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.operational_timing
+                    .reopen_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: None,
+                        outcome: OperationalAttemptOutcome::Failed {
+                            error_class: error.class(),
+                            message: error.to_string(),
+                        },
+                    });
                 self.pager.poisoned = true;
-                Err(common_error(error))
+                Err(error)
             }
         }
     }

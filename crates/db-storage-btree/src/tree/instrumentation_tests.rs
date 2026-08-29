@@ -1,7 +1,8 @@
 use db_core::{
     validate_experiment_compatibility, AmplificationInstrumented, ConcurrencyMode, CrashRecovery,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalWorkUnit, Persistence, ReadWorkUnit, StorageArchitecture,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalAttemptOutcome,
+    OperationalTimingInstrumented, OperationalWorkUnit, Persistence, ReadWorkUnit,
+    StorageArchitecture,
 };
 use tempfile::tempdir;
 
@@ -179,4 +180,10 @@ fn reopen_sample_is_step_associated_and_counts_open_validation_work() {
     );
     assert_eq!(sample.work.bytes_examined, 2 * PAGE_SIZE as u64);
     assert!(sample.duration_ns > 0);
+    assert_eq!(timing.reopen_attempts.len(), 1);
+    let attempt = &timing.reopen_attempts[0];
+    assert_eq!(attempt.measured_step_index, Some(7));
+    assert_eq!(attempt.duration_ns, sample.duration_ns);
+    assert_eq!(attempt.work, Some(sample.work));
+    assert_eq!(attempt.outcome, OperationalAttemptOutcome::Succeeded);
 }

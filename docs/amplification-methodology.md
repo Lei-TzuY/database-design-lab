@@ -128,9 +128,17 @@ Operational work is architecture-specific and explicitly unit-tagged:
   version is published, mirrored, and obsolete-file reclamation completes. B+ tree reports no compaction
   samples.
 
-The compatibility duration vectors and structured vectors are appended together and tests require their
-indices/durations to agree. Successful-sample work accounting is therefore deterministic and trace-associated,
-but the roadmap item remains incomplete: failed/excluded recovery or compaction attempts are not retained,
-engine execution order is not counterbalanced, and the archive's declared cache/filesystem state is not an
-enforced protocol. Scheduler noise, build profile, host identity, cache state, filesystem, and storage device
-must still be controlled before timing distributions can support a performance claim.
+The compatibility duration vectors and structured success vectors are appended together and tests require
+their indices/durations to agree. `OperationalTimingReport` additionally retains append-only attempt streams.
+Successful attempts mirror the compatibility sample; failures retain elapsed duration, measured step index,
+stable error class/message, and deterministic work when it is already known without extra measurement I/O.
+Injected LSM compaction faults are regression-tested to appear in `compaction_stall_attempts` while remaining
+absent from the success-only duration/sample projections.
+
+Execution-order counterbalancing is no longer caller folklore: `compare_experiment_trace_counterbalanced`
+creates fresh left/right engines for one `left_then_right` and one `right_then_left` repetition, preserves raw
+ordered reports, and fails closed if capabilities or logical outcomes differ across repetitions. The roadmap
+item nevertheless remains incomplete because warmup/exclusion policy and the archive's declared cache/filesystem
+state are not enforced measurement protocols. Scheduler noise, build profile, host identity, cache state,
+filesystem, and storage device must still be controlled before timing distributions can support a performance
+claim; failed attempts must be reported, not filtered into a success-only distribution.
