@@ -94,6 +94,7 @@ pub(super) struct Wal {
     first_sequence: u64,
     next_sequence: u64,
     record_count: u64,
+    open_examined_bytes: u64,
     recovered_tail: Option<RecoveredWalTail>,
 }
 
@@ -131,6 +132,7 @@ impl Wal {
             first_sequence,
             next_sequence: first_sequence,
             record_count: 0,
+            open_examined_bytes: WAL_HEADER_LEN_U64,
             recovered_tail: None,
         })
     }
@@ -154,6 +156,7 @@ impl Wal {
             first_sequence: expected_first_sequence,
             next_sequence: scan.next_sequence,
             record_count: scan.record_count,
+            open_examined_bytes: scan.file_bytes,
             recovered_tail: scan.recoverable_tail,
         })
     }
@@ -208,6 +211,10 @@ impl Wal {
 
     pub(super) const fn record_count(&self) -> u64 {
         self.record_count
+    }
+
+    pub(super) const fn open_examined_bytes(&self) -> u64 {
+        self.open_examined_bytes
     }
 }
 

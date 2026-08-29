@@ -88,7 +88,8 @@ to the next action. Only after all setup outcomes agree are both instrumentation
 actions are likewise executed and checked in lockstep; the first mismatch fails the experiment without
 emitting amplification evidence. A successful `ExperimentComparisonReport` stores the full trace once, the
 proven common measured-outcome vector once, and per-engine capabilities plus the exact common
-`AmplificationReport`.
+`AmplificationReport` and operational report. Successful REOPEN/compaction samples carry the exact measured
+step index plus deterministic bytes/record-or-page work without issuing extra measurement I/O.
 Read-work units remain architecture-specific (`btree_page_access`, `lsm_sstable_consult`, and
 `lsm_sstable_version_decoded`) and must not be interpreted as interchangeable device I/O.
 
@@ -125,9 +126,10 @@ silently inheriting old engine state or overwriting prior evidence.
 ## Scope boundary
 
 This runner establishes canonical bounded logical inputs, explicit setup/measurement boundaries, lockstep
-setup/measured outcome equality, and shared structural amplification reporting. It does **not** establish a
-fair latency benchmark by itself. Complete recovery-work accounting, failed/excluded samples, counterbalanced
-engine order, a cache/filesystem protocol, and controlled-host pinning remain separate Phase 4 work.
+setup/measured outcome equality, shared structural amplification reporting, and deterministic measured-step
+association for successful recovery/compaction work samples. It does **not** establish a fair latency benchmark
+by itself. Failed/excluded samples, counterbalanced engine order, an enforced cache/filesystem protocol, and
+controlled-host pinning remain separate Phase 4 work.
 
 ## Evidence archives
 

@@ -1,12 +1,13 @@
 use db_core::{
     AmplificationInstrumented, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
     DistributionMode, EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalTimingReport, Persistence, StorageArchitecture,
+    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
+    Persistence, StorageArchitecture,
 };
 use std::time::Instant;
 
 use super::{BPlusTree, MAX_TREE_KEY_BYTES, MAX_TREE_VALUE_BYTES};
-use crate::BtreeError;
+use crate::{BtreeError, PAGE_SIZE};
 
 fn common_error(error: BtreeError) -> DbError {
     match error {
@@ -63,14 +64,27 @@ impl KvEngine for BPlusTree {
         let path = self.path().to_path_buf();
         let instrumentation = self.instrumentation;
         let mut operational_timing = self.operational_timing.clone();
+        let operational_step_index = self.operational_step_index;
         let started = Instant::now();
         match BPlusTree::open(&path, self.cache_capacity) {
             Ok(mut reopened) => {
+                let page_accesses = reopened.pager.read_page_calls();
+                let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                operational_timing.reopen_ns.push(duration_ns);
                 operational_timing
-                    .reopen_ns
-                    .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+                    .reopen_samples
+                    .push(OperationalTimingSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: OperationalWork {
+                            unit: OperationalWorkUnit::BtreePageAccess,
+                            units_examined: page_accesses,
+                            bytes_examined: page_accesses.saturating_mul(PAGE_SIZE as u64),
+                        },
+                    });
                 reopened.instrumentation = instrumentation;
                 reopened.operational_timing = operational_timing;
+                reopened.operational_step_index = operational_step_index;
                 *self = reopened;
                 Ok(())
             }
@@ -85,6 +99,11 @@ impl KvEngine for BPlusTree {
 impl OperationalTimingInstrumented for BPlusTree {
     fn reset_operational_timing(&mut self) {
         self.operational_timing = OperationalTimingReport::default();
+        self.operational_step_index = None;
+    }
+
+    fn set_operational_step_index(&mut self, step_index: Option<u64>) {
+        self.operational_step_index = step_index;
     }
 
     fn operational_timing_report(&self) -> OperationalTimingReport {

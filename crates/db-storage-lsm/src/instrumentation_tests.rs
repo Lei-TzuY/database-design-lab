@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use db_core::{KvEngine, ReadWorkUnit};
+use db_core::{KvEngine, OperationalTimingInstrumented, OperationalWorkUnit, ReadWorkUnit};
 use db_storage_memory::MemoryEngine;
 use tempfile::tempdir;
 
@@ -257,4 +257,62 @@ fn instrumentation_survives_logical_reopen_and_reset_is_state_neutral() {
         engine.range_scan(b"", None, 16).expect("state after reset"),
         logical
     );
+}
+
+#[test]
+fn operational_samples_bind_compaction_and_reopen_to_deterministic_work() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("operational-work-engine");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    engine.reset_instrumentation();
+    engine.reset_operational_timing();
+
+    for index in 0_u8..7 {
+        engine
+            .put(&fixed_key(index), &large_value(0x20 + index))
+            .expect("seed pre-trigger puts");
+    }
+    engine.set_operational_step_index(Some(7));
+    engine
+        .put(&fixed_key(7), &large_value(0x27))
+        .expect("trigger first full-set compaction");
+    engine.set_operational_step_index(None);
+
+    let counters = engine.instrumentation();
+    let timing = engine.operational_timing_report();
+    assert_eq!(timing.compaction_stall_samples.len(), 1);
+    let compaction = timing.compaction_stall_samples[0];
+    assert_eq!(timing.compaction_stall_ns, vec![compaction.duration_ns]);
+    assert_eq!(compaction.measured_step_index, Some(7));
+    assert_eq!(
+        compaction.work.unit,
+        OperationalWorkUnit::LsmSstableRecordVersion
+    );
+    assert_eq!(compaction.work.units_examined, 8);
+    assert_eq!(
+        compaction.work.bytes_examined,
+        counters.compaction_input_sstable_bytes
+    );
+    assert!(compaction.duration_ns > 0);
+
+    let authoritative_bytes = canonical_sstable_bytes(&path);
+    engine.reset_operational_timing();
+    engine.set_operational_step_index(Some(99));
+    KvEngine::reopen(&mut engine).expect("measured reopen");
+    let timing = engine.operational_timing_report();
+    assert_eq!(timing.reopen_samples.len(), 1);
+    let reopen = timing.reopen_samples[0];
+    assert_eq!(timing.reopen_ns, vec![reopen.duration_ns]);
+    assert_eq!(reopen.measured_step_index, Some(99));
+    assert_eq!(reopen.work.unit, OperationalWorkUnit::LsmRecordVersion);
+    assert_eq!(
+        reopen.work.units_examined, 8,
+        "empty rotated WAL plus eight L1 records"
+    );
+    assert_eq!(
+        reopen.work.bytes_examined,
+        40 + authoritative_bytes,
+        "WAL header plus authoritative SSTable bytes"
+    );
+    assert!(reopen.duration_ns > 0);
 }
