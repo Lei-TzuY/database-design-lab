@@ -164,7 +164,7 @@ enum Command {
     /// Run a fresh two-repetition AB/BA pair and archive exact evidence plus order provenance.
     ExperimentArchiveCounterbalanced {
         #[command(flatten)]
-        args: CounterbalancedArchiveArgs,
+        args: Box<CounterbalancedArchiveArgs>,
     },
     /// Validate an append-log file without modifying it.
     Verify {
@@ -463,7 +463,7 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
             };
             write_evidence_archive(&archive_dir, &revision, &trace, &comparison, &environment)
         }
-        Command::ExperimentArchiveCounterbalanced { args } => counterbalanced_archive::run(args),
+        Command::ExperimentArchiveCounterbalanced { args } => counterbalanced_archive::run(*args),
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
             write_stdout_json(&report)
