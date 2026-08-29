@@ -825,8 +825,7 @@ mod tests {
             excluded_pairs: 4,
             attempts: Vec::new(),
         };
-        let environment =
-            build_environment(&args, 10, None, true).expect("build v10 environment");
+        let environment = build_environment(&args, 10, None, true).expect("build v10 environment");
         write_batch_archive(
             &args.archive_dir,
             &args.revision,
