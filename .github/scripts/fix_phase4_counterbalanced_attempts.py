@@ -22,6 +22,18 @@ if text.count(old) != 1:
     raise SystemExit(f"success evidence fields: expected 1 marker, found {text.count(old)}")
 text = text.replace(old, new, 1)
 
+old = '''        left_operational_timing: Option<OperationalTimingReport>,
+        /// Partial right timing evidence when engines existed before failure.
+        right_operational_timing: Option<OperationalTimingReport>,
+'''
+new = '''        left_operational_timing: Option<Box<OperationalTimingReport>>,
+        /// Partial right timing evidence when engines existed before failure.
+        right_operational_timing: Option<Box<OperationalTimingReport>>,
+'''
+if text.count(old) != 1:
+    raise SystemExit(f"failure timing fields: expected 1 marker, found {text.count(old)}")
+text = text.replace(old, new, 1)
+
 old = '''                            ExperimentAttemptResult::Succeeded {
                                 setup_steps_executed: report.setup_steps_executed,
                                 measured_steps_executed: report.measured_steps_executed,
@@ -39,6 +51,23 @@ new = '''                            ExperimentAttemptResult::Succeeded {
 if text.count(old) != 1:
     raise SystemExit(f"success evidence construction: expected 1 marker, found {text.count(old)}")
 text = text.replace(old, new, 1)
+
+text = text.replace(
+    "left_operational_timing: Some(left.operational_timing_report()),",
+    "left_operational_timing: Some(Box::new(left.operational_timing_report())),",
+)
+text = text.replace(
+    "right_operational_timing: Some(right.operational_timing_report()),",
+    "right_operational_timing: Some(Box::new(right.operational_timing_report())),",
+)
+text = text.replace(
+    "left_operational_timing: Some(report.left.operational_timing.clone()),",
+    "left_operational_timing: Some(Box::new(report.left.operational_timing.clone())),",
+)
+text = text.replace(
+    "right_operational_timing: Some(report.right.operational_timing.clone()),",
+    "right_operational_timing: Some(Box::new(report.right.operational_timing.clone())),",
+)
 
 old = '''        if disposition == ExperimentAttemptDisposition::Included {
             match result {
