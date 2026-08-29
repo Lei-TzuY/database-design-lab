@@ -411,6 +411,7 @@ fn write_counterbalanced_attempt_archive(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
     use serde_json::Value;
