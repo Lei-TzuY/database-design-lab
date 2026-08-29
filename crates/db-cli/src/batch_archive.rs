@@ -788,6 +788,7 @@ fn invalid<T>(message: String) -> Result<T, VerifyError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
     use serde_json::{json, Value};
@@ -799,14 +800,17 @@ mod tests {
     fn verifies_v6_and_rejects_unindexed_extra_file() {
         let directory = tempdir().expect("temporary directory");
         write_archive(directory.path(), 6, false);
-        let summary = verify_batch_archive(directory.path(), Some("abc123"), false).expect("verify v6");
+        let summary =
+            verify_batch_archive(directory.path(), Some("abc123"), false).expect("verify v6");
         assert_eq!(summary.format_version, 6);
         assert_eq!(summary.excluded_pairs, 1);
         fs::write(directory.path().join("extra.txt"), b"unexpected").expect("write extra");
-        assert!(verify_batch_archive(directory.path(), Some("abc123"), false)
-            .expect_err("extra file must fail")
-            .to_string()
-            .contains("directory entries"));
+        assert!(
+            verify_batch_archive(directory.path(), Some("abc123"), false)
+                .expect_err("extra file must fail")
+                .to_string()
+                .contains("directory entries")
+        );
     }
 
     #[test]
@@ -827,10 +831,12 @@ mod tests {
             serde_json::to_vec_pretty(&sidecars).expect("encode tampered sidecar"),
         )
         .expect("write tampered sidecar");
-        assert!(verify_batch_archive(directory.path(), Some("abc123"), false)
-            .expect_err("tampered pair index must fail")
-            .to_string()
-            .contains("outside requested range"));
+        assert!(
+            verify_batch_archive(directory.path(), Some("abc123"), false)
+                .expect_err("tampered pair index must fail")
+                .to_string()
+                .contains("outside requested range")
+        );
     }
 
     #[test]
