@@ -28,8 +28,8 @@ pub use counterbalanced_experiment::{
     CounterbalancedPairOrder,
 };
 pub use counterbalanced_failure::{
-    compare_experiment_trace_counterbalanced_captured,
-    CapturedCounterbalancedExperimentError, CounterbalancedComparisonFailureEvidence,
+    compare_experiment_trace_counterbalanced_captured, CapturedCounterbalancedExperimentError,
+    CounterbalancedComparisonFailureEvidence,
 };
 pub use differential::{compare_workload, DifferentialError, DifferentialReport};
 pub use engine::{
@@ -57,8 +57,7 @@ pub use experiment_batch::{
     ExperimentEngineRole, ExperimentInstanceContext, MAX_EXPERIMENT_BATCH_PAIRS,
 };
 pub use experiment_batch_failure::{
-    run_counterbalanced_experiment_batch_captured,
-    CounterbalancedExperimentBatchCapturedReport,
+    run_counterbalanced_experiment_batch_captured, CounterbalancedExperimentBatchCapturedReport,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use ordered_experiment::{
