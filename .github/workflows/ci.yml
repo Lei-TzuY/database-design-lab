@@ -55,3 +55,46 @@ jobs:
         uses: dtolnay/rust-toolchain@1.85.0
       - name: Check workspace
         run: cargo check --workspace --all-targets --all-features --locked
+
+  phase4-evidence:
+    name: Phase 4 structural evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run common B+ tree/LSM traces
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/phase4-evidence target/phase4-state
+          for profile in point-read range-scan sequential-write random-write mixed; do
+            cargo run --locked -p db-cli -- experiment \
+              --profile "$profile" \
+              --seed 15111065706836454659 \
+              --operations 256 \
+              --key-space 512 \
+              --value-bytes 512 \
+              --range-width 32 \
+              --reopen-every 64 \
+              --btree-path "target/phase4-state/${profile}.btree" \
+              --lsm-path "target/phase4-state/${profile}.lsm" \
+              --output "target/phase4-evidence/${profile}.json"
+          done
+      - name: Record evidence environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'commit=%s\n' "$GITHUB_SHA"
+            rustc -Vv
+            cargo -V
+            uname -a
+          } > target/phase4-evidence/environment.txt
+      - name: Upload raw structural evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4-structural-evidence-${{ github.sha }}
+          path: target/phase4-evidence
+          if-no-files-found: error
+          retention-days: 30
