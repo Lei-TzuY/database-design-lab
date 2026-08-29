@@ -1,0 +1,53 @@
+name: Finalize Phase 4 counterbalanced attempts
+
+on:
+  push:
+    branches:
+      - staging/phase4-counterbalanced-attempts
+    paths:
+      - .github/scripts/finalize_phase4_counterbalanced_attempts.py
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging/phase4-counterbalanced-attempts
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply final evidence/docs patch
+        run: python .github/scripts/finalize_phase4_counterbalanced_attempts.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+      - name: Check minimum Rust
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Commit validated final tree
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/db-storage-btree/src/tree/instrumentation_tests.rs crates/db-storage-lsm/src/compaction_fault_tests.rs crates/db-cli/src/main.rs README.md docs/amplification-methodology.md docs/roadmap.md
+          if git diff --cached --quiet; then
+            echo "No finalization changes to commit"
+          else
+            git commit -m "test: prove counterbalanced attempt evidence"
+            git push origin HEAD:staging/phase4-counterbalanced-attempts
+          fi
