@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Creation of this helper is followed by one explicit trigger commit so the path-filtered validator runs.
 ROOT = Path(__file__).resolve().parents[2]
 LSM = ROOT / "crates/db-storage-lsm/src/lib.rs"
 README = ROOT / "README.md"
