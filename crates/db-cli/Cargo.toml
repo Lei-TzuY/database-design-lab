@@ -11,6 +11,10 @@ repository.workspace = true
 name = "db-lab"
 path = "src/main.rs"
 
+[[bin]]
+name = "db-lab-batch"
+path = "src/bin/db-lab-batch.rs"
+
 [dependencies]
 clap.workspace = true
 db-core = { path = "../db-core" }
