@@ -675,12 +675,13 @@ fn required_u64(value: &Value, field: &str, label: &str) -> Result<u64, AnalyzeE
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use db_core::{generate_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile};
     use serde_json::{json, Value};
     use tempfile::tempdir;
 
-    use super::{analyze, summarize_distribution, Cli, DistributionSummary, FAILURE_PROTOCOL_V2};
+    use super::{analyze, summarize_distribution, Cli, DistributionSummary};
 
     const FAILURE_PROTOCOL_V2: &str = "ordered_comparison_failure_sidecar_v2";
 
