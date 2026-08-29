@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 db-core = { path = "../db-core" }
+db-storage-btree = { path = "../db-storage-btree" }
 db-storage-lsm = { path = "../db-storage-lsm" }
 db-storage-log = { path = "../db-storage-log" }
 db-storage-memory = { path = "../db-storage-memory" }
