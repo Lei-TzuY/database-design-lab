@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(failure.work, None);
         assert!(timing.compaction_stall_failure_samples.is_empty());
         assert_eq!(
-            tree.get(b"key")
+            KvEngine::get(&mut tree, b"key")
                 .expect_err("failed reopen poisons handle")
                 .class(),
             ErrorClass::Poisoned
