@@ -17,8 +17,10 @@ impl BPlusTree {
     /// to that child; deleting the final key publishes an empty tree.
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         validate_key(key)?;
-        let previous = self.get(key)?;
+        let data_write_before = self.pager.data_page_bytes_written();
+        let previous = self.get_uninstrumented(key)?;
         let Some(previous_value) = previous else {
+            self.record_mutation(key.len(), data_write_before);
             return Ok(None);
         };
         self.refresh_reusable_pages()?;
@@ -48,6 +50,7 @@ impl BPlusTree {
             }
         };
         self.pager.set_root(new_root)?;
+        self.record_mutation(key.len(), data_write_before);
         Ok(Some(previous_value))
     }
 

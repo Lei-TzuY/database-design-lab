@@ -94,6 +94,115 @@ pub struct EngineCapabilities {
     pub max_value_bytes: usize,
 }
 
+/// Exact integer numerator/denominator pair used by reproducible amplification evidence.
+///
+/// Zero denominators are preserved instead of being converted into floating-point infinities or NaN.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct AmplificationRatio {
+    /// Raw physical/structural work numerator.
+    pub numerator: u64,
+    /// Raw logical baseline denominator.
+    pub denominator: u64,
+}
+
+/// Architecture-specific structural unit used by a read-amplification numerator.
+///
+/// These units deliberately prevent a page access from being silently compared as though it were the
+/// same event as consulting an SSTable or decoding one SSTable version. Device-level read bytes and
+/// cache misses require a separate controlled benchmark layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadWorkUnit {
+    /// One logical access to a validated fixed-size B+ tree page, including cache hits.
+    BtreePageAccess,
+    /// One LSM SSTable considered by a point lookup before a hit/miss decision.
+    LsmSstableConsult,
+    /// One physical SSTable record version decoded while resolving an ordered range.
+    LsmSstableVersionDecoded,
+}
+
+/// One structural read-amplification ratio plus the unit carried by its numerator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StructuralReadAmplification {
+    /// Exact structural-work numerator over the logical-operation/result denominator.
+    pub ratio: AmplificationRatio,
+    /// Architecture-specific unit represented by `ratio.numerator`.
+    pub unit: ReadWorkUnit,
+}
+
+/// Common reporting shape for hand-computable storage-engine amplification evidence.
+///
+/// Point/range read numerators remain explicitly architecture-specific through `ReadWorkUnit`.
+/// Data-write and primary-structure ratios use bytes, but callers must still keep each engine's
+/// documented accounting boundary fixed when comparing experiments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AmplificationReport {
+    /// Structural work per successful explicit point GET.
+    pub point_read: StructuralReadAmplification,
+    /// Structural work per logical record returned by successful range scans.
+    pub range_read: StructuralReadAmplification,
+    /// Data-path bytes written per acknowledged logical mutation byte.
+    pub data_write_bytes_per_logical_byte: AmplificationRatio,
+    /// Current primary data-structure bytes retained per live logical key+value byte.
+    pub primary_structure_bytes_per_live_byte: AmplificationRatio,
+}
+
+/// Common reset/report surface implemented by storage engines admitted to amplification experiments.
+pub trait AmplificationInstrumented {
+    /// Clears process-local measurement counters without changing database state.
+    fn reset_amplification(&mut self);
+
+    /// Returns an exact report for the current process-local measurement window and durable state.
+    fn amplification_report(&mut self) -> Result<AmplificationReport>;
+}
+
+/// Rejects two engine configurations when common experiment semantics are not comparable.
+///
+/// Architecture and crash-recovery *mechanism* are intentionally allowed to differ: those are the
+/// independent variables. Logical model, caller/concurrency contract, persistence class, distribution
+/// mode, ordered-range capability, and size limits must match. `require_ordered_range` additionally
+/// refuses a pair that does not expose the common half-open range API.
+pub fn validate_experiment_compatibility(
+    left: EngineCapabilities,
+    right: EngineCapabilities,
+    require_ordered_range: bool,
+) -> Result<()> {
+    let mut mismatches = Vec::new();
+    if left.logical_model != right.logical_model {
+        mismatches.push("logical_model");
+    }
+    if left.concurrency != right.concurrency {
+        mismatches.push("concurrency");
+    }
+    if left.persistence != right.persistence {
+        mismatches.push("persistence");
+    }
+    if left.distribution != right.distribution {
+        mismatches.push("distribution");
+    }
+    if left.ordered_range_scan != right.ordered_range_scan {
+        mismatches.push("ordered_range_scan");
+    }
+    if left.max_key_bytes != right.max_key_bytes {
+        mismatches.push("max_key_bytes");
+    }
+    if left.max_value_bytes != right.max_value_bytes {
+        mismatches.push("max_value_bytes");
+    }
+    if require_ordered_range && (!left.ordered_range_scan || !right.ordered_range_scan) {
+        mismatches.push("required_ordered_range_scan");
+    }
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::InvalidInput(format!(
+        "engine capabilities are not experiment-compatible: {} vs {} differ in {}",
+        left.name,
+        right.name,
+        mismatches.join(", ")
+    )))
+}
+
 /// Minimal engine contract proven by the current reference and persistent implementations.
 pub trait KvEngine {
     /// Returns explicit capabilities for experiment validation.

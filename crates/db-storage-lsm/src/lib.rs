@@ -28,9 +28,10 @@ use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use db_core::{
-    validate_key, validate_key_value, validate_range_scan, ConcurrencyMode, CrashRecovery, DbError,
-    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, Result,
-    StorageArchitecture, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
+    AmplificationRatio, AmplificationReport, ConcurrencyMode, CrashRecovery, DbError,
+    DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, ReadWorkUnit,
+    Result, StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 use serde::Serialize;
 
@@ -135,30 +136,8 @@ pub struct LsmInstrumentation {
     pub compaction_output_sstable_bytes_written: u64,
 }
 
-/// Exact integer numerator/denominator pair for an amplification metric.
-///
-/// A zero denominator is preserved rather than converted to NaN/infinity so experiment code can
-/// decide how to render an empty measurement window without losing the raw evidence.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct AmplificationRatio {
-    /// Raw work/space numerator.
-    pub numerator: u64,
-    /// Raw logical baseline denominator.
-    pub denominator: u64,
-}
-
-/// Reproducible amplification report derived from current state plus process-local counters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct LsmAmplificationReport {
-    /// SSTables consulted per explicit point GET.
-    pub point_read_tables_per_get: AmplificationRatio,
-    /// Physical SSTable versions decoded per logical range record returned.
-    pub range_versions_per_result: AmplificationRatio,
-    /// WAL-record + flush-SSTable + compaction-output bytes per acknowledged logical mutation byte.
-    pub data_write_bytes_per_logical_byte: AmplificationRatio,
-    /// Authoritative SSTable bytes per durable live key+value byte represented by those SSTables.
-    pub sorted_table_bytes_per_durable_live_byte: AmplificationRatio,
-}
+/// Backward-compatible name for the common amplification report shape.
+pub type LsmAmplificationReport = AmplificationReport;
 
 /// Read-only verification result for the implemented LSM directory state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -497,19 +476,25 @@ impl LsmEngine {
             .saturating_add(self.instrumentation.flush_sstable_bytes_written)
             .saturating_add(self.instrumentation.compaction_output_sstable_bytes_written);
         Ok(LsmAmplificationReport {
-            point_read_tables_per_get: AmplificationRatio {
-                numerator: self.instrumentation.point_sstable_consults,
-                denominator: self.instrumentation.point_reads,
+            point_read: StructuralReadAmplification {
+                ratio: AmplificationRatio {
+                    numerator: self.instrumentation.point_sstable_consults,
+                    denominator: self.instrumentation.point_reads,
+                },
+                unit: ReadWorkUnit::LsmSstableConsult,
             },
-            range_versions_per_result: AmplificationRatio {
-                numerator: self.instrumentation.range_sstable_records_decoded,
-                denominator: self.instrumentation.range_result_records,
+            range_read: StructuralReadAmplification {
+                ratio: AmplificationRatio {
+                    numerator: self.instrumentation.range_sstable_records_decoded,
+                    denominator: self.instrumentation.range_result_records,
+                },
+                unit: ReadWorkUnit::LsmSstableVersionDecoded,
             },
             data_write_bytes_per_logical_byte: AmplificationRatio {
                 numerator: data_write_bytes,
                 denominator: self.instrumentation.logical_mutation_bytes,
             },
-            sorted_table_bytes_per_durable_live_byte: AmplificationRatio {
+            primary_structure_bytes_per_live_byte: AmplificationRatio {
                 numerator: authoritative_sstable_bytes,
                 denominator: durable_live_bytes,
             },
@@ -1051,6 +1036,16 @@ impl KvEngine for LsmEngine {
                 Err(error)
             }
         }
+    }
+}
+
+impl AmplificationInstrumented for LsmEngine {
+    fn reset_amplification(&mut self) {
+        self.reset_instrumentation();
+    }
+
+    fn amplification_report(&mut self) -> Result<AmplificationReport> {
+        LsmEngine::amplification_report(self)
     }
 }
 

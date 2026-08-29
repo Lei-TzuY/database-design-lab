@@ -5,13 +5,17 @@ mod common;
 mod delete;
 #[cfg(test)]
 mod fault;
+#[cfg(test)]
+mod instrumentation_tests;
 mod overflow;
 mod reuse;
 mod scan;
 
+use db_core::{AmplificationRatio, AmplificationReport, ReadWorkUnit, StructuralReadAmplification};
+
 use super::{
     corruption, BtreeError, Page, PageKind, Pager, Result, CHECKSUM_OFFSET, DATA_HEADER_LEN,
-    SLOT_LEN, SUPERBLOCK_COUNT,
+    PAGE_SIZE, SLOT_LEN, SUPERBLOCK_COUNT,
 };
 
 /// Maximum key size accepted by the tree; matches the common KV key contract.
@@ -32,6 +36,31 @@ const PAGE_BODY_CAPACITY: usize = CHECKSUM_OFFSET - DATA_HEADER_LEN;
 const MAX_INLINE_KEY_BYTES: usize =
     PAGE_BODY_CAPACITY - SLOT_LEN - LEAF_CELL_HEADER_LEN - OVERFLOW_VALUE_REF_LEN;
 
+/// Process-local, resettable counters for reproducible B+ tree amplification experiments.
+///
+/// Read counters measure logical validated-page accesses, including cache hits. Data-write bytes count
+/// synchronized leaf/internal/overflow page images and exclude mirrored superblock metadata. The
+/// counters describe the implemented data path; they are not device I/O telemetry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BtreeInstrumentation {
+    /// Successful explicit `GET` operations.
+    pub point_reads: u64,
+    /// Validated B+ tree/overflow page accesses serving explicit GETs.
+    pub point_page_accesses: u64,
+    /// Successful explicit range scans, including empty-result scans.
+    pub range_scans: u64,
+    /// Logical key/value records returned by successful range scans.
+    pub range_result_records: u64,
+    /// Validated B+ tree/overflow page accesses serving explicit range scans.
+    pub range_page_accesses: u64,
+    /// Successful acknowledged PUT/DELETE calls, including a missing-key DELETE.
+    pub logical_mutations: u64,
+    /// Key plus PUT-value bytes accepted by mutations; DELETE contributes key bytes only.
+    pub logical_mutation_bytes: u64,
+    /// Synchronized leaf/internal/overflow page bytes produced by successful mutations.
+    pub data_page_bytes_written: u64,
+}
+
 /// Persistent copy-on-write B+ tree supporting binary point lookup, insertion/update, and deletion.
 ///
 /// Mutations never overwrite a reachable data page. `put` and `delete` append replacement leaves and
@@ -45,6 +74,7 @@ pub struct BPlusTree {
     pager: Pager,
     reusable_pages: VecDeque<u64>,
     cache_capacity: usize,
+    instrumentation: BtreeInstrumentation,
 }
 
 impl BPlusTree {
@@ -54,6 +84,7 @@ impl BPlusTree {
             pager: Pager::create_new(path, cache_capacity)?,
             reusable_pages: VecDeque::new(),
             cache_capacity,
+            instrumentation: BtreeInstrumentation::default(),
         })
     }
 
@@ -63,6 +94,7 @@ impl BPlusTree {
             pager: Pager::open(path, cache_capacity)?,
             reusable_pages: VecDeque::new(),
             cache_capacity,
+            instrumentation: BtreeInstrumentation::default(),
         };
         tree.validate_reachable_tree()?;
         tree.refresh_reusable_pages()?;
@@ -93,6 +125,81 @@ impl BPlusTree {
         self.pager.generation()
     }
 
+    /// Returns a copy of process-local B+ tree instrumentation counters.
+    #[must_use]
+    pub const fn instrumentation(&self) -> BtreeInstrumentation {
+        self.instrumentation
+    }
+
+    /// Resets process-local amplification counters without modifying database state.
+    pub fn reset_instrumentation(&mut self) {
+        self.instrumentation = BtreeInstrumentation::default();
+    }
+
+    /// Builds the common exact amplification report for the current window and retained page file.
+    ///
+    /// The primary-structure numerator is every committed data page retained by the page file,
+    /// including unreachable COW history that has not yet been recycled; the two mirrored
+    /// superblocks are excluded. The live-byte denominator is reconstructed from the authoritative
+    /// tree without incrementing the public read counters.
+    pub fn amplification_report(&mut self) -> Result<AmplificationReport> {
+        let rows = self.range_scan_uninstrumented(b"", None, usize::MAX)?;
+        let live_bytes = rows.into_iter().try_fold(0_u64, |total, (key, value)| {
+            let bytes = key
+                .len()
+                .checked_add(value.len())
+                .ok_or_else(|| corruption(0, "B+ tree live logical byte count overflowed usize"))?;
+            let bytes = u64::try_from(bytes)
+                .map_err(|_| corruption(0, "B+ tree live logical byte count does not fit u64"))?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| corruption(0, "B+ tree live logical byte count overflowed u64"))
+        })?;
+        let primary_bytes = self
+            .pager
+            .data_page_count()
+            .saturating_mul(u64::try_from(PAGE_SIZE).expect("page size fits u64"));
+        Ok(AmplificationReport {
+            point_read: StructuralReadAmplification {
+                ratio: AmplificationRatio {
+                    numerator: self.instrumentation.point_page_accesses,
+                    denominator: self.instrumentation.point_reads,
+                },
+                unit: ReadWorkUnit::BtreePageAccess,
+            },
+            range_read: StructuralReadAmplification {
+                ratio: AmplificationRatio {
+                    numerator: self.instrumentation.range_page_accesses,
+                    denominator: self.instrumentation.range_result_records,
+                },
+                unit: ReadWorkUnit::BtreePageAccess,
+            },
+            data_write_bytes_per_logical_byte: AmplificationRatio {
+                numerator: self.instrumentation.data_page_bytes_written,
+                denominator: self.instrumentation.logical_mutation_bytes,
+            },
+            primary_structure_bytes_per_live_byte: AmplificationRatio {
+                numerator: primary_bytes,
+                denominator: live_bytes,
+            },
+        })
+    }
+
+    pub(super) fn record_mutation(&mut self, logical_bytes: usize, data_write_before: u64) {
+        self.instrumentation.logical_mutations =
+            self.instrumentation.logical_mutations.saturating_add(1);
+        self.instrumentation.logical_mutation_bytes = self
+            .instrumentation
+            .logical_mutation_bytes
+            .saturating_add(u64::try_from(logical_bytes).unwrap_or(u64::MAX));
+        self.instrumentation.data_page_bytes_written =
+            self.instrumentation.data_page_bytes_written.saturating_add(
+                self.pager
+                    .data_page_bytes_written()
+                    .saturating_sub(data_write_before),
+            );
+    }
+
     /// Returns tree height (`0` for empty, `1` for a leaf root).
     pub fn height(&mut self) -> Result<usize> {
         let Some(root) = self.pager.root_page_id() else {
@@ -102,8 +209,21 @@ impl BPlusTree {
         Ok(self.validate_subtree(root, 0, &mut seen)?.height)
     }
 
-    /// Looks up one opaque binary key.
+    /// Looks up one opaque binary key and records structural page-access evidence.
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let before = self.pager.read_page_calls();
+        let result = self.get_uninstrumented(key);
+        if result.is_ok() {
+            self.instrumentation.point_reads = self.instrumentation.point_reads.saturating_add(1);
+            self.instrumentation.point_page_accesses = self
+                .instrumentation
+                .point_page_accesses
+                .saturating_add(self.pager.read_page_calls().saturating_sub(before));
+        }
+        result
+    }
+
+    pub(super) fn get_uninstrumented(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         validate_key(key)?;
         let Some(mut page_id) = self.pager.root_page_id() else {
             return Ok(None);
@@ -149,7 +269,8 @@ impl BPlusTree {
     /// published.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
         validate_key_value(key, value)?;
-        let previous = self.get(key)?;
+        let data_write_before = self.pager.data_page_bytes_written();
+        let previous = self.get_uninstrumented(key)?;
         self.refresh_reusable_pages()?;
         let stored_key = self.store_key(key)?;
         let stored_value = self.store_value(&stored_key, value)?;
@@ -176,6 +297,7 @@ impl BPlusTree {
             }
         };
         self.pager.set_root(Some(new_root))?;
+        self.record_mutation(key.len().saturating_add(value.len()), data_write_before);
         Ok(previous)
     }
 

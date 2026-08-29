@@ -15,6 +15,28 @@ impl BPlusTree {
         end: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let before = self.pager.read_page_calls();
+        let result = self.range_scan_uninstrumented(start, end, limit);
+        if let Ok(rows) = &result {
+            self.instrumentation.range_scans = self.instrumentation.range_scans.saturating_add(1);
+            self.instrumentation.range_page_accesses = self
+                .instrumentation
+                .range_page_accesses
+                .saturating_add(self.pager.read_page_calls().saturating_sub(before));
+            self.instrumentation.range_result_records = self
+                .instrumentation
+                .range_result_records
+                .saturating_add(u64::try_from(rows.len()).unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    pub(super) fn range_scan_uninstrumented(
+        &mut self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         validate_key(start)?;
         if let Some(end) = end {
             validate_key(end)?;

@@ -13,9 +13,11 @@ mod workload;
 pub use bytes::{ByteString, ByteStringError};
 pub use differential::{compare_workload, DifferentialError, DifferentialReport};
 pub use engine::{
-    execute_step, execute_workload, validate_key, validate_key_value, validate_range_scan,
-    ConcurrencyMode, CrashRecovery, DistributionMode, EngineCapabilities, KvEngine, LogicalModel,
-    Persistence, StorageArchitecture, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    execute_step, execute_workload, validate_experiment_compatibility, validate_key,
+    validate_key_value, validate_range_scan, AmplificationInstrumented, AmplificationRatio,
+    AmplificationReport, ConcurrencyMode, CrashRecovery, DistributionMode, EngineCapabilities,
+    KvEngine, LogicalModel, Persistence, ReadWorkUnit, StorageArchitecture,
+    StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 pub use error::{DbError, ErrorClass, Result};
 pub use operation::{Outcome, WorkloadStep};
