@@ -6,10 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use db_core::{
-    compare_experiment_trace, compare_workload, execute_workload, generate_experiment_trace,
-    generate_workload, DbError, DifferentialError, ExperimentComparisonReport,
-    ExperimentGeneratorConfig, ExperimentProfile, ExperimentTrace, GeneratorConfig, KvEngine,
-    Outcome, Workload,
+    compare_experiment_batch, compare_experiment_trace, compare_workload, execute_workload,
+    generate_experiment_trace, generate_workload, DbError, DifferentialError,
+    ExperimentBatchConfig, ExperimentBatchReport, ExperimentComparisonReport,
+    ExperimentExecutionOrder, ExperimentGeneratorConfig, ExperimentProfile, ExperimentTrace,
+    GeneratorConfig, KvEngine, Outcome, Workload,
 };
 use db_storage_btree::{BPlusTree, BtreeError};
 use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
@@ -157,6 +158,48 @@ enum Command {
         #[arg(long)]
         notes: Option<String>,
     },
+    /// Run repeated fresh-engine comparisons with deterministic AB/BA order and archive every attempt.
+    ExperimentBatchArchive {
+        /// Versioned experiment trace JSON file.
+        #[arg(long)]
+        trace: PathBuf,
+        /// New workspace directory containing one fresh B+ tree/LSM target pair per attempt.
+        #[arg(long)]
+        workspace_dir: PathBuf,
+        /// New immutable evidence archive directory.
+        #[arg(long)]
+        archive_dir: PathBuf,
+        /// Positive even number of attempts included in measured distributions.
+        #[arg(long, default_value_t = 10)]
+        included_attempts: u32,
+        /// Warmup attempts executed and archived but explicitly excluded from distributions.
+        #[arg(long, default_value_t = 2)]
+        warmup_attempts: u32,
+        /// Seed controlling deterministic AB/BA pair orientation.
+        #[arg(long)]
+        order_seed: u64,
+        /// B+ tree validated-page cache capacity.
+        #[arg(long, default_value_t = 64)]
+        btree_cache_pages: usize,
+        /// Exact source revision represented by the binary/run.
+        #[arg(long)]
+        revision: String,
+        /// Human-readable host identity without secrets.
+        #[arg(long)]
+        host_label: Option<String>,
+        /// Filesystem under test, when known.
+        #[arg(long)]
+        filesystem: Option<String>,
+        /// Storage device/model label, without credentials or serial numbers.
+        #[arg(long)]
+        storage_device: Option<String>,
+        /// Declared cache preparation state for this run.
+        #[arg(long, value_enum, default_value_t = CacheStateKind::Unspecified)]
+        cache_state: CacheStateKind,
+        /// Optional free-form experiment note. Do not include secrets.
+        #[arg(long)]
+        notes: Option<String>,
+    },
     /// Validate an append-log file without modifying it.
     Verify {
         /// Append-log file.
@@ -269,6 +312,15 @@ struct EvidenceArchiveEnvironment {
 
 #[derive(Debug, Serialize)]
 struct EvidenceArchiveIndex {
+    format_version: u16,
+    repository_revision: String,
+    files: [&'static str; 3],
+}
+
+const BATCH_EVIDENCE_ARCHIVE_FORMAT_VERSION: u16 = 1;
+
+#[derive(Debug, Serialize)]
+struct BatchEvidenceArchiveIndex {
     format_version: u16,
     repository_revision: String,
     files: [&'static str; 3],
@@ -454,6 +506,80 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
             };
             write_evidence_archive(&archive_dir, &revision, &trace, &comparison, &environment)
         }
+        Command::ExperimentBatchArchive {
+            trace,
+            workspace_dir,
+            archive_dir,
+            included_attempts,
+            warmup_attempts,
+            order_seed,
+            btree_cache_pages,
+            revision,
+            host_label,
+            filesystem,
+            storage_device,
+            cache_state,
+            notes,
+        } => {
+            validate_revision(&revision)?;
+            let trace = read_experiment_trace(&trace)?;
+            let config = ExperimentBatchConfig {
+                included_attempts,
+                warmup_attempts,
+                order_seed,
+            };
+            config.validate(&trace)?;
+            ensure_fresh_batch_targets(&workspace_dir, &archive_dir)?;
+            fs::create_dir(&workspace_dir)?;
+            let batch = compare_experiment_batch(&trace, config, |attempt_index, order| {
+                let attempt_dir = workspace_dir.join(format!("attempt-{attempt_index:06}"));
+                fs::create_dir(&attempt_dir).map_err(DbError::Io)?;
+                let btree_path = attempt_dir.join("btree.db");
+                let lsm_path = attempt_dir.join("lsm");
+                let create_btree = || {
+                    BPlusTree::create_new(&btree_path, btree_cache_pages).map_err(btree_error_to_db)
+                };
+                let create_lsm = || LsmEngine::create_new(&lsm_path);
+                match order {
+                    ExperimentExecutionOrder::LeftFirst => {
+                        let btree = create_btree()?;
+                        let lsm = create_lsm()?;
+                        Ok((btree, lsm))
+                    }
+                    ExperimentExecutionOrder::RightFirst => {
+                        let lsm = create_lsm()?;
+                        let btree = create_btree()?;
+                        Ok((btree, lsm))
+                    }
+                }
+            })?;
+            let environment = EvidenceArchiveEnvironment {
+                format_version: EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                repository_revision: revision.clone(),
+                db_lab_version: env!("CARGO_PKG_VERSION"),
+                target_os: std::env::consts::OS,
+                target_arch: std::env::consts::ARCH,
+                build_profile: if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                },
+                rustc_version: rustc_version(),
+                host_label,
+                filesystem,
+                storage_device,
+                cache_state: cache_state.as_str(),
+                btree_cache_pages,
+                recorded_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| {
+                        CliError::Usage(format!("system clock precedes Unix epoch: {error}"))
+                    })?
+                    .as_secs(),
+                notes,
+            };
+            write_batch_evidence_archive(&archive_dir, &revision, &trace, &batch, &environment)
+        }
         Command::Verify { path } => {
             let report: VerificationReport = LogEngine::verify(path)?;
             write_stdout_json(&report)
@@ -544,6 +670,37 @@ fn ensure_fresh_experiment_targets(
     Ok(())
 }
 
+fn btree_error_to_db(error: BtreeError) -> DbError {
+    match error {
+        BtreeError::InvalidInput(reason) => DbError::InvalidInput(reason),
+        BtreeError::Io(error) => DbError::Io(error),
+        BtreeError::Corruption { offset, reason } => DbError::Corruption { offset, reason },
+        BtreeError::UnsupportedVersion { found, supported } => DbError::UnsupportedVersion {
+            format: "B+ tree page file",
+            found,
+            supported,
+        },
+        BtreeError::Poisoned => DbError::Poisoned,
+    }
+}
+
+fn ensure_fresh_batch_targets(workspace_dir: &Path, archive_dir: &Path) -> Result<(), CliError> {
+    if workspace_dir == archive_dir {
+        return Err(CliError::Usage(
+            "batch workspace and archive directories must be distinct".to_owned(),
+        ));
+    }
+    for (label, path) in [("workspace", workspace_dir), ("archive", archive_dir)] {
+        if path.exists() {
+            return Err(CliError::Usage(format!(
+                "experiment batch {label} path already exists: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_revision(revision: &str) -> Result<(), CliError> {
     let revision = revision.trim();
     if revision.is_empty()
@@ -595,6 +752,33 @@ fn rustc_version() -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .map(|value| value.trim().to_owned())
+}
+
+fn write_batch_evidence_archive(
+    archive_dir: &Path,
+    revision: &str,
+    trace: &ExperimentTrace,
+    batch: &ExperimentBatchReport,
+    environment: &EvidenceArchiveEnvironment,
+) -> Result<(), CliError> {
+    fs::create_dir(archive_dir)?;
+    let result = (|| {
+        write_new_json(&archive_dir.join("trace.json"), trace)?;
+        write_new_json(&archive_dir.join("batch.json"), batch)?;
+        write_new_json(&archive_dir.join("environment.json"), environment)?;
+        write_new_json(
+            &archive_dir.join("index.json"),
+            &BatchEvidenceArchiveIndex {
+                format_version: BATCH_EVIDENCE_ARCHIVE_FORMAT_VERSION,
+                repository_revision: revision.to_owned(),
+                files: ["trace.json", "batch.json", "environment.json"],
+            },
+        )
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(archive_dir);
+    }
+    result
 }
 
 fn write_evidence_archive(

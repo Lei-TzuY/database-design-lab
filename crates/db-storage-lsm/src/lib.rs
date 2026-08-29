@@ -31,10 +31,10 @@ use std::time::Instant;
 use db_core::{
     validate_key, validate_key_value, validate_range_scan, AmplificationInstrumented,
     AmplificationReport, ConcurrencyMode, CrashRecovery, DbError, DistributionMode,
-    EngineCapabilities, KvEngine, LogicalModel, OperationalTimingInstrumented,
-    OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
-    Persistence, ReadWorkUnit, Result, StorageArchitecture, StructuralReadAmplification,
-    MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    EngineCapabilities, KvEngine, LogicalModel, OperationalAttemptOutcome,
+    OperationalAttemptSample, OperationalTimingInstrumented, OperationalTimingReport,
+    OperationalTimingSample, OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit,
+    Result, StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 use serde::Serialize;
 
@@ -654,116 +654,151 @@ impl LsmEngine {
             .instrumentation
             .compaction_input_sstable_bytes
             .saturating_add(input_bytes);
-        let mut merged = BTreeMap::new();
-        for table in &self.tables {
-            let _ = table.overlay_range(b"", None, &mut merged)?;
-        }
-        if merged.is_empty() {
-            return Err(corruption(
-                "full-set compaction unexpectedly produced no entries",
-            ));
-        }
+        let compaction_result = (|| -> Result<()> {
+            let mut merged = BTreeMap::new();
+            for table in &self.tables {
+                let _ = table.overlay_range(b"", None, &mut merged)?;
+            }
+            if merged.is_empty() {
+                return Err(corruption(
+                    "full-set compaction unexpectedly produced no entries",
+                ));
+            }
 
-        let manifest_id = self.next_manifest_id;
-        let next_manifest_id = checked_next_id(manifest_id, "manifest")?;
-        let durable_sequence = self.version.durable_sequence;
-        if merged
-            .values()
-            .any(|entry| entry.sequence > durable_sequence)
-        {
-            return Err(corruption(
-                "full-set compaction input exceeds the manifest durable sequence",
-            ));
-        }
-        merged.retain(|_, entry| entry.value.is_some());
+            let manifest_id = self.next_manifest_id;
+            let next_manifest_id = checked_next_id(manifest_id, "manifest")?;
+            let durable_sequence = self.version.durable_sequence;
+            if merged
+                .values()
+                .any(|entry| entry.sequence > durable_sequence)
+            {
+                return Err(corruption(
+                    "full-set compaction input exceeds the manifest durable sequence",
+                ));
+            }
+            merged.retain(|_, entry| entry.value.is_some());
 
-        let (table, descriptors, next_table_id) = if merged.is_empty() {
-            (None, Vec::new(), self.next_table_id)
-        } else {
-            let table_id = self.next_table_id;
-            let next_table_id = checked_next_id(table_id, "SSTable")?;
+            let (table, descriptors, next_table_id) = if merged.is_empty() {
+                (None, Vec::new(), self.next_table_id)
+            } else {
+                let table_id = self.next_table_id;
+                let next_table_id = checked_next_id(table_id, "SSTable")?;
+                #[cfg(test)]
+                self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
+                let table = SsTable::create_new_at_level(
+                    &self.path,
+                    table_id,
+                    1,
+                    durable_sequence,
+                    &merged,
+                )?;
+                #[cfg(test)]
+                self.compaction_after_file_write_for_test(
+                    CompactionWriteKind::L1Sstable,
+                    &self.path.join(sstable_file_name(table_id)),
+                )?;
+                let descriptor = table.descriptor().clone();
+                self.instrumentation.compaction_output_sstable_bytes_written = self
+                    .instrumentation
+                    .compaction_output_sstable_bytes_written
+                    .saturating_add(descriptor.file_bytes);
+                (Some(table), vec![descriptor], next_table_id)
+            };
+
             #[cfg(test)]
-            self.compaction_before_write_for_test(CompactionWriteKind::L1Sstable)?;
-            let table =
-                SsTable::create_new_at_level(&self.path, table_id, 1, durable_sequence, &merged)?;
+            self.compaction_before_write_for_test(CompactionWriteKind::Manifest)?;
+            let compacted = manifest::prepare_install(
+                &self.path,
+                &self.version,
+                manifest_id,
+                manifest::ManifestState {
+                    durable_sequence,
+                    tombstone_gc_sequence: durable_sequence,
+                    wal_id: self.version.wal_id,
+                    wal_first_sequence: self.version.wal_first_sequence,
+                    tables: descriptors,
+                },
+            )?;
             #[cfg(test)]
             self.compaction_after_file_write_for_test(
-                CompactionWriteKind::L1Sstable,
-                &self.path.join(sstable_file_name(table_id)),
+                CompactionWriteKind::Manifest,
+                &self.path.join(manifest::manifest_file_name(manifest_id)),
             )?;
-            let descriptor = table.descriptor().clone();
-            self.instrumentation.compaction_output_sstable_bytes_written = self
-                .instrumentation
-                .compaction_output_sstable_bytes_written
-                .saturating_add(descriptor.file_bytes);
-            (Some(table), vec![descriptor], next_table_id)
-        };
 
-        #[cfg(test)]
-        self.compaction_before_write_for_test(CompactionWriteKind::Manifest)?;
-        let compacted = manifest::prepare_install(
-            &self.path,
-            &self.version,
-            manifest_id,
-            manifest::ManifestState {
-                durable_sequence,
-                tombstone_gc_sequence: durable_sequence,
-                wal_id: self.version.wal_id,
-                wal_first_sequence: self.version.wal_first_sequence,
-                tables: descriptors,
-            },
-        )?;
-        #[cfg(test)]
-        self.compaction_after_file_write_for_test(
-            CompactionWriteKind::Manifest,
-            &self.path.join(manifest::manifest_file_name(manifest_id)),
-        )?;
+            #[cfg(test)]
+            self.compaction_before_write_for_test(CompactionWriteKind::FirstCurrent)?;
+            manifest::publish_prepared(&self.path, &compacted)?;
+            #[cfg(test)]
+            self.compaction_after_current_write_for_test(
+                CompactionWriteKind::FirstCurrent,
+                compacted.current_generation,
+            )?;
 
-        #[cfg(test)]
-        self.compaction_before_write_for_test(CompactionWriteKind::FirstCurrent)?;
-        manifest::publish_prepared(&self.path, &compacted)?;
-        #[cfg(test)]
-        self.compaction_after_current_write_for_test(
-            CompactionWriteKind::FirstCurrent,
-            compacted.current_generation,
-        )?;
+            #[cfg(test)]
+            self.compaction_before_write_for_test(CompactionWriteKind::MirrorCurrent)?;
+            let mirrored = manifest::mirror_current(&self.path, &compacted)?;
+            #[cfg(test)]
+            self.compaction_after_current_write_for_test(
+                CompactionWriteKind::MirrorCurrent,
+                mirrored.current_generation,
+            )?;
+            let active_table_id = table.as_ref().map(|table| table.descriptor().table_id);
+            let active_manifest_id = mirrored.manifest_id;
 
-        #[cfg(test)]
-        self.compaction_before_write_for_test(CompactionWriteKind::MirrorCurrent)?;
-        let mirrored = manifest::mirror_current(&self.path, &compacted)?;
-        #[cfg(test)]
-        self.compaction_after_current_write_for_test(
-            CompactionWriteKind::MirrorCurrent,
-            mirrored.current_generation,
-        )?;
-        let active_table_id = table.as_ref().map(|table| table.descriptor().table_id);
-        let active_manifest_id = mirrored.manifest_id;
-
-        let new_tables = table.into_iter().collect();
-        let old_tables = std::mem::replace(&mut self.tables, new_tables);
-        self.version = mirrored;
-        self.next_table_id = next_table_id;
-        self.next_manifest_id = next_manifest_id;
-        drop(old_tables);
-        self.reclaim_obsolete_sstables(active_table_id);
-        self.reclaim_obsolete_manifests(active_manifest_id);
+            let new_tables = table.into_iter().collect();
+            let old_tables = std::mem::replace(&mut self.tables, new_tables);
+            self.version = mirrored;
+            self.next_table_id = next_table_id;
+            self.next_manifest_id = next_manifest_id;
+            drop(old_tables);
+            self.reclaim_obsolete_sstables(active_table_id);
+            self.reclaim_obsolete_manifests(active_manifest_id);
+            Ok(())
+        })();
         let duration_ns =
             u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.operational_timing
-            .compaction_stall_ns
-            .push(duration_ns);
-        self.operational_timing
-            .compaction_stall_samples
-            .push(OperationalTimingSample {
-                measured_step_index: self.operational_step_index,
-                duration_ns,
-                work: OperationalWork {
-                    unit: OperationalWorkUnit::LsmSstableRecordVersion,
-                    units_examined: input_records,
-                    bytes_examined: input_bytes,
-                },
-            });
-        Ok(())
+        let work = OperationalWork {
+            unit: OperationalWorkUnit::LsmSstableRecordVersion,
+            units_examined: input_records,
+            bytes_examined: input_bytes,
+        };
+        match compaction_result {
+            Ok(()) => {
+                self.operational_timing
+                    .compaction_stall_ns
+                    .push(duration_ns);
+                self.operational_timing
+                    .compaction_stall_samples
+                    .push(OperationalTimingSample {
+                        measured_step_index: self.operational_step_index,
+                        duration_ns,
+                        work,
+                    });
+                self.operational_timing
+                    .compaction_stall_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: self.operational_step_index,
+                        duration_ns,
+                        work: Some(work),
+                        outcome: OperationalAttemptOutcome::Succeeded,
+                    });
+                Ok(())
+            }
+            Err(error) => {
+                self.operational_timing
+                    .compaction_stall_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: self.operational_step_index,
+                        duration_ns,
+                        work: Some(work),
+                        outcome: OperationalAttemptOutcome::Failed {
+                            error_class: error.class(),
+                            message: error.to_string(),
+                        },
+                    });
+                Err(error)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1087,6 +1122,14 @@ impl KvEngine for LsmEngine {
                         duration_ns,
                         work,
                     });
+                operational_timing
+                    .reopen_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: Some(work),
+                        outcome: OperationalAttemptOutcome::Succeeded,
+                    });
                 reopened.instrumentation = instrumentation;
                 reopened.operational_timing = operational_timing;
                 reopened.operational_step_index = operational_step_index;
@@ -1094,6 +1137,18 @@ impl KvEngine for LsmEngine {
                 Ok(())
             }
             Err(error) => {
+                let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.operational_timing
+                    .reopen_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: operational_step_index,
+                        duration_ns,
+                        work: None,
+                        outcome: OperationalAttemptOutcome::Failed {
+                            error_class: error.class(),
+                            message: error.to_string(),
+                        },
+                    });
                 self.poisoned = true;
                 Err(error)
             }

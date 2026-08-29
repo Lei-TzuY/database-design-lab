@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{ByteString, DbError, Outcome, Result, Workload, WorkloadStep};
+use crate::{ByteString, DbError, ErrorClass, Outcome, Result, Workload, WorkloadStep};
 
 /// Maximum key size in the first common KV semantics.
 pub const MAX_KEY_BYTES: usize = 4 * 1024;
@@ -183,7 +183,35 @@ pub struct OperationalTimingSample {
     pub work: OperationalWork,
 }
 
-/// Raw process-local successful recovery and compaction-stall samples.
+/// Outcome retained for every attempted timed recovery/compaction operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OperationalAttemptOutcome {
+    /// The timed operation completed successfully.
+    Succeeded,
+    /// The timed operation returned an error. The engine may require reopen before reuse.
+    Failed {
+        /// Stable common error class.
+        error_class: ErrorClass,
+        /// Human-readable error detail retained for forensic evidence.
+        message: String,
+    },
+}
+
+/// One attempted synchronous operation, including failures excluded from success distributions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OperationalAttemptSample {
+    /// Zero-based measured experiment step that triggered this attempt, or `None` outside a measured runner.
+    pub measured_step_index: Option<u64>,
+    /// Wall-clock duration measured with `std::time::Instant` until success or returned failure.
+    pub duration_ns: u64,
+    /// Deterministic work when it can be reconstructed without performing extra measurement I/O.
+    pub work: Option<OperationalWork>,
+    /// Success/failure disposition retained without filtering the raw attempt stream.
+    pub outcome: OperationalAttemptOutcome,
+}
+
+/// Raw process-local recovery and compaction-stall evidence.
 ///
 /// Duration plus deterministic work is evidence to archive, not a performance claim: failed/excluded attempts,
 /// execution-order counterbalancing, cache/filesystem protocol, host pinning, and scheduler/device controls remain
@@ -198,6 +226,10 @@ pub struct OperationalTimingReport {
     pub reopen_samples: Vec<OperationalTimingSample>,
     /// Successful synchronous compaction samples with deterministic work and measured-step association.
     pub compaction_stall_samples: Vec<OperationalTimingSample>,
+    /// Every same-handle `REOPEN` attempt, including failures omitted from `reopen_ns`.
+    pub reopen_attempts: Vec<OperationalAttemptSample>,
+    /// Every triggered synchronous compaction attempt, including failures omitted from success distributions.
+    pub compaction_stall_attempts: Vec<OperationalAttemptSample>,
 }
 
 /// Reset/context/report surface for operational samples collected during an experiment window.

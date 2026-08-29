@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     validate_experiment_compatibility, validate_key, validate_key_value, validate_range_scan,
     AmplificationInstrumented, AmplificationReport, ByteString, DbError, EngineCapabilities,
-    KvEngine, OperationalTimingInstrumented, OperationalTimingReport, Result, MAX_VALUE_BYTES,
+    ErrorClass, KvEngine, OperationalTimingInstrumented, OperationalTimingReport, Result,
+    MAX_VALUE_BYTES,
 };
 
 /// JSON schema version for Phase 4 experiment traces.
@@ -16,6 +17,12 @@ pub const MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 /// Defensive bound on rows requested by one experiment range scan.
 pub const MAX_EXPERIMENT_RANGE_LIMIT: u32 = 1_000_000;
+/// JSON schema version for repeated counterbalanced experiment batches.
+pub const EXPERIMENT_BATCH_FORMAT_VERSION: u16 = 1;
+/// Defensive bound on warmup plus included attempts retained in one batch report.
+pub const MAX_EXPERIMENT_BATCH_ATTEMPTS: u32 = 128;
+/// Defensive bound on total measured step executions represented by one batch.
+pub const MAX_EXPERIMENT_BATCH_MEASURED_STEP_EXECUTIONS: u64 = 2_000_000;
 
 const EXPERIMENT_KEY_BYTES: u64 = 8;
 
@@ -302,6 +309,150 @@ pub enum ExperimentOutcome {
     Reopened,
 }
 
+/// Which candidate executes first for every paired setup/measured action in one comparison attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentExecutionOrder {
+    /// Execute the logical left candidate first, then the logical right candidate.
+    LeftFirst,
+    /// Execute the logical right candidate first, then the logical left candidate.
+    RightFirst,
+}
+
+impl ExperimentExecutionOrder {
+    const fn opposite(self) -> Self {
+        match self {
+            Self::LeftFirst => Self::RightFirst,
+            Self::RightFirst => Self::LeftFirst,
+        }
+    }
+}
+
+/// Repeated-run configuration used to counterbalance execution-order bias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentBatchConfig {
+    /// Number of measured attempts included in later distributions. Must be positive and even.
+    pub included_attempts: u32,
+    /// Warmup attempts that are executed and archived but explicitly excluded from distributions.
+    pub warmup_attempts: u32,
+    /// Stable seed used only to choose the orientation of each included AB/BA pair and warmup order.
+    pub order_seed: u64,
+}
+
+impl ExperimentBatchConfig {
+    /// Validates counterbalancing and defensive resource bounds for one trace.
+    pub fn validate(self, trace: &ExperimentTrace) -> Result<()> {
+        if self.included_attempts == 0 || self.included_attempts % 2 != 0 {
+            return Err(DbError::InvalidInput(
+                "experiment batch included_attempts must be a positive even number".to_owned(),
+            ));
+        }
+        let total = self
+            .included_attempts
+            .checked_add(self.warmup_attempts)
+            .ok_or_else(|| {
+                DbError::InvalidInput("experiment batch attempt count overflowed".to_owned())
+            })?;
+        if total > MAX_EXPERIMENT_BATCH_ATTEMPTS {
+            return Err(DbError::InvalidInput(format!(
+                "experiment batch has {total} attempts; maximum is {MAX_EXPERIMENT_BATCH_ATTEMPTS}"
+            )));
+        }
+        let measured_steps = u64::try_from(trace.measured_steps.len()).map_err(|_| {
+            DbError::InvalidInput("measured step count does not fit u64".to_owned())
+        })?;
+        let executions = measured_steps
+            .checked_mul(u64::from(total))
+            .ok_or_else(|| {
+                DbError::InvalidInput(
+                    "experiment batch measured execution count overflowed".to_owned(),
+                )
+            })?;
+        if executions > MAX_EXPERIMENT_BATCH_MEASURED_STEP_EXECUTIONS {
+            return Err(DbError::InvalidInput(format!(
+                "experiment batch represents {executions} measured step executions; maximum is {MAX_EXPERIMENT_BATCH_MEASURED_STEP_EXECUTIONS}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Whether one attempt participates in measured distributions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentAttemptDisposition {
+    /// Warmup attempt retained as evidence but excluded from measured distributions.
+    ExcludedWarmup,
+    /// Attempt included in the counterbalanced measured set.
+    Included,
+}
+
+/// Stage at which a retained batch attempt failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentAttemptFailureStage {
+    /// Fresh engine creation/factory failed before the trace could run.
+    Factory,
+    /// The two-engine comparison returned an execution or logical-equivalence error.
+    Comparison,
+    /// A successful pair produced deterministic outcomes different from an earlier successful attempt.
+    CrossAttemptOutcomeMismatch,
+}
+
+/// Result retained for one fresh-engine batch attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ExperimentAttemptResult {
+    /// Both fresh candidates completed and matched logically.
+    Succeeded {
+        setup_steps_executed: usize,
+        measured_steps_executed: usize,
+        left: Box<ExperimentEngineEvidence>,
+        right: Box<ExperimentEngineEvidence>,
+    },
+    /// The attempt failed but remains archived instead of disappearing from evidence.
+    Failed {
+        stage: ExperimentAttemptFailureStage,
+        error_class: ErrorClass,
+        message: String,
+        /// Partial left timing evidence when engines existed before failure.
+        left_operational_timing: Option<Box<OperationalTimingReport>>,
+        /// Partial right timing evidence when engines existed before failure.
+        right_operational_timing: Option<Box<OperationalTimingReport>>,
+    },
+}
+
+/// One retained repeated-run attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExperimentBatchAttempt {
+    pub attempt_index: u32,
+    pub disposition: ExperimentAttemptDisposition,
+    pub execution_order: ExperimentExecutionOrder,
+    pub result: ExperimentAttemptResult,
+}
+
+/// Aggregate counts that make inclusion/exclusion and AB/BA balance explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ExperimentBatchSummary {
+    pub included_successes: u32,
+    pub included_failures: u32,
+    pub excluded_warmups: u32,
+    pub included_left_first: u32,
+    pub included_right_first: u32,
+}
+
+/// Self-contained repeated experiment report with one canonical logical outcome vector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExperimentBatchReport {
+    pub format_version: u16,
+    pub config: ExperimentBatchConfig,
+    pub trace: ExperimentTrace,
+    /// Outcomes are stored once after the first successful fresh-engine comparison and must match later successes.
+    pub canonical_outcomes: Option<Vec<ExperimentOutcome>>,
+    pub summary: ExperimentBatchSummary,
+    pub attempts: Vec<ExperimentBatchAttempt>,
+}
+
 /// Evidence produced by one engine for a shared trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExperimentEngineEvidence {
@@ -541,11 +692,25 @@ where
     })
 }
 
-/// Runs the exact same trace against two fresh candidates and refuses to report incomparable semantics.
+/// Runs the exact same trace against two fresh candidates using the historical left-first order.
 pub fn compare_experiment_trace<L, R>(
     left: &mut L,
     right: &mut R,
     trace: &ExperimentTrace,
+) -> Result<ExperimentComparisonReport>
+where
+    L: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
+    R: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
+{
+    compare_experiment_trace_ordered(left, right, trace, ExperimentExecutionOrder::LeftFirst)
+}
+
+/// Runs the exact same trace against two fresh candidates with an explicit paired execution order.
+pub fn compare_experiment_trace_ordered<L, R>(
+    left: &mut L,
+    right: &mut R,
+    trace: &ExperimentTrace,
+    execution_order: ExperimentExecutionOrder,
 ) -> Result<ExperimentComparisonReport>
 where
     L: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
@@ -562,8 +727,8 @@ where
 
     let mut setup_outcome_bytes = 0_u64;
     for (index, step) in trace.setup_steps.iter().enumerate() {
-        let left_outcome = execute_experiment_step(left, step)?;
-        let right_outcome = execute_experiment_step(right, step)?;
+        let (left_outcome, right_outcome) =
+            execute_experiment_pair(left, right, step, execution_order)?;
         if left_outcome != right_outcome {
             return Err(logical_mismatch(
                 "setup",
@@ -586,8 +751,8 @@ where
     let mut outcome_bytes = 0_u64;
     let mut outcomes = Vec::with_capacity(trace.measured_steps.len());
     for (index, step) in trace.measured_steps.iter().enumerate() {
-        let left_outcome = execute_measured_experiment_step(left, step, index)?;
-        let right_outcome = execute_measured_experiment_step(right, step, index)?;
+        let (left_outcome, right_outcome) =
+            execute_measured_experiment_pair(left, right, step, index, execution_order)?;
         if left_outcome != right_outcome {
             return Err(logical_mismatch(
                 "measured",
@@ -620,6 +785,212 @@ where
             operational_timing: right.operational_timing_report(),
         },
     })
+}
+
+/// Runs a counterbalanced repeated batch using fresh engines supplied by `factory`.
+///
+/// Included attempts are arranged in deterministic opposite-order pairs, guaranteeing equal left-first
+/// and right-first counts. Warmups are retained but excluded. Per-attempt factory/comparison failures are
+/// evidence, not batch-level errors; schema/config/trace validation failures still fail the batch itself.
+pub fn compare_experiment_batch<L, R, F>(
+    trace: &ExperimentTrace,
+    config: ExperimentBatchConfig,
+    mut factory: F,
+) -> Result<ExperimentBatchReport>
+where
+    L: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
+    R: KvEngine + AmplificationInstrumented + OperationalTimingInstrumented,
+    F: FnMut(u32, ExperimentExecutionOrder) -> Result<(L, R)>,
+{
+    trace.validate()?;
+    config.validate(trace)?;
+    let total = config.included_attempts + config.warmup_attempts;
+    let mut canonical_outcomes: Option<Vec<ExperimentOutcome>> = None;
+    let mut attempts = Vec::with_capacity(usize::try_from(total).unwrap_or(usize::MAX));
+    let mut summary = ExperimentBatchSummary {
+        included_successes: 0,
+        included_failures: 0,
+        excluded_warmups: config.warmup_attempts,
+        included_left_first: 0,
+        included_right_first: 0,
+    };
+
+    for attempt_index in 0..total {
+        let disposition = if attempt_index < config.warmup_attempts {
+            ExperimentAttemptDisposition::ExcludedWarmup
+        } else {
+            ExperimentAttemptDisposition::Included
+        };
+        let execution_order = batch_execution_order(config, attempt_index);
+        if disposition == ExperimentAttemptDisposition::Included {
+            match execution_order {
+                ExperimentExecutionOrder::LeftFirst => {
+                    summary.included_left_first = summary.included_left_first.saturating_add(1)
+                }
+                ExperimentExecutionOrder::RightFirst => {
+                    summary.included_right_first = summary.included_right_first.saturating_add(1)
+                }
+            }
+        }
+
+        let pair = factory(attempt_index, execution_order);
+        let result = match pair {
+            Err(error) => ExperimentAttemptResult::Failed {
+                stage: ExperimentAttemptFailureStage::Factory,
+                error_class: error.class(),
+                message: error.to_string(),
+                left_operational_timing: None,
+                right_operational_timing: None,
+            },
+            Ok((mut left, mut right)) => {
+                match compare_experiment_trace_ordered(
+                    &mut left,
+                    &mut right,
+                    trace,
+                    execution_order,
+                ) {
+                    Err(error) => ExperimentAttemptResult::Failed {
+                        stage: ExperimentAttemptFailureStage::Comparison,
+                        error_class: error.class(),
+                        message: error.to_string(),
+                        left_operational_timing: Some(Box::new(left.operational_timing_report())),
+                        right_operational_timing: Some(Box::new(right.operational_timing_report())),
+                    },
+                    Ok(report) => {
+                        if canonical_outcomes
+                            .as_ref()
+                            .is_some_and(|canonical| canonical != &report.outcomes)
+                        {
+                            ExperimentAttemptResult::Failed {
+                                stage: ExperimentAttemptFailureStage::CrossAttemptOutcomeMismatch,
+                                error_class: ErrorClass::InvalidInput,
+                                message: "successful experiment attempt produced outcomes different from the canonical successful attempt".to_owned(),
+                                left_operational_timing: Some(Box::new(report.left.operational_timing.clone())),
+                                right_operational_timing: Some(Box::new(report.right.operational_timing.clone())),
+                            }
+                        } else {
+                            if canonical_outcomes.is_none() {
+                                canonical_outcomes = Some(report.outcomes.clone());
+                            }
+                            ExperimentAttemptResult::Succeeded {
+                                setup_steps_executed: report.setup_steps_executed,
+                                measured_steps_executed: report.measured_steps_executed,
+                                left: Box::new(report.left),
+                                right: Box::new(report.right),
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        if disposition == ExperimentAttemptDisposition::Included {
+            match &result {
+                ExperimentAttemptResult::Succeeded { .. } => {
+                    summary.included_successes = summary.included_successes.saturating_add(1)
+                }
+                ExperimentAttemptResult::Failed { .. } => {
+                    summary.included_failures = summary.included_failures.saturating_add(1)
+                }
+            }
+        }
+        attempts.push(ExperimentBatchAttempt {
+            attempt_index,
+            disposition,
+            execution_order,
+            result,
+        });
+    }
+
+    debug_assert_eq!(summary.included_left_first, summary.included_right_first);
+    Ok(ExperimentBatchReport {
+        format_version: EXPERIMENT_BATCH_FORMAT_VERSION,
+        config,
+        trace: trace.clone(),
+        canonical_outcomes,
+        summary,
+        attempts,
+    })
+}
+
+fn batch_execution_order(
+    config: ExperimentBatchConfig,
+    attempt_index: u32,
+) -> ExperimentExecutionOrder {
+    if attempt_index < config.warmup_attempts {
+        let mut random = SplitMix64::new(
+            config
+                .order_seed
+                .wrapping_add(u64::from(attempt_index))
+                .wrapping_add(0xa076_1d64_78bd_642f),
+        );
+        return if random.next() & 1 == 0 {
+            ExperimentExecutionOrder::LeftFirst
+        } else {
+            ExperimentExecutionOrder::RightFirst
+        };
+    }
+    let included_index = attempt_index - config.warmup_attempts;
+    let pair_index = included_index / 2;
+    let mut random = SplitMix64::new(
+        config
+            .order_seed
+            .wrapping_add(u64::from(pair_index).wrapping_mul(0xe703_7ed1_a0b4_28db)),
+    );
+    let pair_first = if random.next() & 1 == 0 {
+        ExperimentExecutionOrder::LeftFirst
+    } else {
+        ExperimentExecutionOrder::RightFirst
+    };
+    if included_index % 2 == 0 {
+        pair_first
+    } else {
+        pair_first.opposite()
+    }
+}
+
+fn execute_experiment_pair<L: KvEngine, R: KvEngine>(
+    left: &mut L,
+    right: &mut R,
+    step: &ExperimentStep,
+    order: ExperimentExecutionOrder,
+) -> Result<(ExperimentOutcome, ExperimentOutcome)> {
+    match order {
+        ExperimentExecutionOrder::LeftFirst => {
+            let left_outcome = execute_experiment_step(left, step)?;
+            let right_outcome = execute_experiment_step(right, step)?;
+            Ok((left_outcome, right_outcome))
+        }
+        ExperimentExecutionOrder::RightFirst => {
+            let right_outcome = execute_experiment_step(right, step)?;
+            let left_outcome = execute_experiment_step(left, step)?;
+            Ok((left_outcome, right_outcome))
+        }
+    }
+}
+
+fn execute_measured_experiment_pair<L, R>(
+    left: &mut L,
+    right: &mut R,
+    step: &ExperimentStep,
+    index: usize,
+    order: ExperimentExecutionOrder,
+) -> Result<(ExperimentOutcome, ExperimentOutcome)>
+where
+    L: KvEngine + OperationalTimingInstrumented,
+    R: KvEngine + OperationalTimingInstrumented,
+{
+    match order {
+        ExperimentExecutionOrder::LeftFirst => {
+            let left_outcome = execute_measured_experiment_step(left, step, index)?;
+            let right_outcome = execute_measured_experiment_step(right, step, index)?;
+            Ok((left_outcome, right_outcome))
+        }
+        ExperimentExecutionOrder::RightFirst => {
+            let right_outcome = execute_measured_experiment_step(right, step, index)?;
+            let left_outcome = execute_measured_experiment_step(left, step, index)?;
+            Ok((left_outcome, right_outcome))
+        }
+    }
 }
 
 fn execute_measured_experiment_step<E>(
@@ -797,16 +1168,19 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        checked_add_payload, compare_experiment_trace, generate_experiment_trace,
-        run_experiment_trace, ExperimentGeneratorConfig, ExperimentProfile, ExperimentStep,
-        ExperimentTrace, MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
+        checked_add_payload, compare_experiment_batch, compare_experiment_trace,
+        generate_experiment_trace, run_experiment_trace, ExperimentAttemptDisposition,
+        ExperimentAttemptFailureStage, ExperimentAttemptResult, ExperimentBatchConfig,
+        ExperimentGeneratorConfig, ExperimentProfile, ExperimentStep, ExperimentTrace,
+        MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
     };
     use crate::{
         AmplificationInstrumented, AmplificationRatio, AmplificationReport, ConcurrencyMode,
-        CrashRecovery, DistributionMode, EngineCapabilities, KvEngine, LogicalModel,
-        OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample,
-        OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit, Result,
-        StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+        CrashRecovery, DbError, DistributionMode, EngineCapabilities, KvEngine, LogicalModel,
+        OperationalAttemptOutcome, OperationalAttemptSample, OperationalTimingInstrumented,
+        OperationalTimingReport, OperationalTimingSample, OperationalWork, OperationalWorkUnit,
+        Persistence, ReadWorkUnit, Result, StorageArchitecture, StructuralReadAmplification,
+        MAX_KEY_BYTES, MAX_VALUE_BYTES,
     };
 
     #[test]
@@ -1065,6 +1439,135 @@ mod tests {
         assert_eq!(report.engine.capabilities.name, "single");
     }
 
+    #[test]
+    fn batch_counterbalances_included_attempts_and_retains_warmups() {
+        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 0x55,
+            profile: ExperimentProfile::RandomWrite,
+            operations: 4,
+            key_space: 4,
+            value_bytes: 4,
+            range_limit: 1,
+            reopen_every: Some(2),
+        })
+        .expect("trace");
+        let config = ExperimentBatchConfig {
+            included_attempts: 6,
+            warmup_attempts: 2,
+            order_seed: 0xdead_beef,
+        };
+        let mut observed_orders = Vec::new();
+        let report = compare_experiment_batch(&trace, config, |index, order| {
+            observed_orders.push((index, order));
+            Ok((
+                FakeEngine::new("left", StorageArchitecture::BPlusTree),
+                FakeEngine::new("right", StorageArchitecture::LsmTree),
+            ))
+        })
+        .expect("batch");
+        assert_eq!(report.attempts.len(), 8);
+        assert_eq!(report.summary.included_successes, 6);
+        assert_eq!(report.summary.included_failures, 0);
+        assert_eq!(report.summary.excluded_warmups, 2);
+        assert_eq!(report.summary.included_left_first, 3);
+        assert_eq!(report.summary.included_right_first, 3);
+        assert!(report.canonical_outcomes.is_some());
+        assert_eq!(observed_orders.len(), 8);
+        assert!(report.attempts[..2]
+            .iter()
+            .all(|attempt| attempt.disposition == ExperimentAttemptDisposition::ExcludedWarmup));
+        for pair in report.attempts[2..].chunks_exact(2) {
+            assert_ne!(pair[0].execution_order, pair[1].execution_order);
+        }
+    }
+
+    #[test]
+    fn batch_retains_factory_and_runtime_failures_with_partial_timing() {
+        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 0x77,
+            profile: ExperimentProfile::RandomWrite,
+            operations: 2,
+            key_space: 2,
+            value_bytes: 4,
+            range_limit: 1,
+            reopen_every: Some(1),
+        })
+        .expect("trace");
+        let report = compare_experiment_batch(
+            &trace,
+            ExperimentBatchConfig {
+                included_attempts: 4,
+                warmup_attempts: 0,
+                order_seed: 0,
+            },
+            |index, _order| {
+                if index == 1 {
+                    return Err(DbError::Io(std::io::Error::other(
+                        "injected factory failure",
+                    )));
+                }
+                let mut left = FakeEngine::new("left", StorageArchitecture::BPlusTree);
+                left.fail_reopen = index == 2;
+                Ok((left, FakeEngine::new("right", StorageArchitecture::LsmTree)))
+            },
+        )
+        .expect("batch report survives per-attempt failures");
+        assert_eq!(report.summary.included_successes, 2);
+        assert_eq!(report.summary.included_failures, 2);
+        match &report.attempts[1].result {
+            ExperimentAttemptResult::Failed {
+                stage,
+                left_operational_timing,
+                right_operational_timing,
+                ..
+            } => {
+                assert_eq!(*stage, ExperimentAttemptFailureStage::Factory);
+                assert!(left_operational_timing.is_none());
+                assert!(right_operational_timing.is_none());
+            }
+            other => panic!("expected retained factory failure, got {other:?}"),
+        }
+        match &report.attempts[2].result {
+            ExperimentAttemptResult::Failed {
+                stage,
+                left_operational_timing,
+                ..
+            } => {
+                assert_eq!(*stage, ExperimentAttemptFailureStage::Comparison);
+                let timing = left_operational_timing
+                    .as_ref()
+                    .expect("partial left timing retained");
+                assert!(timing.reopen_attempts.iter().any(|attempt| matches!(
+                    attempt.outcome,
+                    OperationalAttemptOutcome::Failed { .. }
+                )));
+            }
+            other => panic!("expected retained runtime failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_requires_even_included_attempt_count() {
+        let trace = generate_experiment_trace(ExperimentGeneratorConfig {
+            seed: 1,
+            profile: ExperimentProfile::RandomWrite,
+            operations: 1,
+            key_space: 1,
+            value_bytes: 1,
+            range_limit: 1,
+            reopen_every: None,
+        })
+        .expect("trace");
+        let error = ExperimentBatchConfig {
+            included_attempts: 3,
+            warmup_attempts: 0,
+            order_seed: 0,
+        }
+        .validate(&trace)
+        .expect_err("odd included count must fail");
+        assert!(error.to_string().contains("positive even"));
+    }
+
     struct FakeEngine {
         name: &'static str,
         architecture: StorageArchitecture,
@@ -1076,6 +1579,7 @@ mod tests {
         timing_reset_calls: u64,
         operational_step_index: Option<u64>,
         operational_timing: OperationalTimingReport,
+        fail_reopen: bool,
     }
 
     impl FakeEngine {
@@ -1091,6 +1595,7 @@ mod tests {
                 timing_reset_calls: 0,
                 operational_step_index: None,
                 operational_timing: OperationalTimingReport::default(),
+                fail_reopen: false,
             }
         }
     }
@@ -1154,21 +1659,45 @@ mod tests {
         }
 
         fn reopen(&mut self) -> Result<()> {
+            let work = OperationalWork {
+                unit: if self.architecture == StorageArchitecture::BPlusTree {
+                    OperationalWorkUnit::BtreePageAccess
+                } else {
+                    OperationalWorkUnit::LsmRecordVersion
+                },
+                units_examined: 1,
+                bytes_examined: 1,
+            };
+            if self.fail_reopen {
+                let error = DbError::Io(std::io::Error::other("injected fake reopen failure"));
+                self.operational_timing
+                    .reopen_attempts
+                    .push(OperationalAttemptSample {
+                        measured_step_index: self.operational_step_index,
+                        duration_ns: 1,
+                        work: Some(work),
+                        outcome: OperationalAttemptOutcome::Failed {
+                            error_class: error.class(),
+                            message: error.to_string(),
+                        },
+                    });
+                return Err(error);
+            }
             self.operational_timing.reopen_ns.push(1);
             self.operational_timing
                 .reopen_samples
                 .push(OperationalTimingSample {
                     measured_step_index: self.operational_step_index,
                     duration_ns: 1,
-                    work: OperationalWork {
-                        unit: if self.architecture == StorageArchitecture::BPlusTree {
-                            OperationalWorkUnit::BtreePageAccess
-                        } else {
-                            OperationalWorkUnit::LsmRecordVersion
-                        },
-                        units_examined: 1,
-                        bytes_examined: 1,
-                    },
+                    work,
+                });
+            self.operational_timing
+                .reopen_attempts
+                .push(OperationalAttemptSample {
+                    measured_step_index: self.operational_step_index,
+                    duration_ns: 1,
+                    work: Some(work),
+                    outcome: OperationalAttemptOutcome::Succeeded,
                 });
             Ok(())
         }

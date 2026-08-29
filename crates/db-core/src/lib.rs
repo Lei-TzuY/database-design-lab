@@ -17,18 +17,23 @@ pub use engine::{
     execute_step, execute_workload, validate_experiment_compatibility, validate_key,
     validate_key_value, validate_range_scan, AmplificationInstrumented, AmplificationRatio,
     AmplificationReport, ConcurrencyMode, CrashRecovery, DistributionMode, EngineCapabilities,
-    KvEngine, LogicalModel, OperationalTimingInstrumented, OperationalTimingReport,
-    OperationalTimingSample, OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit,
-    StorageArchitecture, StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
+    KvEngine, LogicalModel, OperationalAttemptOutcome, OperationalAttemptSample,
+    OperationalTimingInstrumented, OperationalTimingReport, OperationalTimingSample,
+    OperationalWork, OperationalWorkUnit, Persistence, ReadWorkUnit, StorageArchitecture,
+    StructuralReadAmplification, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
 pub use error::{DbError, ErrorClass, Result};
 pub use experiment::{
-    compare_experiment_trace, execute_experiment_step, generate_experiment_trace,
-    run_experiment_trace, ExperimentComparisonReport, ExperimentEngineEvidence,
+    compare_experiment_batch, compare_experiment_trace, compare_experiment_trace_ordered,
+    execute_experiment_step, generate_experiment_trace, run_experiment_trace,
+    ExperimentAttemptDisposition, ExperimentAttemptFailureStage, ExperimentAttemptResult,
+    ExperimentBatchAttempt, ExperimentBatchConfig, ExperimentBatchReport, ExperimentBatchSummary,
+    ExperimentComparisonReport, ExperimentEngineEvidence, ExperimentExecutionOrder,
     ExperimentGeneratorConfig, ExperimentOutcome, ExperimentProfile, ExperimentRow,
-    ExperimentRunReport, ExperimentStep, ExperimentTrace, EXPERIMENT_TRACE_FORMAT_VERSION,
-    MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES, MAX_EXPERIMENT_RANGE_LIMIT, MAX_EXPERIMENT_STEPS,
-    MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
+    ExperimentRunReport, ExperimentStep, ExperimentTrace, EXPERIMENT_BATCH_FORMAT_VERSION,
+    EXPERIMENT_TRACE_FORMAT_VERSION, MAX_EXPERIMENT_BATCH_ATTEMPTS,
+    MAX_EXPERIMENT_BATCH_MEASURED_STEP_EXECUTIONS, MAX_EXPERIMENT_OUTCOME_PAYLOAD_BYTES,
+    MAX_EXPERIMENT_RANGE_LIMIT, MAX_EXPERIMENT_STEPS, MAX_EXPERIMENT_TRACE_PAYLOAD_BYTES,
 };
 pub use operation::{Outcome, WorkloadStep};
 pub use workload::{
