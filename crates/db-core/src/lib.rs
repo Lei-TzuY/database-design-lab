@@ -12,6 +12,7 @@ mod experiment;
 mod experiment_batch;
 mod operation;
 mod ordered_experiment;
+mod shrink;
 mod workload;
 
 pub use bytes::{ByteString, ByteStringError};
@@ -48,6 +49,7 @@ pub use operation::{Outcome, WorkloadStep};
 pub use ordered_experiment::{
     compare_experiment_trace_ordered, ExperimentExecutionOrder, OrderedExperimentComparisonReport,
 };
+pub use shrink::minimize_failing_workload;
 pub use workload::{
     generate_workload, GeneratorConfig, Workload, MAX_WORKLOAD_STEPS, WORKLOAD_FORMAT_VERSION,
 };
