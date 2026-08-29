@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Explicit validation trigger after the staging workflow was added.
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "crates/db-core/src/engine.rs"
 CORE_LIB = ROOT / "crates/db-core/src/lib.rs"
