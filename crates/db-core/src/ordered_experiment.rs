@@ -238,16 +238,16 @@ fn checked_add_outcome_payload(total: u64, outcome: &ExperimentOutcome, kind: &s
     let next = match outcome {
         ExperimentOutcome::Put { previous }
         | ExperimentOutcome::Delete { previous }
-        | ExperimentOutcome::Get { value: previous } => previous.as_ref().map_or(Ok(0), |value| {
-            u64::try_from(value.as_slice().len()).map_err(|_| {
-                DbError::InvalidInput("experiment outcome length does not fit u64".to_owned())
-            })
-        })?,
+        | ExperimentOutcome::Get { value: previous } => {
+            previous.as_ref().map_or(Ok(0), |value| {
+                u64::try_from(value.as_slice().len()).map_err(|_| {
+                    DbError::InvalidInput("experiment outcome length does not fit u64".to_owned())
+                })
+            })?
+        }
         ExperimentOutcome::RangeScan { rows } => rows.iter().try_fold(0_u64, |total, row| {
-            let row_bytes = checked_payload_lengths(&[
-                row.key.as_slice().len(),
-                row.value.as_slice().len(),
-            ])?;
+            let row_bytes =
+                checked_payload_lengths(&[row.key.as_slice().len(), row.value.as_slice().len()])?;
             total.checked_add(row_bytes).ok_or_else(|| {
                 DbError::InvalidInput("experiment outcome payload size overflowed".to_owned())
             })
@@ -312,11 +312,8 @@ mod tests {
             StorageArchitecture::BPlusTree,
             Rc::clone(&event_log),
         );
-        let mut right = FakeEngine::new(
-            "right",
-            StorageArchitecture::LsmTree,
-            Rc::clone(&event_log),
-        );
+        let mut right =
+            FakeEngine::new("right", StorageArchitecture::LsmTree, Rc::clone(&event_log));
 
         let report = compare_experiment_trace_ordered(
             &mut left,
@@ -359,11 +356,8 @@ mod tests {
             StorageArchitecture::BPlusTree,
             Rc::clone(&event_log),
         );
-        let mut right = FakeEngine::new(
-            "right",
-            StorageArchitecture::LsmTree,
-            Rc::clone(&event_log),
-        );
+        let mut right =
+            FakeEngine::new("right", StorageArchitecture::LsmTree, Rc::clone(&event_log));
         right
             .map
             .insert(0_u64.to_be_bytes().to_vec(), b"preexisting".to_vec());
