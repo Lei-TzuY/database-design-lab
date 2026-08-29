@@ -1,0 +1,48 @@
+name: Finalize Phase 4 common amplification
+
+on:
+  push:
+    branches:
+      - feat/phase4-common-amplification
+    paths:
+      - .github/scripts/finalize_phase4_common_amplification.py
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/phase4-common-amplification
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply final compatibility and documentation patch
+        run: python .github/scripts/finalize_phase4_common_amplification.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+      - name: Commit validated finalization
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/amplification-methodology.md docs/design-space.md docs/roadmap.md crates/db-storage-lsm/src/lib.rs
+          if git diff --cached --quiet; then
+            echo "No finalization changes to commit"
+          else
+            git commit -m "docs: freeze Phase 4 amplification methodology"
+            git push origin HEAD:feat/phase4-common-amplification
+          fi
