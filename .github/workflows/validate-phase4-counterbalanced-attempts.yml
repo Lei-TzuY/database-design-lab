@@ -6,6 +6,7 @@ on:
       - staging/phase4-counterbalanced-attempts
     paths:
       - .github/scripts/apply_phase4_counterbalanced_attempts.py
+      - .github/scripts/fix_phase4_counterbalanced_attempts.py
 
 permissions:
   contents: write
@@ -21,7 +22,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply product patch
-        run: python .github/scripts/apply_phase4_counterbalanced_attempts.py
+        run: |
+          python .github/scripts/apply_phase4_counterbalanced_attempts.py
+          python .github/scripts/fix_phase4_counterbalanced_attempts.py
       - name: Format
         run: cargo fmt --all
       - name: Check formatting
