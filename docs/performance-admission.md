@@ -17,6 +17,13 @@ silently assumed.
 - `publication-warm-v1`: a strict release-only warm-cache protocol that emits format-v4 success evidence or
   format-v5 failed/excluded attempt evidence.
 
+The repeated `db-lab-batch` runner applies the same admission boundary while retaining every requested pair.
+Its normal archives remain format v6 for exploratory runs and format v7 for `publication-warm-v1`. If a pair
+fails after both fresh engines exist and an ordered comparison has started, the runner additionally preserves
+that failure-boundary timing evidence in immutable `comparison-failures.json`; such archives use format v8
+(exploratory) or v9 (publication). Factory failures do not fabricate a sidecar because no complete pair of
+engine-local timing reports exists. The stable `batch.json` denominator remains present in all four formats.
+
 The publication protocol is intentionally warm-only. `cold_best_effort` remains valid descriptive metadata for
 exploratory work, but it is rejected by `publication-warm-v1`; writing “cold” into JSON is not proof that kernel,
 filesystem, controller, and device caches were actually evicted.
@@ -41,7 +48,9 @@ The protocol records the following fixed semantics rather than asking the caller
 - `admission_protocol = "publication_warm_v1"`;
 - `cache_policy = "trace_induced_warm"`;
 - `durability_mode = "synced_single_operation"`;
-- `repetition_count = 2` (one AB and one BA whole-run ordering).
+- one counterbalanced pair contains two ordered comparisons, one AB and one BA whole-run ordering;
+- repeated batches derive the first outer pair order from the recorded seed low bit and strictly alternate later
+  pair order.
 
 `trace_induced_warm` means the engine state immediately preceding measured reopen/compaction samples was produced
 by the same setup/measured trace and process under test. It makes no cold-cache claim and performs no privileged
@@ -73,10 +82,17 @@ db-lab experiment-archive-counterbalanced \
   --noise-budget host-noise-budget-v1
 ```
 
-A successful admitted run writes the existing raw counterbalanced payload plus a `publication_admission` object
-in `environment.json`; `index.json` records the admission protocol. If the admitted invocation fails or is
-explicitly excluded, the same admission record is retained in the format-v5 attempt archive, so the denominator
-of attempted publication runs remains auditable.
+A successful admitted single-pair run writes the existing raw counterbalanced payload plus a
+`publication_admission` object in `environment.json`; `index.json` records the admission protocol. If the admitted
+invocation fails or is explicitly excluded, the same admission record is retained in the format-v5 attempt
+archive, so the denominator of attempted publication runs remains auditable.
+
+For repeated batches, `batch.json` always retains included, failed, and explicitly excluded pair dispositions.
+When comparison-boundary evidence exists, `comparison-failures.json` separately retains pair order, repetition
+index, any already-completed first repetition, the failing ordered execution order, stable error class/message,
+and both engines' operational timing reports. `environment.json` and `index.json` record
+`comparison_failure_protocol = "ordered_comparison_failure_sidecar_v1"`. A failed operation's deterministic
+`work` remains `null` when the engine cannot prove completed work without guessing.
 
 ## What the gate proves — and what it does not
 
