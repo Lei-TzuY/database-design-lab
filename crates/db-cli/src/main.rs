@@ -400,9 +400,7 @@ mod tests {
     use clap::Parser;
     use db_core::Workload;
 
-    use super::{
-        Cli, Command, EngineKind, ExperimentProfileKind, PersistentEngineKind,
-    };
+    use super::{Cli, Command, EngineKind, ExperimentProfileKind, PersistentEngineKind};
 
     #[test]
     fn suggested_run_shape_parses() {
