@@ -374,7 +374,10 @@ fn validate_publication_admission(
                     &rust_target_triple,
                     MAX_PUBLICATION_METADATA_BYTES,
                 )?,
-                host_label: required_publication_metadata("--host-label", args.host_label.as_deref())?,
+                host_label: required_publication_metadata(
+                    "--host-label",
+                    args.host_label.as_deref(),
+                )?,
                 host_cpu: required_publication_metadata("--host-cpu", args.host_cpu.as_deref())?,
                 host_memory: required_publication_metadata(
                     "--host-memory",
@@ -416,8 +419,8 @@ fn validate_publication_admission(
 }
 
 fn required_publication_metadata(label: &str, value: Option<&str>) -> Result<String, CliError> {
-    let value = value
-        .ok_or_else(|| CliError::Usage(format!("publication-warm-v1 requires {label}")))?;
+    let value =
+        value.ok_or_else(|| CliError::Usage(format!("publication-warm-v1 requires {label}")))?;
     validate_bounded_metadata(label, value, MAX_PUBLICATION_METADATA_BYTES)
 }
 
@@ -766,7 +769,9 @@ mod tests {
             Some("x86_64-unknown-linux-gnu".to_owned()),
         )
         .expect_err("all-excluded publication batch must not be admitted");
-        assert!(excluded_error.to_string().contains("at least one included pair"));
+        assert!(excluded_error
+            .to_string()
+            .contains("at least one included pair"));
     }
 
     #[test]
