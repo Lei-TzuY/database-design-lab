@@ -14,11 +14,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-const FORMAT_VERSION: u16 = 1;
-const SESSION_PROTOCOL: &str = "controlled_publication_session_v1";
+const V1_FORMAT_VERSION: u16 = 1;
+const V2_FORMAT_VERSION: u16 = 2;
+const V1_SESSION_PROTOCOL: &str = "controlled_publication_session_v1";
+const V2_SESSION_PROTOCOL: &str = "controlled_publication_session_v2";
 const PUBLICATION_PROTOCOL: &str = "publication_warm_v1";
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const PREFLIGHT_FILE: &str = "host-preflight.json";
+const POSTFLIGHT_FILE: &str = "host-postflight.json";
 const EVIDENCE_DIR: &str = "evidence";
 const INDEX_FILE: &str = "index.json";
 
@@ -35,9 +38,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a v2 session enclosed by passing pre-run and post-run host-control snapshots.
     Create {
         #[arg(long)]
         host_preflight: PathBuf,
+        #[arg(long)]
+        host_postflight: PathBuf,
         #[arg(long)]
         archive_dir: PathBuf,
         #[arg(long)]
@@ -45,6 +51,7 @@ enum Command {
         #[arg(long)]
         expected_revision: Option<String>,
     },
+    /// Verify a retained v1 or v2 session.
     Verify {
         #[arg(long)]
         session_dir: PathBuf,
@@ -55,7 +62,7 @@ enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SessionIndex {
+struct V1SessionIndex {
     format_version: u16,
     session_protocol: String,
     host_preflight_protocol: String,
@@ -67,13 +74,33 @@ struct SessionIndex {
     evidence_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V2SessionIndex {
+    format_version: u16,
+    session_protocol: String,
+    host_control_snapshot_protocol: String,
+    publication_admission_protocol: String,
+    host_label: String,
+    preflight_recorded_unix_seconds: u64,
+    archive_recorded_unix_seconds: u64,
+    postflight_recorded_unix_seconds: u64,
+    repository_revision: String,
+    source_archive_format_version: u16,
+    evidence_files: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct SessionSummary {
     valid: bool,
     session_format_version: u16,
-    session_protocol: &'static str,
+    session_protocol: String,
     host_label: String,
     preflight_recorded_unix_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_recorded_unix_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postflight_recorded_unix_seconds: Option<u64>,
     repository_revision: String,
     source_archive_format_version: u16,
     evidence_files: usize,
@@ -84,7 +111,7 @@ enum SessionError {
     #[error(transparent)]
     Archive(#[from] VerifyError),
     #[error(transparent)]
-    Preflight(#[from] HostPreflightVerifyError),
+    HostControl(#[from] HostPreflightVerifyError),
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -106,11 +133,13 @@ fn main() -> ExitCode {
     let result = match args.command {
         Command::Create {
             host_preflight,
+            host_postflight,
             archive_dir,
             session_dir,
             expected_revision,
-        } => create_session(
+        } => create_v2_session(
             &host_preflight,
+            &host_postflight,
             &archive_dir,
             &session_dir,
             expected_revision.as_deref(),
@@ -139,30 +168,46 @@ fn main() -> ExitCode {
     }
 }
 
-fn create_session(
+fn create_v2_session(
     preflight_path: &Path,
+    postflight_path: &Path,
     archive_path: &Path,
     session_path: &Path,
     expected_revision: Option<&str>,
 ) -> Result<SessionSummary, SessionError> {
     let source_preflight = canonical_regular_file(preflight_path, "host preflight")?;
+    let source_postflight = canonical_regular_file(postflight_path, "host postflight")?;
+    if source_preflight == source_postflight {
+        return invalid("preflight and postflight must be distinct retained snapshot files");
+    }
     let source_archive = canonical_directory(archive_path, "source archive")?;
     let target = fresh_target(session_path)?;
     reject_overlap(&source_archive, &target)?;
 
     let preflight = load_verified_host_preflight_snapshot(&source_preflight, None, true)?;
+    let postflight = load_verified_host_preflight_snapshot(&source_postflight, None, true)?;
     let archive = verify_batch_archive(&source_archive, expected_revision, true)?;
-    let host_label = publication_host_label(&source_archive)?;
-    match_host(&preflight, &host_label)?;
+    let (host_label, archive_recorded) = publication_binding(&source_archive, true)?;
+    let archive_recorded = archive_recorded.expect("required publication recording time");
+    match_host(&preflight, &host_label, "preflight")?;
+    match_host(&postflight, &host_label, "postflight")?;
+    validate_temporal_enclosure(
+        preflight.recorded_unix_seconds,
+        archive_recorded,
+        postflight.recorded_unix_seconds,
+    )?;
 
     fs::create_dir(&target).map_err(|source| io_error(&target, source))?;
-    let result = create_session_inner(
+    let result = create_v2_session_inner(
         &source_preflight,
+        &source_postflight,
         &source_archive,
         &target,
         &preflight,
+        &postflight,
         &archive,
         &host_label,
+        archive_recorded,
     );
     if result.is_err() {
         let _ = fs::remove_dir_all(&target);
@@ -170,16 +215,22 @@ fn create_session(
     result
 }
 
-fn create_session_inner(
+#[allow(clippy::too_many_arguments)]
+fn create_v2_session_inner(
     source_preflight: &Path,
+    source_postflight: &Path,
     source_archive: &Path,
     target: &Path,
     preflight: &HostPreflightSnapshot,
+    postflight: &HostPreflightSnapshot,
     archive: &VerificationSummary,
     host_label: &str,
+    archive_recorded: u64,
 ) -> Result<SessionSummary, SessionError> {
     let copied_preflight = target.join(PREFLIGHT_FILE);
+    let copied_postflight = target.join(POSTFLIGHT_FILE);
     copy_new(source_preflight, &copied_preflight)?;
+    copy_new(source_postflight, &copied_postflight)?;
 
     let evidence = target.join(EVIDENCE_DIR);
     fs::create_dir(&evidence).map_err(|source| io_error(&evidence, source))?;
@@ -190,42 +241,66 @@ fn create_session_inner(
 
     let copied_preflight_value =
         load_verified_host_preflight_snapshot(&copied_preflight, Some(host_label), true)?;
+    let copied_postflight_value =
+        load_verified_host_preflight_snapshot(&copied_postflight, Some(host_label), true)?;
     if &copied_preflight_value != preflight {
-        return invalid("host-preflight value changed while it was copied");
+        return invalid("preflight value changed while it was copied");
+    }
+    if &copied_postflight_value != postflight {
+        return invalid("postflight value changed while it was copied");
     }
     let copied_archive = verify_batch_archive(&evidence, Some(&archive.repository_revision), true)?;
     if &copied_archive != archive {
         return invalid("archive verification summary changed while evidence was copied");
     }
-    if publication_host_label(&evidence)? != host_label {
-        return invalid("publication host label changed while evidence was copied");
+    let (copied_host, copied_recorded) = publication_binding(&evidence, true)?;
+    if copied_host != host_label || copied_recorded != Some(archive_recorded) {
+        return invalid("publication host/time binding changed while evidence was copied");
     }
+    validate_temporal_enclosure(
+        copied_preflight_value.recorded_unix_seconds,
+        archive_recorded,
+        copied_postflight_value.recorded_unix_seconds,
+    )?;
 
     let source_preflight_after =
         load_verified_host_preflight_snapshot(source_preflight, Some(host_label), true)?;
+    let source_postflight_after =
+        load_verified_host_preflight_snapshot(source_postflight, Some(host_label), true)?;
     if &source_preflight_after != preflight {
-        return invalid("source host-preflight changed while the session was being created");
+        return invalid("source preflight changed while the session was being created");
+    }
+    if &source_postflight_after != postflight {
+        return invalid("source postflight changed while the session was being created");
     }
     let source_archive_after =
         verify_batch_archive(source_archive, Some(&archive.repository_revision), true)?;
     if &source_archive_after != archive {
         return invalid("source archive changed while the session was being created");
     }
-    if publication_host_label(source_archive)? != host_label {
-        return invalid(
-            "source publication host label changed while the session was being created",
-        );
+    let (source_host_after, source_recorded_after) = publication_binding(source_archive, true)?;
+    if source_host_after != host_label || source_recorded_after != Some(archive_recorded) {
+        return invalid("source publication host/time binding changed during session creation");
     }
+    validate_temporal_enclosure(
+        source_preflight_after.recorded_unix_seconds,
+        archive_recorded,
+        source_postflight_after.recorded_unix_seconds,
+    )?;
+
     compare_files(source_preflight, &copied_preflight, PREFLIGHT_FILE)?;
+    compare_files(source_postflight, &copied_postflight, POSTFLIGHT_FILE)?;
     compare_directories(source_archive, &evidence)?;
 
-    let index = SessionIndex {
-        format_version: FORMAT_VERSION,
-        session_protocol: SESSION_PROTOCOL.to_owned(),
-        host_preflight_protocol: HOST_PREFLIGHT_PROTOCOL.to_owned(),
+    let index = V2SessionIndex {
+        format_version: V2_FORMAT_VERSION,
+        session_protocol: V2_SESSION_PROTOCOL.to_owned(),
+        host_control_snapshot_protocol: HOST_PREFLIGHT_PROTOCOL.to_owned(),
         publication_admission_protocol: PUBLICATION_PROTOCOL.to_owned(),
         host_label: host_label.to_owned(),
         preflight_recorded_unix_seconds: preflight.recorded_unix_seconds,
+        archive_recorded_unix_seconds: archive_recorded,
+        postflight_recorded_unix_seconds: postflight.recorded_unix_seconds,
         repository_revision: archive.repository_revision.clone(),
         source_archive_format_version: archive.format_version,
         evidence_files: source_files.into_iter().collect(),
@@ -239,15 +314,43 @@ fn verify_session(
     expected_revision: Option<&str>,
 ) -> Result<SessionSummary, SessionError> {
     let session = canonical_directory(session_path, "publication session")?;
-    require_session_layout(&session)?;
-
     let index_path = session.join(INDEX_FILE);
-    let index: SessionIndex =
-        serde_json::from_value(read_json(&index_path)?).map_err(|source| SessionError::Json {
-            path: index_path.clone(),
-            source,
-        })?;
-    validate_index(&index, expected_revision)?;
+    let index_value = read_json(&index_path)?;
+    let format_version = index_value
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| SessionError::Invalid("session index lacks integer format_version".to_owned()))?;
+
+    match format_version {
+        1 => {
+            let index: V1SessionIndex =
+                serde_json::from_value(index_value).map_err(|source| SessionError::Json {
+                    path: index_path,
+                    source,
+                })?;
+            verify_v1_session(&session, index, expected_revision)
+        }
+        2 => {
+            let index: V2SessionIndex =
+                serde_json::from_value(index_value).map_err(|source| SessionError::Json {
+                    path: index_path,
+                    source,
+                })?;
+            verify_v2_session(&session, index, expected_revision)
+        }
+        other => invalid(format!(
+            "unsupported publication-session format {other}; supported formats are 1 and 2"
+        )),
+    }
+}
+
+fn verify_v1_session(
+    session: &Path,
+    index: V1SessionIndex,
+    expected_revision: Option<&str>,
+) -> Result<SessionSummary, SessionError> {
+    require_session_layout(session, V1_FORMAT_VERSION)?;
+    validate_v1_index(&index, expected_revision)?;
 
     let preflight = load_verified_host_preflight_snapshot(
         &session.join(PREFLIGHT_FILE),
@@ -255,112 +358,244 @@ fn verify_session(
         true,
     )?;
     if preflight.recorded_unix_seconds != index.preflight_recorded_unix_seconds {
-        return invalid("host-preflight recording time differs from session index");
+        return invalid("host-preflight recording time differs from v1 session index");
     }
 
     let evidence = session.join(EVIDENCE_DIR);
-    let actual_files: Vec<String> = entry_names(&evidence, "publication evidence")?
-        .into_iter()
-        .collect();
-    if actual_files != index.evidence_files {
-        return invalid(format!(
-            "publication evidence file set differs from index: expected {:?}, found {actual_files:?}",
-            index.evidence_files
-        ));
-    }
-
+    verify_evidence_file_set(&evidence, &index.evidence_files)?;
     let archive = verify_batch_archive(&evidence, Some(&index.repository_revision), true)?;
     if archive.format_version != index.source_archive_format_version {
         return invalid(format!(
-            "source archive format differs from index: expected v{}, verified v{}",
+            "source archive format differs from v1 index: expected v{}, verified v{}",
             index.source_archive_format_version, archive.format_version
         ));
     }
-    let archive_host = publication_host_label(&evidence)?;
+    let (archive_host, _) = publication_binding(&evidence, false)?;
     if archive_host != index.host_label {
         return invalid(format!(
             "publication archive host label {archive_host:?} differs from session host label {:?}",
             index.host_label
         ));
     }
-    match_host(&preflight, &archive_host)?;
+    match_host(&preflight, &archive_host, "preflight")?;
 
     Ok(SessionSummary {
         valid: true,
-        session_format_version: FORMAT_VERSION,
-        session_protocol: SESSION_PROTOCOL,
+        session_format_version: V1_FORMAT_VERSION,
+        session_protocol: V1_SESSION_PROTOCOL.to_owned(),
         host_label: index.host_label,
         preflight_recorded_unix_seconds: index.preflight_recorded_unix_seconds,
+        archive_recorded_unix_seconds: None,
+        postflight_recorded_unix_seconds: None,
         repository_revision: archive.repository_revision,
         source_archive_format_version: archive.format_version,
         evidence_files: index.evidence_files.len(),
     })
 }
 
-fn validate_index(
-    index: &SessionIndex,
+fn verify_v2_session(
+    session: &Path,
+    index: V2SessionIndex,
+    expected_revision: Option<&str>,
+) -> Result<SessionSummary, SessionError> {
+    require_session_layout(session, V2_FORMAT_VERSION)?;
+    validate_v2_index(&index, expected_revision)?;
+
+    let preflight = load_verified_host_preflight_snapshot(
+        &session.join(PREFLIGHT_FILE),
+        Some(&index.host_label),
+        true,
+    )?;
+    let postflight = load_verified_host_preflight_snapshot(
+        &session.join(POSTFLIGHT_FILE),
+        Some(&index.host_label),
+        true,
+    )?;
+    if preflight.recorded_unix_seconds != index.preflight_recorded_unix_seconds {
+        return invalid("preflight recording time differs from v2 session index");
+    }
+    if postflight.recorded_unix_seconds != index.postflight_recorded_unix_seconds {
+        return invalid("postflight recording time differs from v2 session index");
+    }
+
+    let evidence = session.join(EVIDENCE_DIR);
+    verify_evidence_file_set(&evidence, &index.evidence_files)?;
+    let archive = verify_batch_archive(&evidence, Some(&index.repository_revision), true)?;
+    if archive.format_version != index.source_archive_format_version {
+        return invalid(format!(
+            "source archive format differs from v2 index: expected v{}, verified v{}",
+            index.source_archive_format_version, archive.format_version
+        ));
+    }
+    let (archive_host, archive_recorded) = publication_binding(&evidence, true)?;
+    let archive_recorded = archive_recorded.expect("required publication recording time");
+    if archive_host != index.host_label {
+        return invalid(format!(
+            "publication archive host label {archive_host:?} differs from session host label {:?}",
+            index.host_label
+        ));
+    }
+    if archive_recorded != index.archive_recorded_unix_seconds {
+        return invalid("archive recording time differs from v2 session index");
+    }
+    match_host(&preflight, &archive_host, "preflight")?;
+    match_host(&postflight, &archive_host, "postflight")?;
+    validate_temporal_enclosure(
+        preflight.recorded_unix_seconds,
+        archive_recorded,
+        postflight.recorded_unix_seconds,
+    )?;
+
+    Ok(SessionSummary {
+        valid: true,
+        session_format_version: V2_FORMAT_VERSION,
+        session_protocol: V2_SESSION_PROTOCOL.to_owned(),
+        host_label: index.host_label,
+        preflight_recorded_unix_seconds: index.preflight_recorded_unix_seconds,
+        archive_recorded_unix_seconds: Some(index.archive_recorded_unix_seconds),
+        postflight_recorded_unix_seconds: Some(index.postflight_recorded_unix_seconds),
+        repository_revision: archive.repository_revision,
+        source_archive_format_version: archive.format_version,
+        evidence_files: index.evidence_files.len(),
+    })
+}
+
+fn validate_v1_index(
+    index: &V1SessionIndex,
     expected_revision: Option<&str>,
 ) -> Result<(), SessionError> {
-    if index.format_version != FORMAT_VERSION {
-        return invalid(format!(
-            "unsupported publication-session format {}; expected {FORMAT_VERSION}",
-            index.format_version
-        ));
-    }
-    if index.session_protocol != SESSION_PROTOCOL {
-        return invalid(format!(
-            "unsupported publication-session protocol {:?}",
-            index.session_protocol
-        ));
+    if index.format_version != V1_FORMAT_VERSION || index.session_protocol != V1_SESSION_PROTOCOL {
+        return invalid("v1 session index has an unsupported format/protocol pairing");
     }
     if index.host_preflight_protocol != HOST_PREFLIGHT_PROTOCOL {
-        return invalid("host-preflight protocol differs from the shared verifier");
+        return invalid("v1 host-preflight protocol differs from the shared verifier");
     }
-    if index.publication_admission_protocol != PUBLICATION_PROTOCOL {
+    validate_common_index(
+        &index.publication_admission_protocol,
+        &index.host_label,
+        index.preflight_recorded_unix_seconds,
+        &index.repository_revision,
+        index.source_archive_format_version,
+        &index.evidence_files,
+        expected_revision,
+    )
+}
+
+fn validate_v2_index(
+    index: &V2SessionIndex,
+    expected_revision: Option<&str>,
+) -> Result<(), SessionError> {
+    if index.format_version != V2_FORMAT_VERSION || index.session_protocol != V2_SESSION_PROTOCOL {
+        return invalid("v2 session index has an unsupported format/protocol pairing");
+    }
+    if index.host_control_snapshot_protocol != HOST_PREFLIGHT_PROTOCOL {
+        return invalid("v2 host-control snapshot protocol differs from the shared verifier");
+    }
+    validate_common_index(
+        &index.publication_admission_protocol,
+        &index.host_label,
+        index.preflight_recorded_unix_seconds,
+        &index.repository_revision,
+        index.source_archive_format_version,
+        &index.evidence_files,
+        expected_revision,
+    )?;
+    if index.archive_recorded_unix_seconds == 0 || index.postflight_recorded_unix_seconds == 0 {
+        return invalid("v2 archive/postflight recording times must be greater than zero");
+    }
+    validate_temporal_enclosure(
+        index.preflight_recorded_unix_seconds,
+        index.archive_recorded_unix_seconds,
+        index.postflight_recorded_unix_seconds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_common_index(
+    publication_protocol: &str,
+    host_label: &str,
+    preflight_recorded: u64,
+    repository_revision: &str,
+    source_archive_format_version: u16,
+    evidence_files: &[String],
+    expected_revision: Option<&str>,
+) -> Result<(), SessionError> {
+    if publication_protocol != PUBLICATION_PROTOCOL {
         return invalid("publication admission protocol differs from publication_warm_v1");
     }
-    if index.host_label.trim().is_empty() || index.host_label.trim() != index.host_label {
+    if host_label.trim().is_empty() || host_label.trim() != host_label {
         return invalid("index host_label must be non-empty without surrounding whitespace");
     }
-    if index.preflight_recorded_unix_seconds == 0 {
+    if preflight_recorded == 0 {
         return invalid("index preflight recording time must be greater than zero");
     }
-    if index.repository_revision.trim().is_empty()
-        || index.repository_revision.trim() != index.repository_revision
-    {
-        return invalid(
-            "index repository_revision must be non-empty without surrounding whitespace",
-        );
+    if repository_revision.trim().is_empty() || repository_revision.trim() != repository_revision {
+        return invalid("index repository_revision must be non-empty without surrounding whitespace");
     }
     if let Some(expected) = expected_revision {
-        if index.repository_revision != expected {
+        if repository_revision != expected {
             return invalid(format!(
-                "session repository revision {:?} differs from expected revision {expected:?}",
-                index.repository_revision
+                "session repository revision {repository_revision:?} differs from expected revision {expected:?}"
             ));
         }
     }
-    if !matches!(index.source_archive_format_version, 7 | 11) {
+    if !matches!(source_archive_format_version, 7 | 11) {
         return invalid(format!(
-            "publication session requires source archive format v7 or v11; found v{}",
-            index.source_archive_format_version
+            "publication session requires source archive format v7 or v11; found v{source_archive_format_version}"
         ));
     }
-    if index.evidence_files.is_empty() {
+    validate_evidence_list(evidence_files)
+}
+
+fn validate_evidence_list(evidence_files: &[String]) -> Result<(), SessionError> {
+    if evidence_files.is_empty() {
         return invalid("index evidence_files must not be empty");
     }
-    let unique: BTreeSet<&str> = index.evidence_files.iter().map(String::as_str).collect();
+    let unique: BTreeSet<&str> = evidence_files.iter().map(String::as_str).collect();
     let sorted: Vec<&str> = unique.iter().copied().collect();
-    let recorded: Vec<&str> = index.evidence_files.iter().map(String::as_str).collect();
+    let recorded: Vec<&str> = evidence_files.iter().map(String::as_str).collect();
     if unique.len() != recorded.len() || sorted != recorded {
         return invalid("index evidence_files must be sorted and duplicate-free");
     }
     Ok(())
 }
 
-fn publication_host_label(archive: &Path) -> Result<String, SessionError> {
+fn validate_temporal_enclosure(
+    preflight_recorded: u64,
+    archive_recorded: u64,
+    postflight_recorded: u64,
+) -> Result<(), SessionError> {
+    if preflight_recorded > archive_recorded {
+        return invalid(format!(
+            "preflight recording time {preflight_recorded} is after archive recording time {archive_recorded}"
+        ));
+    }
+    if archive_recorded > postflight_recorded {
+        return invalid(format!(
+            "archive recording time {archive_recorded} is after postflight recording time {postflight_recorded}"
+        ));
+    }
+    Ok(())
+}
+
+fn verify_evidence_file_set(evidence: &Path, expected: &[String]) -> Result<(), SessionError> {
+    let actual: Vec<String> = entry_names(evidence, "publication evidence")?
+        .into_iter()
+        .collect();
+    if actual != expected {
+        return invalid(format!(
+            "publication evidence file set differs from index: expected {expected:?}, found {actual:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn publication_binding(
+    archive: &Path,
+    require_recorded_time: bool,
+) -> Result<(String, Option<u64>), SessionError> {
     let environment = read_json(&archive.join("environment.json"))?;
-    environment
+    let host_label = environment
         .get("publication_admission")
         .and_then(Value::as_object)
         .and_then(|admission| admission.get("host_label"))
@@ -371,14 +606,27 @@ fn publication_host_label(archive: &Path) -> Result<String, SessionError> {
                 "verified publication archive is missing publication_admission.host_label"
                     .to_owned(),
             )
-        })
+        })?;
+    let recorded = environment
+        .get("recorded_unix_seconds")
+        .and_then(Value::as_u64);
+    if require_recorded_time && recorded.is_none_or(|value| value == 0) {
+        return invalid(
+            "v2 publication session requires environment.recorded_unix_seconds > 0",
+        );
+    }
+    Ok((host_label, recorded))
 }
 
-fn match_host(preflight: &HostPreflightSnapshot, archive_host: &str) -> Result<(), SessionError> {
-    if preflight.host_label != archive_host {
+fn match_host(
+    snapshot: &HostPreflightSnapshot,
+    archive_host: &str,
+    role: &str,
+) -> Result<(), SessionError> {
+    if snapshot.host_label != archive_host {
         return invalid(format!(
-            "host-preflight label {:?} differs from publication archive host label {archive_host:?}",
-            preflight.host_label
+            "{role} host label {:?} differs from publication archive host label {archive_host:?}",
+            snapshot.host_label
         ));
     }
     Ok(())
@@ -438,18 +686,24 @@ fn reject_overlap(source: &Path, target: &Path) -> Result<(), SessionError> {
     Ok(())
 }
 
-fn require_session_layout(session: &Path) -> Result<(), SessionError> {
+fn require_session_layout(session: &Path, format_version: u16) -> Result<(), SessionError> {
     let actual = entry_names(session, "publication session")?;
-    let expected: BTreeSet<String> = [PREFLIGHT_FILE, EVIDENCE_DIR, INDEX_FILE]
+    let mut expected: BTreeSet<String> = [PREFLIGHT_FILE, EVIDENCE_DIR, INDEX_FILE]
         .into_iter()
         .map(str::to_owned)
         .collect();
+    if format_version == V2_FORMAT_VERSION {
+        expected.insert(POSTFLIGHT_FILE.to_owned());
+    }
     if actual != expected {
         return invalid(format!(
             "publication-session entries must be exactly {expected:?}; found {actual:?}"
         ));
     }
     require_regular(&session.join(PREFLIGHT_FILE), PREFLIGHT_FILE)?;
+    if format_version == V2_FORMAT_VERSION {
+        require_regular(&session.join(POSTFLIGHT_FILE), POSTFLIGHT_FILE)?;
+    }
     require_regular(&session.join(INDEX_FILE), INDEX_FILE)?;
     let evidence = session.join(EVIDENCE_DIR);
     let metadata = fs::symlink_metadata(&evidence).map_err(|source| io_error(&evidence, source))?;
