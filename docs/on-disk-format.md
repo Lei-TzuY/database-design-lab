@@ -58,4 +58,19 @@ lengths, bad available header fields, a complete record with a bad record CRC, o
 before EOF fail closed and are never auto-truncated.
 
 The policy treats one final record as the crash-recovery unit. It does not provide multi-record
-transactions. No compaction or format rewrite exists in v1.
+transactions.
+
+## Compact copies remain format v1
+
+`db-lab-log-compact` can publish a new, non-destructive compact copy containing exactly one put record
+per live key. The compact copy is not a new on-disk format: it starts with the same v1 file header and
+its rewritten records start again at sequence 1. Historical record sequence identity is intentionally
+not preserved because the output represents current logical state, not mutation history.
+
+The command does not rewrite or replace the source file. It constructs and verifies a sibling staging
+file first, then publishes that complete file under a fresh output name with no-overwrite hard-link
+semantics. See `docs/append-log-compaction.md` for the publication and crash boundary.
+
+There is still no in-place compaction or authoritative generation-switch protocol in v1. Selecting a
+compact copy as the engine's live generation is a separate crash-recovery problem and remains outside
+this file format contract.
