@@ -66,7 +66,8 @@ fn unix_offline_switch_compacts_full_authoritative_live_state_and_advances_autho
 
     let verified = run_verify(&directory);
     assert_success("verify switched directory", &verified);
-    let verified: Value = serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
+    let verified: Value =
+        serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
     assert_eq!(verified["authoritative_generation"], 2);
     assert_eq!(verified["marker_generation_ids"], serde_json::json!([1, 2]));
 }
@@ -81,8 +82,7 @@ fn unix_offline_switch_allocates_above_orphan_and_staging_residue_without_reuse(
     assert_success("publish generation 1", &run_publish(&directory, 1));
 
     create_generation(&directory, 5, &[(b"orphan", b"candidate")]);
-    fs::write(staging_marker_path(&directory, 7), b"crash residue")
-        .expect("write staging residue");
+    fs::write(staging_marker_path(&directory, 7), b"crash residue").expect("write staging residue");
 
     let switched = run_switch(&directory);
     assert_success("compact-switch above residue", &switched);
@@ -97,7 +97,8 @@ fn unix_offline_switch_allocates_above_orphan_and_staging_residue_without_reuse(
 
     let verified = run_verify(&directory);
     assert_success("verify allocation frontier", &verified);
-    let verified: Value = serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
+    let verified: Value =
+        serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
     assert_eq!(verified["authoritative_generation"], 8);
     assert_eq!(verified["highest_observed_generation"], 8);
     assert_eq!(
@@ -153,13 +154,11 @@ fn staging_marker_path(directory: &Path, id: u64) -> PathBuf {
 }
 
 fn run_switch(directory: &Path) -> Output {
-    Command::new(env!(
-        "CARGO_BIN_EXE_db-lab-log-generation-compact-switch"
-    ))
-    .arg("--directory")
-    .arg(directory)
-    .output()
-    .expect("run generation compact switch")
+    Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-compact-switch"))
+        .arg("--directory")
+        .arg(directory)
+        .output()
+        .expect("run generation compact switch")
 }
 
 #[cfg(unix)]
