@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use db_core::{DbError, KvEngine};
-use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
+use db_storage_log::{InspectionReport, LogEngine};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -52,8 +52,6 @@ enum CompactError {
     },
     #[error("invalid compaction request: {0}")]
     Invalid(String),
-    #[error("failed to encode compaction report: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 fn main() -> ExitCode {
@@ -64,7 +62,7 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("error: {error}");
+                eprintln!("error: failed to encode compaction report: {error}");
                 ExitCode::from(1)
             }
         },
@@ -98,25 +96,35 @@ fn compact(args: &Cli) -> Result<CompactionReport, CompactError> {
         return invalid("source changed between verification and replay inspection");
     }
 
-    let staging_result = build_staging(&staging, &source_inspection);
-    if let Err(error) = staging_result {
+    build_staging(&staging, &source_inspection)?;
+    let compacted_inspection = match LogEngine::inspect(&staging, true) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = fs::remove_file(&staging);
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = validate_compacted_state(&source_inspection, &compacted_inspection) {
         let _ = fs::remove_file(&staging);
         return Err(error);
     }
 
-    let compacted_inspection = LogEngine::inspect(&staging, true)?;
-    validate_compacted_state(&source_inspection, &compacted_inspection)?;
-
-    let source_after = LogEngine::inspect(&source, true)?;
+    let source_after = match LogEngine::inspect(&source, true) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = fs::remove_file(&staging);
+            return Err(error.into());
+        }
+    };
     if source_after != source_inspection {
         let _ = fs::remove_file(&staging);
         return invalid("source changed while the compact copy was being constructed");
     }
 
-    fs::hard_link(&staging, &output).map_err(|source| CompactError::Io {
-        path: output.clone(),
-        source,
-    })?;
+    if let Err(error) = fs::hard_link(&staging, &output) {
+        let _ = fs::remove_file(&staging);
+        return Err(io_error(&output, error));
+    }
 
     let published = match LogEngine::inspect(&output, true) {
         Ok(report) if report == compacted_inspection => report,
@@ -132,15 +140,18 @@ fn compact(args: &Cli) -> Result<CompactionReport, CompactError> {
         }
     };
 
-    let staging_retained = fs::remove_file(&staging).is_err();
-    let reclaimed_bytes = source_verification
+    let reclaimed_bytes = match source_verification
         .file_bytes
         .checked_sub(published.verification.file_bytes)
-        .ok_or_else(|| {
-            CompactError::Invalid(
-                "compacted file is unexpectedly larger than its source append log".to_owned(),
-            )
-        })?;
+    {
+        Some(bytes) => bytes,
+        None => {
+            let _ = fs::remove_file(&output);
+            let _ = fs::remove_file(&staging);
+            return invalid("compacted file is unexpectedly larger than its source append log");
+        }
+    };
+    let staging_retained = fs::remove_file(&staging).is_err();
 
     Ok(CompactionReport {
         protocol: COMPACTION_PROTOCOL,
