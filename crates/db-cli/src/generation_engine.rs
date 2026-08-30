@@ -7,9 +7,7 @@ use db_storage_log::LogEngine;
 use crate::generation_directory::{
     scan_generation_namespace, verify_generation_directory, GenerationDirectoryError,
 };
-use crate::generation_lock::{
-    acquire_generation_writer_lease, GenerationWriterLockError,
-};
+use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
 
 /// Generation-directory-aware append-log engine.
 ///
@@ -208,7 +206,10 @@ fn map_lock_error(error: GenerationWriterLockError) -> DbError {
         GenerationWriterLockError::Invalid(message) => corruption(message),
         GenerationWriterLockError::Busy { path } => DbError::Io(io::Error::new(
             io::ErrorKind::WouldBlock,
-            format!("generation writer lock is held or stale: {}", path.display()),
+            format!(
+                "generation writer lock is held or stale: {}",
+                path.display()
+            ),
         )),
         GenerationWriterLockError::Io { path, source } => DbError::Io(io::Error::new(
             source.kind(),
