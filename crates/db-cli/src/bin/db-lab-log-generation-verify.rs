@@ -344,10 +344,8 @@ mod tests {
             Some(42)
         );
         assert_eq!(
-            parse_canonical_staging_commit_name(
-                "staging-commit-00000000000000000042.marker"
-            )
-            .expect("parse staging marker"),
+            parse_canonical_staging_commit_name("staging-commit-00000000000000000042.marker")
+                .expect("parse staging marker"),
             Some(42)
         );
         assert!(parse_canonical_generation_name("generation-42.log").is_err());
