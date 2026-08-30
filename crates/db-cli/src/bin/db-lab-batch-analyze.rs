@@ -746,10 +746,12 @@ fn compare_regular_files(
         path: source_path.to_path_buf(),
         source,
     })?;
-    let snapshot_metadata = snapshot_file.metadata().map_err(|source| AnalyzeError::Io {
-        path: snapshot_path.to_path_buf(),
-        source,
-    })?;
+    let snapshot_metadata = snapshot_file
+        .metadata()
+        .map_err(|source| AnalyzeError::Io {
+            path: snapshot_path.to_path_buf(),
+            source,
+        })?;
     if !source_metadata.is_file() || !snapshot_metadata.is_file() {
         return Err(AnalyzeError::Invalid(format!(
             "archive entry {name:?} ceased to be a regular file during analysis"
@@ -766,12 +768,13 @@ fn compare_regular_files(
     let mut source_buffer = [0_u8; 64 * 1024];
     let mut snapshot_buffer = [0_u8; 64 * 1024];
     loop {
-        let source_read = source_reader
-            .read(&mut source_buffer)
-            .map_err(|source| AnalyzeError::Io {
-                path: source_path.to_path_buf(),
-                source,
-            })?;
+        let source_read =
+            source_reader
+                .read(&mut source_buffer)
+                .map_err(|source| AnalyzeError::Io {
+                    path: source_path.to_path_buf(),
+                    source,
+                })?;
         let snapshot_read = snapshot_reader
             .read(&mut snapshot_buffer)
             .map_err(|source| AnalyzeError::Io {
@@ -1001,20 +1004,22 @@ mod tests {
         let batch_path = directory.path().join("batch.json");
         let mut batch: Value = serde_json::from_slice(&fs::read(&batch_path).expect("read batch"))
             .expect("parse batch");
-        batch["attempts"][0]["report"]["first"]["comparison"]["left"]
-            ["operational_timing"]["reopen_ns"][0] = json!(999);
-        batch["attempts"][0]["report"]["first"]["comparison"]["left"]
-            ["operational_timing"]["reopen_samples"][0]["duration_ns"] = json!(999);
+        batch["attempts"][0]["report"]["first"]["comparison"]["left"]["operational_timing"]
+            ["reopen_ns"][0] = json!(999);
+        batch["attempts"][0]["report"]["first"]["comparison"]["left"]["operational_timing"]
+            ["reopen_samples"][0]["duration_ns"] = json!(999);
         fs::write(
             &batch_path,
             serde_json::to_vec_pretty(&batch).expect("encode changed batch"),
         )
         .expect("write changed batch");
 
-        assert!(verify_source_matches_snapshot(directory.path(), snapshot.path())
-            .expect_err("timing-only mutation must be detected")
-            .to_string()
-            .contains("changed"));
+        assert!(
+            verify_source_matches_snapshot(directory.path(), snapshot.path())
+                .expect_err("timing-only mutation must be detected")
+                .to_string()
+                .contains("changed")
+        );
     }
 
     fn args(path: &Path) -> Cli {
