@@ -10,6 +10,9 @@ use thiserror::Error;
 use crate::generation_directory::{canonical_generation_name, verify_generation_directory};
 use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(unix)]
+use crate::generation_lock::acquire_generation_writer_lease;
+use crate::generation_lock::GenerationWriterLockError;
+#[cfg(unix)]
 use crate::generation_publication::publish_generation_marker;
 use crate::generation_publication::{GenerationPublicationError, GenerationPublicationSummary};
 #[cfg(unix)]
@@ -38,6 +41,8 @@ pub enum OfflineGenerationCompactSwitchError {
     #[error(transparent)]
     Directory(#[from] GenerationDirectoryError),
     #[error(transparent)]
+    WriterLock(#[from] GenerationWriterLockError),
+    #[error(transparent)]
     Database(#[from] DbError),
     #[error(transparent)]
     Compaction(#[from] LogCompactionError),
@@ -57,13 +62,14 @@ pub enum OfflineGenerationCompactSwitchError {
     FinalState { generation: u64 },
 }
 
-/// Offline-only authoritative compact switch for a generation directory.
+/// Offline authoritative compact switch for a generation directory.
 ///
-/// The caller MUST quiesce every writer that can mutate files in `directory` for the entire call.
-/// This function detects source drift before marker publication, but it cannot stop an independent
-/// raw-path `LogEngine` from accepting a mutation in the final check-to-publication window. The
-/// repository does not yet provide a generation-directory writer lock/routing engine, so this API
-/// is intentionally named and documented as an offline operation.
+/// The expensive compact-copy build runs without the writer lease. Immediately before authority can
+/// change, the function acquires the cooperative cross-process writer lease, re-verifies the old
+/// authority and complete source state, verifies the compact candidate, publishes the marker, and
+/// verifies the new authority while still holding the lease. `GenerationLogEngine` operations use
+/// the same lease, closing their final check-to-publication race. Raw-path `LogEngine` users are
+/// outside this coordination contract and still must be quiesced by the caller.
 pub fn compact_switch_generation_offline(
     directory: &Path,
 ) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError> {
@@ -100,7 +106,11 @@ where
     let compaction = compact_log_to_fresh_file(&source_path, &new_path)?;
     after_compaction(&source_path)?;
 
-    let before_publication = verify_generation_directory(before.directory())?;
+    // Only the authority-changing critical section is exclusive. A compliant routed writer may run
+    // during compact-copy construction; if it did, this locked recheck detects the drift and leaves
+    // the candidate as a harmless uncommitted orphan.
+    let lease = acquire_generation_writer_lease(before.directory())?;
+    let before_publication = verify_generation_directory(lease.directory())?;
     let current_authority = SourceAuthorityWitness::from_summary(before_publication.summary());
     let current_source_state = LogEngine::inspect(&source_path, true)?;
     if current_authority != source_authority || current_source_state != source_state {
@@ -112,8 +122,8 @@ where
     let compact_state = LogEngine::inspect(&new_path, true)?;
     validate_compact_state(new_generation, &source_state, &compact_state)?;
 
-    let publication = publish_generation_marker(before.directory(), new_generation)?;
-    let final_verified = verify_generation_directory(before.directory())?;
+    let publication = publish_generation_marker(lease.directory(), new_generation)?;
+    let final_verified = verify_generation_directory(lease.directory())?;
     if final_verified.summary().authoritative_generation != new_generation {
         return Err(OfflineGenerationCompactSwitchError::FinalAuthority {
             found: final_verified.summary().authoritative_generation,
