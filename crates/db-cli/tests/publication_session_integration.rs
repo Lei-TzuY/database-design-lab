@@ -23,10 +23,7 @@ fn publication_session_v2_encloses_verified_archive_and_rejects_temporal_tamperi
     let archive_dir = directory.path().join("archive");
     let session_dir = directory.path().join("session");
     fs::create_dir(&archive_dir).expect("create archive directory");
-    write_json_file(
-        &preflight_path,
-        &passing_snapshot("perf-host-01", PRE_TIME),
-    );
+    write_json_file(&preflight_path, &passing_snapshot("perf-host-01", PRE_TIME));
     write_json_file(
         &postflight_path,
         &passing_snapshot("perf-host-01", POST_TIME),
@@ -71,7 +68,10 @@ fn publication_session_v2_encloses_verified_archive_and_rejects_temporal_tamperi
         serde_json::from_slice(&original_postflight).expect("decode bundled postflight");
     postflight_value["recorded_unix_seconds"] = json!(ARCHIVE_TIME - 1);
     write_json_file(&bundled_postflight, &postflight_value);
-    assert_failure_contains(&run_verify(&session_dir), "recording time differs from v2 session index");
+    assert_failure_contains(
+        &run_verify(&session_dir),
+        "recording time differs from v2 session index",
+    );
     fs::write(&bundled_postflight, &original_postflight).expect("restore bundled postflight");
 
     let environment_path = session_dir.join("evidence/environment.json");
@@ -151,7 +151,12 @@ fn verifier_keeps_retained_v1_sessions_readable() {
     assert!(summary.get("postflight_recorded_unix_seconds").is_none());
 }
 
-fn run_create(preflight: &Path, postflight: &Path, archive_dir: &Path, session_dir: &Path) -> Output {
+fn run_create(
+    preflight: &Path,
+    postflight: &Path,
+    archive_dir: &Path,
+    session_dir: &Path,
+) -> Output {
     Command::new(env!("CARGO_BIN_EXE_db-lab-publication-session"))
         .arg("create")
         .arg("--host-preflight")
