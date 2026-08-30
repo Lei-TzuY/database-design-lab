@@ -13,7 +13,9 @@ use crate::generation_directory::{GenerationDirectoryError, GenerationVerificati
 use crate::generation_lock::acquire_generation_writer_lease;
 use crate::generation_lock::GenerationWriterLockError;
 #[cfg(unix)]
-use crate::generation_publication::publish_generation_marker;
+use crate::generation_publication::{
+    publish_generation_marker_with_hook, GenerationPublicationStage,
+};
 use crate::generation_publication::{GenerationPublicationError, GenerationPublicationSummary};
 #[cfg(unix)]
 use crate::log_compaction::compact_log_to_fresh_file;
@@ -62,6 +64,39 @@ pub enum OfflineGenerationCompactSwitchError {
     FinalState { generation: u64 },
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationCompactSwitchStage {
+    AfterCandidateBuild,
+    AfterLockedSourceRecheck,
+    AfterTargetVerification,
+    AfterGenerationSync,
+    AfterGenerationDirectorySync,
+    AfterStagingMarkerSync,
+    AfterFinalMarkerLink,
+    AfterFinalDirectorySync,
+    AfterPublishedEvidenceVerification,
+    AfterFinalSwitchVerification,
+}
+
+#[cfg(unix)]
+impl From<GenerationPublicationStage> for GenerationCompactSwitchStage {
+    fn from(stage: GenerationPublicationStage) -> Self {
+        match stage {
+            GenerationPublicationStage::AfterGenerationSync => Self::AfterGenerationSync,
+            GenerationPublicationStage::AfterGenerationDirectorySync => {
+                Self::AfterGenerationDirectorySync
+            }
+            GenerationPublicationStage::AfterStagingMarkerSync => Self::AfterStagingMarkerSync,
+            GenerationPublicationStage::AfterFinalMarkerLink => Self::AfterFinalMarkerLink,
+            GenerationPublicationStage::AfterFinalDirectorySync => Self::AfterFinalDirectorySync,
+            GenerationPublicationStage::AfterPublishedEvidenceVerification => {
+                Self::AfterPublishedEvidenceVerification
+            }
+        }
+    }
+}
+
 /// Offline authoritative compact switch for a generation directory.
 ///
 /// The expensive compact-copy build runs without the writer lease. Immediately before authority can
@@ -93,6 +128,19 @@ fn compact_switch_generation_offline_impl<F>(
 where
     F: FnOnce(&Path) -> Result<(), OfflineGenerationCompactSwitchError>,
 {
+    compact_switch_generation_offline_with_fault_hook(directory, after_compaction, |_| Ok(()))
+}
+
+#[cfg(unix)]
+fn compact_switch_generation_offline_with_fault_hook<F, H>(
+    directory: &Path,
+    after_compaction: F,
+    mut fault_hook: H,
+) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError>
+where
+    F: FnOnce(&Path) -> Result<(), OfflineGenerationCompactSwitchError>,
+    H: FnMut(GenerationCompactSwitchStage) -> Result<(), String>,
+{
     let before = verify_generation_directory(directory)?;
     let old_generation = before.summary().authoritative_generation;
     let old_generation_log = before.summary().authoritative_log.clone();
@@ -104,6 +152,8 @@ where
     let new_path = before.directory().join(&new_generation_log);
 
     let compaction = compact_log_to_fresh_file(&source_path, &new_path)?;
+    fault_hook(GenerationCompactSwitchStage::AfterCandidateBuild)
+        .map_err(injected_switch_fault)?;
     after_compaction(&source_path)?;
 
     // Only the authority-changing critical section is exclusive. A compliant routed writer may run
@@ -118,11 +168,25 @@ where
             orphan_generation: new_generation,
         });
     }
+    fault_hook(GenerationCompactSwitchStage::AfterLockedSourceRecheck)
+        .map_err(injected_switch_fault)?;
 
     let compact_state = LogEngine::inspect(&new_path, true)?;
     validate_compact_state(new_generation, &source_state, &compact_state)?;
+    fault_hook(GenerationCompactSwitchStage::AfterTargetVerification)
+        .map_err(injected_switch_fault)?;
 
-    let publication = publish_generation_marker(lease.directory(), new_generation)?;
+    let publication = publish_generation_marker_with_hook(
+        lease.directory(),
+        new_generation,
+        |publication_stage| {
+            fault_hook(publication_stage.into()).map_err(|message| {
+                GenerationPublicationError::Invalid(format!(
+                    "injected composed compact-switch fault: {message}"
+                ))
+            })
+        },
+    )?;
     let final_verified = verify_generation_directory(lease.directory())?;
     if final_verified.summary().authoritative_generation != new_generation {
         return Err(OfflineGenerationCompactSwitchError::FinalAuthority {
@@ -137,6 +201,8 @@ where
             generation: new_generation,
         });
     }
+    fault_hook(GenerationCompactSwitchStage::AfterFinalSwitchVerification)
+        .map_err(injected_switch_fault)?;
 
     Ok(OfflineGenerationCompactSwitchSummary {
         protocol: OFFLINE_GENERATION_COMPACT_SWITCH_PROTOCOL,
@@ -148,6 +214,13 @@ where
         publication,
         final_generation: final_verified.summary().clone(),
     })
+}
+
+#[cfg(unix)]
+fn injected_switch_fault(message: String) -> OfflineGenerationCompactSwitchError {
+    OfflineGenerationCompactSwitchError::Directory(GenerationDirectoryError::Invalid(format!(
+        "injected composed compact-switch fault: {message}"
+    )))
 }
 
 #[cfg(unix)]
@@ -192,8 +265,24 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::generation_directory::{canonical_marker_name, verify_generation_directory};
+    use crate::generation_directory::{
+        canonical_marker_name, canonical_staging_marker_name, verify_generation_directory,
+    };
+    use crate::generation_lock::generation_writer_lock_path;
     use crate::generation_publication::publish_generation_marker;
+
+    const FAULT_STAGES: [GenerationCompactSwitchStage; 10] = [
+        GenerationCompactSwitchStage::AfterCandidateBuild,
+        GenerationCompactSwitchStage::AfterLockedSourceRecheck,
+        GenerationCompactSwitchStage::AfterTargetVerification,
+        GenerationCompactSwitchStage::AfterGenerationSync,
+        GenerationCompactSwitchStage::AfterGenerationDirectorySync,
+        GenerationCompactSwitchStage::AfterStagingMarkerSync,
+        GenerationCompactSwitchStage::AfterFinalMarkerLink,
+        GenerationCompactSwitchStage::AfterFinalDirectorySync,
+        GenerationCompactSwitchStage::AfterPublishedEvidenceVerification,
+        GenerationCompactSwitchStage::AfterFinalSwitchVerification,
+    ];
 
     #[test]
     fn source_drift_after_compaction_never_publishes_stale_generation() {
@@ -224,5 +313,104 @@ mod tests {
         assert!(!directory.join(canonical_marker_name(2)).exists());
         let verified = verify_generation_directory(&directory).expect("verify old authority");
         assert_eq!(verified.summary().authoritative_generation, 1);
+    }
+
+    #[test]
+    fn every_composed_fault_boundary_recovers_to_a_complete_old_or_new_authority() {
+        for fault_stage in FAULT_STAGES {
+            let root = tempdir().expect("temporary root");
+            let directory = root.path().join("generations");
+            fs::create_dir(&directory).expect("create generation directory");
+            let source = directory.join(canonical_generation_name(1));
+            {
+                let mut engine = LogEngine::create_new(&source).expect("create source generation");
+                engine.put(b"a", b"one").expect("put a one");
+                engine.put(b"a", b"two").expect("overwrite a");
+                engine.put(b"b", b"three").expect("put b");
+                engine.delete(b"b").expect("delete b");
+                engine.put(b"c", b"").expect("put empty c");
+            }
+            publish_generation_marker(&directory, 1).expect("publish source generation");
+            let source_before = LogEngine::inspect(&source, true).expect("inspect source before fault");
+
+            let error = compact_switch_generation_offline_with_fault_hook(
+                &directory,
+                |_| Ok(()),
+                |observed| {
+                    if observed == fault_stage {
+                        Err(format!("{fault_stage:?}"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("injected boundary must report failure");
+            assert!(
+                error.to_string().contains("injected composed compact-switch fault"),
+                "unexpected fault error at {fault_stage:?}: {error}"
+            );
+
+            let lock_path = generation_writer_lock_path(&directory).expect("derive writer lock path");
+            assert!(
+                !lock_path.exists(),
+                "writer lease must be released after fault at {fault_stage:?}"
+            );
+            let source_after = LogEngine::inspect(&source, true).expect("inspect retained source");
+            assert_eq!(
+                source_after, source_before,
+                "old generation changed at fault {fault_stage:?}"
+            );
+
+            let new_path = directory.join(canonical_generation_name(2));
+            assert!(
+                new_path.is_file(),
+                "compact candidate missing at fault {fault_stage:?}"
+            );
+            let new_state = LogEngine::inspect(&new_path, true).expect("inspect compact candidate");
+            assert_eq!(
+                new_state.entries, source_before.entries,
+                "compact candidate lost live state at fault {fault_stage:?}"
+            );
+            assert_eq!(
+                new_state.verification.record_count,
+                u64::try_from(source_before.entries.len()).expect("live entry count fits u64"),
+                "candidate is not compact at fault {fault_stage:?}"
+            );
+
+            let verified = verify_generation_directory(&directory).expect("verify recovery authority");
+            let new_authority_visible = matches!(
+                fault_stage,
+                GenerationCompactSwitchStage::AfterFinalMarkerLink
+                    | GenerationCompactSwitchStage::AfterFinalDirectorySync
+                    | GenerationCompactSwitchStage::AfterPublishedEvidenceVerification
+                    | GenerationCompactSwitchStage::AfterFinalSwitchVerification
+            );
+            let expected_generation = if new_authority_visible { 2 } else { 1 };
+            assert_eq!(
+                verified.summary().authoritative_generation,
+                expected_generation,
+                "wrong recovery authority at fault {fault_stage:?}"
+            );
+            assert_eq!(
+                directory.join(canonical_marker_name(2)).exists(),
+                new_authority_visible,
+                "final marker visibility disagrees at fault {fault_stage:?}"
+            );
+
+            let staging_visible = matches!(
+                fault_stage,
+                GenerationCompactSwitchStage::AfterStagingMarkerSync
+                    | GenerationCompactSwitchStage::AfterFinalMarkerLink
+                    | GenerationCompactSwitchStage::AfterFinalDirectorySync
+                    | GenerationCompactSwitchStage::AfterPublishedEvidenceVerification
+            );
+            assert_eq!(
+                directory
+                    .join(canonical_staging_marker_name(2))
+                    .exists(),
+                staging_visible,
+                "staging-marker visibility disagrees at fault {fault_stage:?}"
+            );
+        }
     }
 }
