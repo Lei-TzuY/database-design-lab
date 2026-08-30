@@ -11,7 +11,7 @@ A **generation** is a candidate append-log v1 file plus durable commit metadata 
 The model classifies a generation log as one of:
 
 - `clean`: complete append-log v1 evidence accepted by read-only verification;
-- `recoverable_tail`: the existing v1 canonical incomplete-final-append case, which mutable open may truncate and synchronize;
+- `recoverable_tail`: the existing v1 canonical incomplete-final-append case, which mutable open may truncate and synchronize only when commit metadata proves that the complete compacted base prefix precedes that tail;
 - `missing`;
 - `corrupt`: anything else that the v1 verifier rejects.
 
@@ -24,7 +24,8 @@ Recovery MUST select the highest generation id that has a durable commit marker.
 For that selected generation:
 
 - `clean` -> open it directly;
-- `recoverable_tail` -> it remains authoritative and may use the existing v1 final-append repair path;
+- `recoverable_tail` with a marker-bound complete base prefix -> it remains authoritative and may use the existing v1 final-append repair path;
+- `recoverable_tail` without proof of the committed base prefix -> fail closed;
 - `missing` -> fail closed;
 - `corrupt` -> fail closed.
 
@@ -50,7 +51,7 @@ Any future generation switch must preserve this order:
 2. construct the next generation without making it authoritative;
 3. make the complete next-generation log durable;
 4. verify the durable next-generation image;
-5. durably publish its commit marker;
+5. durably publish a commit marker that binds the generation id and verified complete base prefix;
 6. only after marker durability may old-generation cleanup become eligible.
 
 The executable model covers every valid prefix of that sequence and requires recovery to choose exactly the old or new generation.
@@ -58,6 +59,7 @@ The executable model covers every valid prefix of that sequence and requires rec
 Two writer orders are explicitly invalid:
 
 - publishing the new marker before the new generation is durable;
+- publishing a marker that does not prove the complete compacted base prefix;
 - deleting or corrupting the old committed generation before the new marker is durable.
 
 The model treats the resulting states as fail-closed conditions rather than inventing recovery heuristics.
@@ -70,10 +72,11 @@ The model treats the resulting states as fail-closed conditions rather than inve
 | during new file construction | committed + clean | uncommitted + incomplete/corrupt | old |
 | after new image is complete | committed + clean | uncommitted + clean | old |
 | after new marker is durable | committed + clean | committed + clean | new |
+| marker exists but base-prefix proof fails | committed + clean | committed + unproven recoverable tail | fail closed |
 | during old cleanup | missing/damaged old | committed + clean new | new |
 | after old cleanup | absent old | committed + clean new | new |
 
-A committed new generation with a canonical recoverable final append still selects the new generation and delegates only that tail repair to the existing append-log v1 recovery rule.
+A committed new generation with a canonical recoverable final append selects the new generation and delegates only that tail repair to the existing append-log v1 recovery rule **only** when the marker proves that the verified complete compacted base prefix is intact and the incomplete bytes follow it. Without that proof, recovery fails closed: the same apparent tail could be an incomplete compact image published too early.
 
 A committed new generation that is missing or corrupt fails closed. It never reselects the old generation.
 
@@ -82,7 +85,7 @@ A committed new generation that is missing or corrupt fails closed. It never res
 This recovery law is an executable design oracle, not production generation switching. It does not yet define or implement:
 
 - generation/marker filenames;
-- marker byte format, versioning, checksums, or bounds;
+- the marker byte format, versioning, checksums, bounds, or exact committed-prefix binding;
 - the exact file and directory `sync_all` sequence;
 - cross-platform create-new and rename/link mechanics for marker publication;
 - orphan discovery and cleanup;
