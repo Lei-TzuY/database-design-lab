@@ -1,0 +1,98 @@
+# Linux controlled-host preflight
+
+`db-lab-host-preflight` records the machine-observable portion of the Phase 4 controlled-host boundary before any publishable timing collection begins. Its protocol is `linux_controlled_host_preflight_v1`.
+
+A passing preflight is a prerequisite, not a benchmark result. It does not make GitHub-hosted CI a performance host, it does not certify human statements as facts, and it does not create a regression threshold.
+
+## Why this is separate from publication admission
+
+`publication_warm_v1` already rejects debug builds, unverified cold-cache claims, missing host/storage/filesystem/build/analysis metadata, and incomplete repeated-run metadata. Those checks prove that required declarations are present; they do not independently prove that the operating system actually pinned the process or that frequency/noise controls were active.
+
+The host preflight therefore keeps two classes of evidence visibly separate:
+
+- **machine-observed hard controls**: process CPU affinity, online CPUs, scaling governor, turbo/boost state, and one-minute system load;
+- **operator attestations**: thermal stabilization procedure, unrelated-service/background-load procedure, and filesystem/controller/device-cache procedure.
+
+The first class can make the command fail. The second class is preserved verbatim but is explicitly labelled as attestation rather than measurement or proof.
+
+## v1 hard controls
+
+The first protocol is intentionally Linux-only and conservative. A snapshot passes only when all of the following are true:
+
+1. `/proc/self/status` exposes `Cpus_allowed_list`, and the parsed process affinity is exactly the CPU set supplied by `--expected-cpus`;
+2. `/sys/devices/system/cpu/online` shows every expected CPU online;
+3. every expected CPU exposes `cpufreq/scaling_governor`, and every value is exactly `performance`;
+4. turbo/boost is observable through a supported kernel interface and is disabled. v1 accepts either `intel_pstate/no_turbo = 1` or generic `cpufreq/boost = 0`;
+5. `/proc/loadavg` exposes a finite one-minute load, and `load1 / pinned_cpu_count <= --max-load-per-cpu`.
+
+Missing observations fail closed. The tool does not silently substitute a host label, CPU model string, or operator statement for an unavailable kernel observation.
+
+The snapshot also records the OS/architecture, kernel release when readable, and a CPU model string when readable. Those fields are descriptive provenance and are not themselves hard-control gates.
+
+## CPU-list syntax
+
+`--expected-cpus` accepts Linux-style comma-separated ids and inclusive ranges, for example:
+
+```text
+2-5
+2,4,6
+2-3,6-7
+```
+
+Descending ranges, duplicates, overlapping ranges, empty components, and unreasonably large CPU ids are rejected. The process affinity must match the normalized set exactly rather than merely contain it. This prevents a benchmark command that was intended to run on CPUs 2-3 from silently retaining access to other online CPUs.
+
+## Noise budget
+
+`--max-load-per-cpu` is explicit rather than hard-coded by the repository. For example, with two pinned CPUs and `--max-load-per-cpu 0.10`, a one-minute system load above `0.20` fails the preflight.
+
+This is a coarse machine-observable noise signal, not a complete scheduler-noise model. A later reviewed host procedure may add stronger host-specific telemetry, but v1 does not invent portable guarantees that Linux does not expose consistently.
+
+## Operator attestations
+
+Three non-empty, bounded statements are required:
+
+- `--thermal-control-attestation`;
+- `--background-load-attestation`;
+- `--storage-cache-attestation`.
+
+These fields answer “what procedure did the operator use?” They do **not** answer “did the repository independently prove that procedure happened?” The output carries that limitation explicitly.
+
+This separation is deliberate. CPU temperature sensor naming, controller cache state, device-internal cache behavior, and service isolation are not portable enough to turn an arbitrary string or filesystem probe into a universal proof.
+
+## Example controlled-host invocation
+
+Run the preflight in the same process environment/CPU affinity that will launch the benchmark collection. A Linux operator might first bind the shell or command with the host's reviewed mechanism and then run:
+
+```text
+db-lab-host-preflight \
+  --output evidence/host-preflight-001.json \
+  --host-label perf-host-01 \
+  --expected-cpus 2-3 \
+  --max-load-per-cpu 0.10 \
+  --thermal-control-attestation "CPU package stabilized under the reviewed warm-up/cool-down procedure" \
+  --background-load-attestation "nonessential services stopped; benchmark user is the only workload user" \
+  --storage-cache-attestation "publication_warm_v1 trace-induced warm policy; no cold-cache claim"
+```
+
+The output path must not already exist. A fully collected snapshot is written with `create_new`, flushed, and synchronized. This remains true for a control violation: the file records `passed=false` and the complete `violations` array, while the command exits non-zero. Configuration/collection failures that prevent a meaningful snapshot do not fabricate a passed artifact.
+
+## Output boundary
+
+A snapshot contains:
+
+- protocol and Unix recording time;
+- stable host label;
+- `passed`;
+- exact expected affinity, fixed `performance` governor requirement, turbo-disabled requirement, and load budget;
+- observed affinity/online CPUs/governors/turbo interface and raw value/load plus descriptive kernel/CPU data;
+- operator attestations;
+- every hard-control violation;
+- explicit limitations.
+
+The snapshot is not yet embedded into repeated-batch archive formats. Doing that correctly requires a new versioned publication evidence format rather than silently changing v7/v11. Until such a format exists and a real named host is configured and reviewed, the roadmap item “Establish a controlled pinned performance host” remains incomplete.
+
+## Relationship to analysis bundles
+
+The repository can now preserve raw repeated evidence, fail-closed verify it, compute descriptive order-stratified timing summaries, and keep the summary beside re-verifiable raw evidence in an immutable analysis bundle. The host-preflight artifact addresses a different question: whether a real collection session started under the repository's first machine-observable host controls.
+
+Neither artifact makes hosted CI timing publishable. Real Phase 4 completion still requires actual controlled-host collection and review of the resulting denominator and distributions before any statistical regression threshold is proposed.
