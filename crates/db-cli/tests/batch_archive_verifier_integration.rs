@@ -60,8 +60,7 @@ fn real_batch_archive_verifies_analyzes_and_tampering_fails_closed() {
 
     let analyzed = run_analyzer(&archive_dir);
     assert_success("db-lab-batch-analyze", &analyzed);
-    let analysis: Value =
-        serde_json::from_slice(&analyzed.stdout).expect("decode analyzer report");
+    let analysis: Value = serde_json::from_slice(&analyzed.stdout).expect("decode analyzer report");
     assert_eq!(
         analysis["analysis_protocol"],
         "verified_operational_timing_descriptive_v1"
@@ -70,13 +69,11 @@ fn real_batch_archive_verifies_analyzes_and_tampering_fails_closed() {
     assert_eq!(analysis["verification"]["format_version"], 6);
     assert_eq!(analysis["verification"]["included_pairs"], 1);
     assert_eq!(
-        analysis["primary_complete_pairs"]["combined"]["left"]["reopen"]["duration_ns"]
-            ["samples"],
+        analysis["primary_complete_pairs"]["combined"]["left"]["reopen"]["duration_ns"]["samples"],
         2
     );
     assert_eq!(
-        analysis["primary_complete_pairs"]["combined"]["right"]["reopen"]["duration_ns"]
-            ["samples"],
+        analysis["primary_complete_pairs"]["combined"]["right"]["reopen"]["duration_ns"]["samples"],
         2
     );
     assert_eq!(
@@ -127,8 +124,8 @@ fn real_batch_archive_verifies_analyzes_and_tampering_fails_closed() {
     .expect("restore environment");
 
     let batch_path = archive_dir.join("batch.json");
-    let mut batch: Value = serde_json::from_slice(&fs::read(&batch_path).expect("read batch"))
-        .expect("decode batch");
+    let mut batch: Value =
+        serde_json::from_slice(&fs::read(&batch_path).expect("read batch")).expect("decode batch");
     let reopen_ns = &mut batch["attempts"][0]["report"]["first"]["comparison"]["left"]
         ["operational_timing"]["reopen_ns"];
     let durations = reopen_ns
