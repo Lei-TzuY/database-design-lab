@@ -58,8 +58,6 @@ enum VerifyError {
         #[source]
         source: io::Error,
     },
-    #[error("failed to encode verification summary: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 fn main() -> ExitCode {
@@ -70,7 +68,7 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("error: {error}");
+                eprintln!("error: failed to encode verification summary: {error}");
                 ExitCode::from(1)
             }
         },
@@ -123,7 +121,7 @@ fn verify_generation_directory(
     let marker_generation_ids = marker_files.keys().copied().collect();
     let uncommitted_generation_ids = generation_files
         .keys()
-        .filter(|id| !marker_files.contains_key(id))
+        .filter(|id| !marker_files.contains_key(*id))
         .copied()
         .collect();
     let authoritative_log = log_path
@@ -172,11 +170,11 @@ fn scan_namespace(
         let path = entry.path();
 
         if let Some(id) = parse_canonical_generation_name(name)? {
-            generation_files.insert(id, path);
+            let _ = generation_files.insert(id, path);
             continue;
         }
         if let Some(id) = parse_canonical_commit_name(name)? {
-            marker_files.insert(id, path);
+            let _ = marker_files.insert(id, path);
             continue;
         }
         return invalid(format!("unexpected generation directory entry {name:?}"));
