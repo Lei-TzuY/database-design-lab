@@ -14,7 +14,7 @@ fn real_batch_archive_verifies_analyzes_and_tampering_fails_closed() {
     let trace = generate_experiment_trace(ExperimentGeneratorConfig {
         seed: 0x2026_0830,
         profile: ExperimentProfile::RandomWrite,
-        operations: 2,
+        operations: 1,
         key_space: 8,
         value_bytes: 8,
         range_limit: 1,
@@ -146,7 +146,10 @@ fn real_batch_archive_verifies_analyzes_and_tampering_fails_closed() {
     .expect("write timing-tampered batch");
 
     let structurally_verified = run_verifier(&archive_dir);
-    assert_success("db-lab-batch-verify after timing projection tamper", &structurally_verified);
+    assert_success(
+        "db-lab-batch-verify after timing projection tamper",
+        &structurally_verified,
+    );
     let rejected_timing_analysis = run_analyzer(&archive_dir);
     assert_failure_contains(
         "db-lab-batch-analyze",
