@@ -2,6 +2,7 @@ pub mod batch_archive;
 pub mod generation_compaction;
 pub mod generation_directory;
 pub mod generation_engine;
+pub mod generation_lock;
 pub mod generation_marker;
 pub mod generation_prefix;
 pub mod generation_publication;

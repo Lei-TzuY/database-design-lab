@@ -7,14 +7,14 @@ use db_storage_log::LogEngine;
 use crate::generation_directory::{
     scan_generation_namespace, verify_generation_directory, GenerationDirectoryError,
 };
+use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
 
 /// Generation-directory-aware append-log engine.
 ///
-/// The wrapper keeps ordinary mutations on the currently highest committed generation and adopts a
-/// newly published higher generation before the next operation. It deliberately retains the common
-/// caller-serialized concurrency contract: namespace checks prevent stale handles after a serialized
-/// generation switch, but they are not a cross-process lock and cannot close a scan-to-append race
-/// against a writer that violates caller serialization.
+/// Every routed operation acquires the generation-directory writer lease before authority refresh
+/// and keeps it through the operation. This closes the cooperative cross-process scan-to-append race
+/// against the offline compact switch and other `GenerationLogEngine` handles. Raw-path
+/// `LogEngine` users remain outside this coordination contract.
 pub struct GenerationLogEngine {
     directory: PathBuf,
     authoritative_generation: u64,
@@ -37,7 +37,8 @@ impl std::fmt::Debug for GenerationLogEngine {
 impl GenerationLogEngine {
     /// Opens only the generation selected by the shared no-rollback recovery contract.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self> {
-        let resolved = resolve_authority(directory.as_ref(), 0)?;
+        let lease = acquire_generation_writer_lease(directory.as_ref()).map_err(map_lock_error)?;
+        let resolved = resolve_authority(lease.directory(), 0)?;
         Ok(Self {
             directory: resolved.directory,
             authoritative_generation: resolved.generation,
@@ -120,6 +121,10 @@ impl GenerationLogEngine {
             Err(error) => self.poison(error),
         }
     }
+
+    fn acquire_operation_lease(&self) -> Result<crate::generation_lock::GenerationWriterLease> {
+        acquire_generation_writer_lease(&self.directory).map_err(map_lock_error)
+    }
 }
 
 impl KvEngine for GenerationLogEngine {
@@ -130,21 +135,25 @@ impl KvEngine for GenerationLogEngine {
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _lease = self.acquire_operation_lease()?;
         self.refresh_authority()?;
         self.inner.put(key, value)
     }
 
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _lease = self.acquire_operation_lease()?;
         self.refresh_authority()?;
         self.inner.get(key)
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _lease = self.acquire_operation_lease()?;
         self.refresh_authority()?;
         self.inner.delete(key)
     }
 
     fn reopen(&mut self) -> Result<()> {
+        let _lease = self.acquire_operation_lease()?;
         self.reopen_routed()
     }
 }
@@ -189,6 +198,24 @@ fn resolve_authority(directory: &Path, minimum_generation: u64) -> Result<Resolv
         generation,
         inner,
     })
+}
+
+fn map_lock_error(error: GenerationWriterLockError) -> DbError {
+    match error {
+        GenerationWriterLockError::Directory(error) => map_directory_error(error),
+        GenerationWriterLockError::Invalid(message) => corruption(message),
+        GenerationWriterLockError::Busy { path } => DbError::Io(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "generation writer lock is held or stale: {}",
+                path.display()
+            ),
+        )),
+        GenerationWriterLockError::Io { path, source } => DbError::Io(io::Error::new(
+            source.kind(),
+            format!("{}: {source}", path.display()),
+        )),
+    }
 }
 
 fn map_directory_error(error: GenerationDirectoryError) -> DbError {

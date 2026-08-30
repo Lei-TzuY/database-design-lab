@@ -33,7 +33,12 @@ because later work has begun.
   `db-core::minimize_failing_workload` performs chunk-removal delta debugging plus 1-minimal cleanup;
   `db-lab-shrink` replays every probe against a fresh persistent candidate, preserves the original
   differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
-- [ ] Compaction. This remains deliberately absent from the append foundation.
+- [ ] Compaction. Unix now has a non-destructive compact-copy primitive, retained generation-directory
+  recovery contract, marker-bound committed-prefix proof, durable final-marker publication, an offline
+  authoritative compact switch, generation-aware routed mutations, and cooperative cross-process writer
+  exclusion around routed operations and the switch publication critical section. The milestone remains
+  open until Windows-equivalent marker durability, composed switch fault injection, safe obsolete/orphan
+  cleanup, stale-lock recovery tooling, and legacy single-file migration/coexistence are implemented.
 
 ## Phase 2 — B+ tree engine
 
