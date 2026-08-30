@@ -1,21 +1,22 @@
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use db_core::DbError;
+#[cfg(unix)]
 use db_storage_log::{InspectionReport, LogEngine};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::generation_directory::{
-    canonical_generation_name, verify_generation_directory, GenerationDirectoryError,
-    GenerationVerificationSummary,
-};
+use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
+#[cfg(unix)]
+use crate::generation_directory::{canonical_generation_name, verify_generation_directory};
 use crate::generation_publication::{
-    publish_generation_marker, GenerationPublicationError, GenerationPublicationSummary,
+    GenerationPublicationError, GenerationPublicationSummary,
 };
-use crate::log_compaction::{
-    compact_log_to_fresh_file, LogCompactionError, LogCompactionReport,
-};
+#[cfg(unix)]
+use crate::generation_publication::publish_generation_marker;
+use crate::log_compaction::{LogCompactionError, LogCompactionReport};
+#[cfg(unix)]
+use crate::log_compaction::compact_log_to_fresh_file;
 
 pub const OFFLINE_GENERATION_COMPACT_SWITCH_PROTOCOL: &str =
     "append_log_offline_generation_compact_switch_unix_v1";
@@ -44,12 +45,6 @@ pub enum OfflineGenerationCompactSwitchError {
     Compaction(#[from] LogCompactionError),
     #[error(transparent)]
     Publication(#[from] GenerationPublicationError),
-    #[error("I/O error at {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
     #[error(
         "authoritative source changed while offline compaction was in progress; generation {orphan_generation} remains uncommitted and must not be treated as authoritative"
     )]
@@ -60,7 +55,7 @@ pub enum OfflineGenerationCompactSwitchError {
         "post-publication verification selected generation {found}, expected newly committed generation {expected}"
     )]
     FinalAuthority { found: u64, expected: u64 },
-    #[error("new authoritative generation {generation} does not reproduce the pre-switch live state")]
+    #[error("new authoritative generation {generation} changed after marker publication")]
     FinalState { generation: u64 },
 }
 
@@ -129,7 +124,7 @@ where
     }
 
     let final_state = LogEngine::inspect(&new_path, true)?;
-    if final_state.entries != source_state.entries {
+    if final_state != compact_state {
         return Err(OfflineGenerationCompactSwitchError::FinalState {
             generation: new_generation,
         });
