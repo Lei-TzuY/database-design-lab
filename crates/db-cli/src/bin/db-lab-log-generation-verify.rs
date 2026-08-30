@@ -5,16 +5,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+use db_cli::generation_marker::{
+    decode_commit_marker, CommitMarker, APPEND_LOG_FORMAT_VERSION, COMMIT_MARKER_LEN,
+    COMMIT_MARKER_VERSION,
+};
 use db_core::DbError;
 use db_storage_log::{LogEngine, VerificationReport};
 use serde::Serialize;
 use thiserror::Error;
 
 const GENERATION_DIRECTORY_PROTOCOL: &str = "append_log_generation_directory_v1";
-const COMMIT_MARKER_MAGIC: [u8; 8] = *b"DBLGCMT\0";
-const COMMIT_MARKER_VERSION: u16 = 1;
-const COMMIT_MARKER_LEN: usize = 32;
-const APPEND_LOG_FORMAT_VERSION: u16 = 1;
 const GENERATION_PREFIX: &str = "generation-";
 const GENERATION_SUFFIX: &str = ".log";
 const COMMIT_PREFIX: &str = "commit-";
@@ -144,11 +144,6 @@ fn verify_generation_directory(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CommitMarker {
-    log_format_version: u16,
-}
-
 fn scan_namespace(
     directory: &Path,
 ) -> Result<(BTreeMap<u64, PathBuf>, BTreeMap<u64, PathBuf>), VerifyError> {
@@ -210,7 +205,9 @@ fn parse_canonical_id(
     }
     let digits = &name[prefix.len()..prefix.len() + GENERATION_ID_WIDTH];
     if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return invalid(format!("malformed canonical {kind} generation id in {name:?}"));
+        return invalid(format!(
+            "malformed canonical {kind} generation id in {name:?}"
+        ));
     }
     let id = digits
         .parse::<u64>()
@@ -235,44 +232,8 @@ fn read_commit_marker(path: &Path, filename_generation: u64) -> Result<CommitMar
     let mut bytes = [0_u8; COMMIT_MARKER_LEN];
     file.read_exact(&mut bytes)
         .map_err(|source| io_error(path, source))?;
-
-    if bytes[..8] != COMMIT_MARKER_MAGIC {
-        return invalid("highest commit marker magic mismatch");
-    }
-    let expected_crc = read_u32(&bytes[28..32]);
-    let actual_crc = crc32fast::hash(&bytes[..28]);
-    if expected_crc != actual_crc {
-        return invalid(format!(
-            "highest commit marker checksum mismatch: expected {expected_crc:08x}, computed {actual_crc:08x}"
-        ));
-    }
-    let version = read_u16(&bytes[8..10]);
-    if version != COMMIT_MARKER_VERSION {
-        return invalid(format!(
-            "unsupported commit marker version {version}; expected {COMMIT_MARKER_VERSION}"
-        ));
-    }
-    let header_len = read_u16(&bytes[10..12]);
-    if usize::from(header_len) != COMMIT_MARKER_LEN {
-        return invalid(format!("invalid commit marker header length {header_len}"));
-    }
-    let generation_id = read_u64(&bytes[12..20]);
-    if generation_id == 0 || generation_id != filename_generation {
-        return invalid(format!(
-            "commit marker generation {generation_id} disagrees with filename generation {filename_generation}"
-        ));
-    }
-    let log_format_version = read_u16(&bytes[20..22]);
-    let reserved = read_u16(&bytes[22..24]);
-    if reserved != 0 {
-        return invalid(format!("commit marker reserved field is nonzero: {reserved:#06x}"));
-    }
-    let flags = read_u32(&bytes[24..28]);
-    if flags != 0 {
-        return invalid(format!("unsupported commit marker flags {flags:#010x}"));
-    }
-
-    Ok(CommitMarker { log_format_version })
+    decode_commit_marker(&bytes, filename_generation)
+        .map_err(|error| VerifyError::Invalid(format!("highest commit marker {error}")))
 }
 
 fn canonical_real_directory(path: &Path) -> Result<PathBuf, VerifyError> {
@@ -297,20 +258,6 @@ fn require_real_regular_file(path: &Path, label: &str) -> Result<(), VerifyError
     Ok(())
 }
 
-fn read_u16(bytes: &[u8]) -> u16 {
-    u16::from_le_bytes([bytes[0], bytes[1]])
-}
-
-fn read_u32(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-}
-
-fn read_u64(bytes: &[u8]) -> u64 {
-    u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
-}
-
 fn io_error(path: &Path, source: io::Error) -> VerifyError {
     VerifyError::Io {
         path: path.to_path_buf(),
@@ -326,20 +273,6 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, VerifyError> {
 mod tests {
     use super::*;
 
-    fn encode_marker(generation_id: u64) -> [u8; COMMIT_MARKER_LEN] {
-        let mut bytes = [0_u8; COMMIT_MARKER_LEN];
-        bytes[..8].copy_from_slice(&COMMIT_MARKER_MAGIC);
-        bytes[8..10].copy_from_slice(&COMMIT_MARKER_VERSION.to_le_bytes());
-        bytes[10..12].copy_from_slice(&(COMMIT_MARKER_LEN as u16).to_le_bytes());
-        bytes[12..20].copy_from_slice(&generation_id.to_le_bytes());
-        bytes[20..22].copy_from_slice(&APPEND_LOG_FORMAT_VERSION.to_le_bytes());
-        bytes[22..24].copy_from_slice(&0_u16.to_le_bytes());
-        bytes[24..28].copy_from_slice(&0_u32.to_le_bytes());
-        let checksum = crc32fast::hash(&bytes[..28]);
-        bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
-        bytes
-    }
-
     #[test]
     fn canonical_names_are_strict() {
         assert_eq!(
@@ -354,21 +287,5 @@ mod tests {
         );
         assert!(parse_canonical_generation_name("generation-42.log").is_err());
         assert!(parse_canonical_commit_name("commit-00000000000000000000.marker").is_err());
-    }
-
-    #[test]
-    fn marker_codec_binds_generation_and_checksum() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory
-            .path()
-            .join("commit-00000000000000000042.marker");
-        fs::write(&path, encode_marker(42)).expect("write marker");
-        let decoded = read_commit_marker(&path, 42).expect("decode marker");
-        assert_eq!(decoded.log_format_version, APPEND_LOG_FORMAT_VERSION);
-
-        let mut corrupt = encode_marker(42);
-        corrupt[12] ^= 0x80;
-        fs::write(&path, corrupt).expect("corrupt marker");
-        assert!(read_commit_marker(&path, 42).is_err());
     }
 }
