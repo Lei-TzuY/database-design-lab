@@ -6,17 +6,15 @@ use db_storage_log::{InspectionReport, LogEngine};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(unix)]
 use crate::generation_directory::{canonical_generation_name, verify_generation_directory};
-use crate::generation_publication::{
-    GenerationPublicationError, GenerationPublicationSummary,
-};
+use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(unix)]
 use crate::generation_publication::publish_generation_marker;
-use crate::log_compaction::{LogCompactionError, LogCompactionReport};
+use crate::generation_publication::{GenerationPublicationError, GenerationPublicationSummary};
 #[cfg(unix)]
 use crate::log_compaction::compact_log_to_fresh_file;
+use crate::log_compaction::{LogCompactionError, LogCompactionReport};
 
 pub const OFFLINE_GENERATION_COMPACT_SWITCH_PROTOCOL: &str =
     "append_log_offline_generation_compact_switch_unix_v1";
