@@ -170,7 +170,8 @@ fn resolve_authority(directory: &Path, minimum_generation: u64) -> Result<Resolv
     // committed prefix. It may repair the one canonical post-prefix incomplete append.
     let inner = LogEngine::open(&authoritative_log)?;
 
-    let after_open = verify_generation_directory(&canonical_directory).map_err(map_directory_error)?;
+    let after_open =
+        verify_generation_directory(&canonical_directory).map_err(map_directory_error)?;
     let after_generation = after_open.summary().authoritative_generation;
     if after_generation < minimum_generation || after_generation != generation {
         return Err(corruption(format!(
