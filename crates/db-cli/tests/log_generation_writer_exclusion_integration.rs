@@ -12,9 +12,7 @@ use db_cli::generation_directory::{
     canonical_generation_name, canonical_marker_name, verify_generation_directory,
 };
 use db_cli::generation_engine::GenerationLogEngine;
-use db_cli::generation_lock::{
-    acquire_generation_writer_lease, GenerationWriterLockError,
-};
+use db_cli::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
 use db_cli::generation_marker::{encode_commit_marker, CommittedPrefix, Crc32Ieee};
 #[cfg(unix)]
 use db_cli::generation_publication::publish_generation_marker;
@@ -52,7 +50,9 @@ fn routed_mutation_cannot_cross_an_existing_writer_lease() {
         .put(b"after-release", b"value")
         .expect("mutation after lease release");
     assert_eq!(
-        routed.get(b"after-release").expect("read released mutation"),
+        routed
+            .get(b"after-release")
+            .expect("read released mutation"),
         Some(b"value".to_vec())
     );
 }
@@ -70,7 +70,8 @@ fn stale_writer_lock_fails_closed_without_being_stolen() {
     drop(lease);
     fs::write(&lock_path, b"stale-lock-evidence").expect("write stale lock");
 
-    let error = GenerationLogEngine::open(&directory).expect_err("stale lock must block routed open");
+    let error =
+        GenerationLogEngine::open(&directory).expect_err("stale lock must block routed open");
     assert!(matches!(
         error,
         DbError::Io(ref source) if source.kind() == io::ErrorKind::WouldBlock
@@ -98,7 +99,10 @@ fn standalone_publisher_cli_cannot_cross_an_existing_writer_lease() {
         .arg("1")
         .output()
         .expect("run publisher CLI");
-    assert!(!output.status.success(), "publisher unexpectedly crossed lease");
+    assert!(
+        !output.status.success(),
+        "publisher unexpectedly crossed lease"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("writer lock is already held or stale"),
