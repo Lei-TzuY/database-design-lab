@@ -1,12 +1,14 @@
 # Verified operational timing analysis
 
-`db-lab-batch-analyze` is the repository-defined descriptive analysis path for repeated Phase 4 operational timing evidence. It never treats an arbitrary JSON directory as trusted input: every invocation first calls the same fail-closed batch archive verifier used by `db-lab-batch-verify`.
+`db-lab-batch-analyze` is the repository-defined descriptive analysis path for repeated Phase 4 operational timing evidence. It never treats an arbitrary JSON directory as trusted input: every invocation analyzes a private snapshot that must pass the same fail-closed batch archive verifier used by `db-lab-batch-verify`.
 
 ## Trust boundary
 
 The analyzer accepts only archive formats that the shared verifier accepts. At present that means v6/v7 and contextual v10/v11. Frozen legacy v8/v9 comparison-failure sidecars are rejected because they do not carry a unique repeated-batch `pair_index` and therefore cannot be joined unambiguously to one failed ledger row.
 
-The analyzer verifies the archive before reading analysis inputs and verifies it again after the snapshot has been read. If the verification summary changes during that interval, analysis fails rather than reporting a result from a moving archive.
+The source archive must be a real directory rather than a symlink. Before parsing timing evidence, the analyzer copies every source entry through an opened regular-file handle into a private temporary snapshot, with the same bounded per-file size used for analysis JSON. The shared verifier validates that snapshot, and all descriptive analysis reads only from those verified snapshot bytes. The snapshot is verified again after parsing.
+
+Before returning a report, the analyzer enumerates the source and snapshot again and requires the file-name sets, file lengths, and every byte of every file to match. A timing-only change therefore fails even when it leaves repository revision, pair counts, and every field in `VerificationSummary` unchanged. The emitted report records `snapshot_protocol = "copy_verify_compare_v1"` so downstream evidence can identify this boundary explicitly.
 
 This is still repository-side structural/provenance validation. It does not prove that human-supplied host labels are truthful and does not establish CPU affinity, thermal state, turbo policy, background-load control, filesystem/controller/device cache state, or a stable performance host.
 
@@ -15,6 +17,7 @@ This is still repository-side structural/provenance validation. It does not prov
 The emitted report records:
 
 - `analysis_protocol = "verified_operational_timing_descriptive_v1"`;
+- `snapshot_protocol = "copy_verify_compare_v1"`;
 - `estimator = "empirical_nearest_rank_p50_p95_v1"`;
 - `interpretation_boundary = "descriptive_only; performance claims require externally controlled pinned-host review"`.
 
