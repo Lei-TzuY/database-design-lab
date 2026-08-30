@@ -54,7 +54,9 @@ fn compact_binary_publishes_only_complete_live_state_without_touching_source() {
     assert_eq!(reopened.get(b"a").expect("get a"), Some(b"two".to_vec()));
     assert_eq!(reopened.get(b"b").expect("get b"), None);
     assert_eq!(reopened.get(b"c").expect("get c"), Some(Vec::new()));
-    reopened.put(b"d", b"four").expect("append after compaction");
+    reopened
+        .put(b"d", b"four")
+        .expect("append after compaction");
     reopened.reopen().expect("reopen compacted output");
     assert_eq!(reopened.get(b"d").expect("get d"), Some(b"four".to_vec()));
 
@@ -94,12 +96,10 @@ fn compact_binary_rejects_recoverable_tail_without_repairing_source() {
         .set_len(length - 1)
         .expect("truncate final append");
     let source_before = fs::read(&source).expect("read truncated source");
-    assert!(
-        LogEngine::verify(&source)
-            .expect("verify recoverable tail")
-            .recoverable_tail
-            .is_some()
-    );
+    assert!(LogEngine::verify(&source)
+        .expect("verify recoverable tail")
+        .recoverable_tail
+        .is_some());
 
     let result = run_compact(&source, &output);
     assert_failure_contains(&result, "recoverable incomplete final append");
