@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,9 +11,10 @@ use thiserror::Error;
 
 const PREFLIGHT_PROTOCOL: &str = "linux_controlled_host_preflight_v1";
 const EXPECTED_GOVERNOR: &str = "performance";
-const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_ATTESTATION_BYTES: usize = 4096;
 const MAX_CPU_ID: u32 = 1_048_575;
+const MAX_SELECTED_CPUS: usize = 4096;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -103,6 +104,13 @@ struct OperatorAttestations {
     storage_cache_control: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SuccessSummary {
+    passed: bool,
+    protocol: &'static str,
+    output: String,
+}
+
 #[derive(Debug, Error)]
 enum PreflightError {
     #[error("invalid preflight configuration: {0}")]
@@ -126,12 +134,21 @@ fn main() -> ExitCode {
     let result = run(Cli::parse());
     match result {
         Ok(snapshot) => {
-            println!(
-                "{{\"passed\":true,\"protocol\":\"{}\",\"output\":\"{}\"}}",
-                PREFLIGHT_PROTOCOL,
-                snapshot.display()
-            );
-            ExitCode::SUCCESS
+            let summary = SuccessSummary {
+                passed: true,
+                protocol: PREFLIGHT_PROTOCOL,
+                output: snapshot.display().to_string(),
+            };
+            match serde_json::to_string(&summary) {
+                Ok(encoded) => {
+                    println!("{encoded}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: failed to encode success summary: {error}");
+                    ExitCode::from(1)
+                }
+            }
         }
         Err(error) => {
             eprintln!("error: {error}");
@@ -261,6 +278,7 @@ fn parse_cpu_list(value: &str) -> Result<BTreeSet<u32>, PreflightError> {
                         "CPU {cpu} is selected more than once"
                     )));
                 }
+                enforce_cpu_count(&cpus)?;
             }
         } else {
             let cpu = parse_cpu_id(component, component)?;
@@ -269,9 +287,19 @@ fn parse_cpu_list(value: &str) -> Result<BTreeSet<u32>, PreflightError> {
                     "CPU {cpu} is selected more than once"
                 )));
             }
+            enforce_cpu_count(&cpus)?;
         }
     }
     Ok(cpus)
+}
+
+fn enforce_cpu_count(cpus: &BTreeSet<u32>) -> Result<(), PreflightError> {
+    if cpus.len() > MAX_SELECTED_CPUS {
+        return Err(PreflightError::InvalidConfig(format!(
+            "CPU list selects more than the supported maximum of {MAX_SELECTED_CPUS} CPUs"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_cpu_id(value: &str, component: &str) -> Result<u32, PreflightError> {
@@ -348,11 +376,20 @@ fn evaluate_controls(config: &PreflightConfig, observation: &HostObservation) ->
 }
 
 fn ensure_fresh_output(path: &Path) -> Result<(), PreflightError> {
-    if path.exists() {
-        return Err(PreflightError::InvalidConfig(format!(
-            "preflight output already exists: {}",
-            path.display()
-        )));
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(PreflightError::InvalidConfig(format!(
+                "preflight output already exists: {}",
+                path.display()
+            )))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(PreflightError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
     }
     let parent = path
         .parent()
@@ -493,19 +530,30 @@ fn read_optional_text(path: &Path) -> Result<Option<String>, PreflightError> {
     if !metadata.file_type().is_file() {
         return Ok(None);
     }
-    if metadata.len() > MAX_TEXT_BYTES {
-        return Err(PreflightError::InvalidConfig(format!(
-            "observable host file {} has {} bytes; maximum is {MAX_TEXT_BYTES}",
-            path.display(),
-            metadata.len()
-        )));
-    }
-    fs::read_to_string(path)
-        .map(Some)
+
+    let file = File::open(path).map_err(|source| PreflightError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut encoded = Vec::new();
+    file.take(MAX_TEXT_BYTES as u64 + 1)
+        .read_to_end(&mut encoded)
         .map_err(|source| PreflightError::Io {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+    if encoded.len() > MAX_TEXT_BYTES {
+        return Err(PreflightError::InvalidConfig(format!(
+            "observable host file {} exceeds maximum {MAX_TEXT_BYTES} bytes",
+            path.display()
+        )));
+    }
+    String::from_utf8(encoded).map(Some).map_err(|error| {
+        PreflightError::InvalidConfig(format!(
+            "observable host file {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn parse_allowed_cpu_line(status: &str) -> Option<Vec<u32>> {
@@ -555,6 +603,7 @@ mod tests {
         assert!(parse_cpu_list("1,1").is_err());
         assert!(parse_cpu_list("1-2,2").is_err());
         assert!(parse_cpu_list("1,,2").is_err());
+        assert!(parse_cpu_list("0-4096").is_err());
     }
 
     #[test]
