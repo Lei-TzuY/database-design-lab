@@ -84,6 +84,39 @@ For a publication-admitted archive, add `--require-publication`. That flag rejec
 
 The output is JSON so a reviewed downstream publication script can archive or transform the versioned descriptive report without reparsing raw evidence ad hoc.
 
+## Immutable analysis bundles
+
+`db-lab-batch-analysis-bundle` turns the descriptive report into a create-new, self-contained artifact rather than leaving provenance to an untracked stdout redirect. The bundle protocol is `verified_operational_timing_analysis_bundle_v1` and format version 1.
+
+Create one from an existing verified archive:
+
+```text
+db-lab-batch-analysis-bundle create \
+  --archive-dir evidence/mixed-42-batch \
+  --bundle-dir evidence/mixed-42-analysis \
+  --expected-revision 0123456789abcdef0123456789abcdef01234567
+```
+
+The destination must not already exist and must not be the source archive or a path nested inside it. Creation first verifies the live source, copies every admitted archive file byte-for-byte into `evidence/`, verifies the copied archive, runs the normal analyzer against that copied evidence, re-verifies source and copy, and finally requires the two file sets, lengths, and byte streams to still match. Any failure removes the partial bundle.
+
+A successful bundle contains exactly:
+
+- `analysis.json` — the versioned descriptive report recomputed from the bundled evidence;
+- `evidence/` — the complete original repeated-batch archive, including its own `index.json` and any contextual failure sidecar;
+- `index.json` — bundle format/protocol, analyzer/snapshot protocol, source archive format, repository revision, publication-admission state, and the exact bundled evidence file set.
+
+Re-verify the artifact later with:
+
+```text
+db-lab-batch-analysis-bundle verify \
+  --bundle-dir evidence/mixed-42-analysis \
+  --expected-revision 0123456789abcdef0123456789abcdef01234567
+```
+
+Verification is semantic rather than a trust-on-first-use checksum shortcut: it enforces the exact top-level bundle shape, re-runs the shared raw archive verifier on `evidence/`, re-runs `db-lab-batch-analyze` logic against those bytes, and requires the recomputed JSON value to equal `analysis.json`. Publication-admitted state and source archive format must also agree with the bundle index. The bundled raw archive can independently be passed back to `db-lab-batch-verify` or `db-lab-batch-analyze`.
+
+The bundle does not provide cryptographic authorship or turn uncontrolled timing into a benchmark. Its purpose is to keep the reviewed descriptive result and the exact re-analyzable evidence together under one create-new artifact boundary.
+
 ## Publication boundary
 
-A repository-generated descriptive report is not itself a publishable performance result. The remaining Phase 4 work is to collect repeated admitted evidence on a named controlled pinned host, review the retained denominator and order-stratified distributions, freeze any additional exclusion/estimator procedure, and only then consider regression thresholds. GitHub-hosted CI remains correctness/build validation and must not be promoted into that baseline.
+A repository-generated descriptive report or verified analysis bundle is not itself a publishable performance result. The remaining Phase 4 work is to collect repeated admitted evidence on a named controlled pinned host, review the retained denominator and order-stratified distributions, freeze any additional exclusion/estimator procedure, and only then consider regression thresholds. GitHub-hosted CI remains correctness/build validation and must not be promoted into that baseline.
