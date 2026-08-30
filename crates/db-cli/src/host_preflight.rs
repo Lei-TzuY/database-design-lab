@@ -175,7 +175,9 @@ pub fn validate_host_preflight_snapshot(
         )));
     }
     if !snapshot.expected.turbo_disabled {
-        return Err(invalid("expected.turbo_disabled must be true for protocol v1"));
+        return Err(invalid(
+            "expected.turbo_disabled must be true for protocol v1",
+        ));
     }
     if !snapshot.expected.max_load_per_cpu.is_finite() || snapshot.expected.max_load_per_cpu < 0.0 {
         return Err(invalid(
@@ -540,24 +542,20 @@ mod tests {
         snapshot.observation.process_allowed_cpus = Some(vec![2, 3, 4]);
         snapshot.passed = false;
         snapshot.violations.clear();
-        assert!(
-            validate_host_preflight_snapshot(&snapshot, None, false)
-                .expect_err("tampered violation ledger must fail")
-                .to_string()
-                .contains("violations do not match")
-        );
+        assert!(validate_host_preflight_snapshot(&snapshot, None, false)
+            .expect_err("tampered violation ledger must fail")
+            .to_string()
+            .contains("violations do not match"));
     }
 
     #[test]
     fn turbo_raw_value_and_derived_state_must_agree() {
         let mut snapshot = passing_snapshot();
         snapshot.observation.turbo.raw_value = Some("0".to_owned());
-        assert!(
-            validate_host_preflight_snapshot(&snapshot, None, false)
-                .expect_err("inconsistent turbo state must fail")
-                .to_string()
-                .contains("turbo disabled")
-        );
+        assert!(validate_host_preflight_snapshot(&snapshot, None, false)
+            .expect_err("inconsistent turbo state must fail")
+            .to_string()
+            .contains("turbo disabled"));
     }
 
     #[test]
@@ -586,12 +584,10 @@ mod tests {
             serde_json::to_vec_pretty(&value).expect("encode tampered snapshot"),
         )
         .expect("write snapshot");
-        assert!(
-            verify_host_preflight_snapshot(&path, None, false)
-                .expect_err("unknown fields must fail")
-                .to_string()
-                .contains("unknown field")
-        );
+        assert!(verify_host_preflight_snapshot(&path, None, false)
+            .expect_err("unknown fields must fail")
+            .to_string()
+            .contains("unknown field"));
     }
 
     fn passing_snapshot() -> HostPreflightSnapshot {
