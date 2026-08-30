@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const PREFLIGHT_PROTOCOL: &str = "linux_controlled_host_preflight_v1";
 const EXPECTED_GOVERNOR: &str = "performance";
-const MAX_TEXT_BYTES: u64 = 64 * 1024;
+const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_ATTESTATION_BYTES: usize = 4096;
 const MAX_CPU_ID: u32 = 1_048_575;
 
@@ -107,6 +107,7 @@ struct OperatorAttestations {
 enum PreflightError {
     #[error("invalid preflight configuration: {0}")]
     InvalidConfig(String),
+    #[cfg(not(target_os = "linux"))]
     #[error("host preflight is supported only on Linux")]
     UnsupportedPlatform,
     #[error("I/O error at {path}: {source}")]
@@ -381,10 +382,12 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), PreflightEr
         })?;
     let mut writer = BufWriter::new(file);
     serde_json::to_writer_pretty(&mut writer, value)?;
-    writer.write_all(b"\n").map_err(|source| PreflightError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    writer
+        .write_all(b"\n")
+        .map_err(|source| PreflightError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     writer.flush().map_err(|source| PreflightError::Io {
         path: path.to_path_buf(),
         source,
@@ -400,7 +403,9 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), PreflightEr
 }
 
 #[cfg(target_os = "linux")]
-fn collect_host_observation(expected_cpus: &BTreeSet<u32>) -> Result<HostObservation, PreflightError> {
+fn collect_host_observation(
+    expected_cpus: &BTreeSet<u32>,
+) -> Result<HostObservation, PreflightError> {
     let process_allowed_cpus = read_optional_text(Path::new("/proc/self/status"))?
         .as_deref()
         .and_then(parse_allowed_cpu_line);
@@ -413,7 +418,10 @@ fn collect_host_observation(expected_cpus: &BTreeSet<u32>) -> Result<HostObserva
         let path = PathBuf::from(format!(
             "/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"
         ));
-        governors.insert(*cpu, read_optional_text(&path)?.map(|value| value.trim().to_owned()));
+        governors.insert(
+            *cpu,
+            read_optional_text(&path)?.map(|value| value.trim().to_owned()),
+        );
     }
 
     let turbo = observe_turbo()?;
@@ -573,7 +581,9 @@ mod tests {
         let mut observation = valid_observation();
         observation.process_allowed_cpus = Some(vec![2, 3, 4]);
         observation.online_cpus = Some(vec![0, 1, 2]);
-        observation.governors.insert(2, Some("powersave".to_owned()));
+        observation
+            .governors
+            .insert(2, Some("powersave".to_owned()));
         observation.governors.insert(3, None);
         observation.turbo.disabled = Some(false);
         observation.load_one = Some(1.0);
@@ -583,7 +593,9 @@ mod tests {
         assert!(violations.iter().any(|value| value.contains("offline")));
         assert!(violations.iter().any(|value| value.contains("governor")));
         assert!(violations.iter().any(|value| value.contains("turbo/boost")));
-        assert!(violations.iter().any(|value| value.contains("load per pinned CPU")));
+        assert!(violations
+            .iter()
+            .any(|value| value.contains("load per pinned CPU")));
     }
 
     #[test]
