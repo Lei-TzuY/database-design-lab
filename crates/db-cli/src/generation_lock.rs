@@ -148,9 +148,7 @@ pub fn acquire_generation_writer_lease(
     })
 }
 
-pub fn generation_writer_lock_path(
-    directory: &Path,
-) -> Result<PathBuf, GenerationWriterLockError> {
+pub fn generation_writer_lock_path(directory: &Path) -> Result<PathBuf, GenerationWriterLockError> {
     let directory = canonical_real_directory(directory)?;
     writer_lock_path(&directory)
 }
@@ -229,8 +227,10 @@ pub fn clear_stale_generation_writer_lock(
     }
 
     fs::remove_file(&lock_path).map_err(|source| io_error(&lock_path, source))?;
-    if fs::symlink_metadata(&lock_path).is_ok() {
-        return invalid("generation writer lock still exists after stale-clear removal");
+    match fs::symlink_metadata(&lock_path) {
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => return invalid("generation writer lock still exists after stale-clear removal"),
+        Err(source) => return Err(io_error(&lock_path, source)),
     }
 
     Ok(GenerationWriterLockClearSummary {
@@ -272,9 +272,7 @@ fn parse_owner_record(record: &[u8]) -> (Option<String>, Option<u32>, Option<Str
     (protocol, pid, acquisition)
 }
 
-fn read_lock_record_if_present(
-    path: &Path,
-) -> Result<Option<Vec<u8>>, GenerationWriterLockError> {
+fn read_lock_record_if_present(path: &Path) -> Result<Option<Vec<u8>>, GenerationWriterLockError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
