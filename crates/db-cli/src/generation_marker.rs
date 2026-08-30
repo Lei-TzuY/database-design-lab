@@ -35,7 +35,9 @@ pub enum CommitMarkerError {
     Flags(u32),
 }
 
-pub fn encode_commit_marker(generation_id: u64) -> Result<[u8; COMMIT_MARKER_LEN], CommitMarkerError> {
+pub fn encode_commit_marker(
+    generation_id: u64,
+) -> Result<[u8; COMMIT_MARKER_LEN], CommitMarkerError> {
     if generation_id == 0 {
         return Err(CommitMarkerError::ZeroGeneration);
     }
