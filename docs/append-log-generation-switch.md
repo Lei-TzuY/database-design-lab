@@ -1,12 +1,12 @@
 # Append-log generation-switch recovery law
 
-This document freezes the recovery law that a future authoritative append-log compaction switch must implement. It is intentionally one step earlier than a filesystem protocol: it defines which generation recovery is allowed to select after every interruption point, without yet assigning marker filenames, marker bytes, or directory-fsync mechanics.
+This document freezes the recovery law that an authoritative append-log compaction switch must implement. The executable oracle defines which generation recovery is allowed to select after every interruption point. Concrete read-side filenames, marker bytes, and committed-prefix verification are now defined by `docs/append-log-generation-directory.md`; writer-side durable publication is still intentionally separate.
 
 The executable oracle lives in `crates/db-storage-log/tests/generation_switch_model.rs`.
 
 ## Scope and terminology
 
-A **generation** is a candidate append-log v1 file plus durable commit metadata that can make that generation authoritative. Generation ids are monotonically increasing logical identifiers in the future protocol. The current one-file append-log remains unchanged by this PR.
+A **generation** is a candidate append-log v1 file plus durable commit metadata that can make that generation authoritative. Generation ids are monotonically increasing logical identifiers. The current legacy one-file append-log API remains unchanged.
 
 The model classifies a generation log as one of:
 
@@ -15,7 +15,7 @@ The model classifies a generation log as one of:
 - `missing`;
 - `corrupt`: anything else that the v1 verifier rejects.
 
-A generation is **committed** only after the future protocol's commit marker is durably published. A higher generation file with no durable marker is an orphan candidate, not authoritative state.
+A generation is **committed** only after the future writer protocol's commit marker is durably published. A higher generation file with no durable marker is an orphan candidate, not authoritative state.
 
 ## Authoritative selection rule
 
@@ -51,15 +51,16 @@ Any future generation switch must preserve this order:
 2. construct the next generation without making it authoritative;
 3. make the complete next-generation log durable;
 4. verify the durable next-generation image;
-5. durably publish a commit marker that binds the generation id and verified complete base prefix;
-6. only after marker durability may old-generation cleanup become eligible.
+5. capture the exact verified base-prefix byte length, CRC-32, record count, and next sequence;
+6. durably publish the v2 commit marker binding that generation id and verified complete base prefix;
+7. only after marker durability may old-generation cleanup become eligible.
 
 The executable model covers every valid prefix of that sequence and requires recovery to choose exactly the old or new generation.
 
-Two writer orders are explicitly invalid:
+Invalid writer orders include:
 
 - publishing the new marker before the new generation is durable;
-- publishing a marker that does not prove the complete compacted base prefix;
+- publishing a marker whose committed-prefix proof does not describe a complete verified compact image;
 - deleting or corrupting the old committed generation before the new marker is durable.
 
 The model treats the resulting states as fail-closed conditions rather than inventing recovery heuristics.
@@ -80,17 +81,33 @@ A committed new generation with a canonical recoverable final append selects the
 
 A committed new generation that is missing or corrupt fails closed. It never reselects the old generation.
 
-## What this PR does not implement
+## Concrete read-side status
 
-This recovery law is an executable design oracle, not production generation switching. It does not yet define or implement:
+`append_log_generation_directory_v2` now gives the abstract proof obligation retained bytes:
 
-- generation/marker filenames;
-- the marker byte format, versioning, checksums, bounds, or exact committed-prefix binding;
-- the exact file and directory `sync_all` sequence;
-- cross-platform create-new and rename/link mechanics for marker publication;
-- orphan discovery and cleanup;
-- migration from the current one-file layout;
+- canonical generation and marker filenames;
+- a fixed marker v2 byte format and marker CRC;
+- generation-id and append-log-format binding;
+- exact committed-prefix byte length and CRC binding;
+- committed-prefix record-count and next-sequence binding;
+- independent source-read-only structural re-verification of that exact prefix;
+- fail-closed verification when the current valid prefix or recoverable-tail boundary intrudes into the marker-bound base;
+- no-rollback selection of only the highest committed generation.
+
+That reader is still evidence interpretation, not evidence publication. A marker file existing in a hosted-CI fixture does not establish that a real filesystem made the marker directory entry durable.
+
+## What remains before production generation switching
+
+The unresolved work is writer-side and lifecycle-side:
+
+- the exact generation-file and marker-file synchronization sequence;
+- parent-directory durability on Linux, macOS, and Windows;
+- cross-platform create-new/rename/link mechanics for marker publication;
+- adversarial crash injection before and after every durability boundary;
+- create-new generation allocation above every observed canonical id;
+- orphan discovery and safe cleanup;
 - mutation routing after the authoritative generation changes;
+- migration from the current one-file layout;
 - an engine API that opens a generation directory instead of one v1 file.
 
-Those mechanics must be implemented in a later PR and adversarially tested against this frozen recovery law. The general Phase 1 compaction milestone remains incomplete until an authoritative switch exists on the default branch.
+Those mechanics must be implemented and tested against this frozen recovery law and the v2 reader. The general Phase 1 compaction milestone remains incomplete until an authoritative switch exists on the default branch.
