@@ -11,9 +11,7 @@ use crate::generation_directory::{
     require_real_regular_file, scan_generation_namespace, verify_generation_directory,
     GenerationDirectoryError,
 };
-use crate::generation_lock::{
-    acquire_generation_writer_lease, GenerationWriterLockError,
-};
+use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
 
 pub const GENERATION_CLEANUP_PROTOCOL: &str = "append_log_generation_cleanup_v1";
 
@@ -94,10 +92,11 @@ pub fn cleanup_obsolete_generations(
 
     #[cfg(unix)]
     let directory_sync_confirmed = {
-        let directory_file = File::open(lease.directory()).map_err(|source| GenerationCleanupError::Io {
-            path: lease.directory().to_path_buf(),
-            source,
-        })?;
+        let directory_file =
+            File::open(lease.directory()).map_err(|source| GenerationCleanupError::Io {
+                path: lease.directory().to_path_buf(),
+                source,
+            })?;
         if let Err(source) = directory_file.sync_all() {
             return Err(GenerationCleanupError::DurabilityUncertain { source });
         }
@@ -122,10 +121,8 @@ pub fn cleanup_obsolete_generations(
         });
     }
 
+    let highest_observed_generation_after = after.summary().highest_observed_generation;
     let after_namespace = scan_generation_namespace(lease.directory())?;
-    let highest_observed_generation_after = after_namespace
-        .highest_observed_generation()
-        .expect("verified authority guarantees at least one canonical generation id");
     let retained_future_generation_ids = after_namespace
         .generation_files
         .keys()
