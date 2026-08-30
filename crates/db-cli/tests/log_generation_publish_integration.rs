@@ -1,5 +1,7 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use tempfile::tempdir;
@@ -144,14 +146,17 @@ fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
     }
 }
 
+#[cfg(unix)]
 fn generation_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("generation-{id:020}.log"))
 }
 
+#[cfg(unix)]
 fn marker_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("commit-{id:020}.marker"))
 }
 
+#[cfg(unix)]
 fn staging_marker_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("staging-commit-{id:020}.marker"))
 }
@@ -175,6 +180,7 @@ fn run_verify(directory: &Path) -> Output {
         .expect("run generation verifier")
 }
 
+#[cfg(unix)]
 fn assert_success(label: &str, output: &Output) {
     assert!(
         output.status.success(),
