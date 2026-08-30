@@ -2,9 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use db_cli::generation_lock::{
-    clear_stale_generation_writer_lock, inspect_generation_writer_lock,
-};
+use db_cli::generation_lock::{clear_stale_generation_writer_lock, inspect_generation_writer_lock};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -39,8 +37,9 @@ enum Command {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Command::Inspect { directory } => inspect_generation_writer_lock(&directory)
-            .and_then(|summary| encode_json(&summary)),
+        Command::Inspect { directory } => {
+            inspect_generation_writer_lock(&directory).and_then(|summary| encode_json(&summary))
+        }
         Command::ClearStale {
             directory,
             expected_record_hex,
@@ -65,7 +64,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, db_cli::generation_lock::GenerationWriterLockError> {
+fn encode_json<T: serde::Serialize>(
+    value: &T,
+) -> Result<String, db_cli::generation_lock::GenerationWriterLockError> {
     serde_json::to_string_pretty(value).map_err(|error| {
         db_cli::generation_lock::GenerationWriterLockError::Invalid(format!(
             "failed to encode generation writer lock summary: {error}"
