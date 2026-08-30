@@ -23,9 +23,9 @@ After acquiring the lease, ordinary operations inspect the highest **final marke
 
 A poisoned routing handle rejects ordinary operations with `DbError::Poisoned`. Explicit `reopen()` is the recovery boundary: it re-runs the full generation-directory verifier, refuses any authority lower than the generation already observed by the handle, and clears poison only after a valid same-or-higher authority is opened.
 
-The lease is a create-new sibling file of the canonical generation directory, for example `data/generations` uses `data/.generations.append-log-writer.lock`. It deliberately lives **outside** the retained generation namespace, so retained evidence contains only generation logs and marker artifacts. The lock record contains a protocol tag and process id for operator diagnosis, but the implementation never trusts PID or age to steal a lock.
+The lease is a create-new sibling file of the canonical generation directory, for example `data/generations` uses `data/.generations.append-log-writer.lock`. It deliberately lives **outside** the retained generation namespace, so retained evidence contains only generation logs and marker artifacts. New lock records contain a protocol tag, process id, and acquisition id for operator diagnosis, but the implementation never trusts any of those fields to infer liveness or steal a lock.
 
-A crashed process may leave a stale lock. That is a liveness failure, not a reason to risk two writers: subsequent coordinated operations fail closed until an operator independently proves no writer is alive and removes the stale sibling lock. Normal drop performs best-effort lock removal.
+A crashed process may leave a stale lock. That is a liveness failure, not a reason to risk two writers: subsequent coordinated operations fail closed until an operator independently proves no writer is alive. `db-lab-log-generation-lock inspect` exposes the exact bounded lock evidence; `clear-stale` requires both the exact observed record bytes and an explicit `--confirm-no-live-writer` attestation before removal. See `docs/append-log-generation-lock-recovery.md`. Normal lease drop removes the sibling path only while its bytes still match that lease's own owner record.
 
 ## Compact-switch interaction
 
@@ -45,9 +45,9 @@ This closes the previous cooperative scan-to-append / final-check-to-publication
 
 This is **cooperative** cross-process exclusion, not protection against arbitrary raw-file mutation. A process that directly opens `generation-%020d.log` with `LogEngine` bypasses the generation-directory lease and remains outside the contract. Such raw-path writers must still be quiesced during a compact switch.
 
-The standalone `db-lab-log-generation-publish` CLI now acquires the same lease before invoking the lower-level marker publication primitive. The lower-level shared publisher remains a caller-serialized primitive so the compact switch can call it while already holding the lease without self-deadlock.
+The standalone `db-lab-log-generation-publish` CLI acquires the same lease before invoking the lower-level marker publication primitive. The lower-level shared publisher remains a caller-serialized primitive so the compact switch can call it while already holding the lease without self-deadlock.
 
-The project still does not claim Windows final-marker durability, automatic stale-lock recovery, old-generation/orphan cleanup, or adversarial protection from a process that intentionally ignores the coordination protocol.
+The project still does not claim Windows final-marker durability, automatic process-liveness inference, old-generation/orphan cleanup, or adversarial protection from a process that intentionally ignores the coordination protocol.
 
 ## Tests
 
@@ -58,5 +58,7 @@ Cross-platform integration proves routed CRUD/reopen behavior, no rollback after
 - the lease file does not enter the retained generation namespace;
 - on Unix, a compact switch cannot publish while another lease is held;
 - the failed switch leaves only an uncommitted generation orphan, and retry allocates above that orphan rather than reusing its id.
+
+Stale-lock admin coverage additionally proves read-only inspection, missing-confirmation rejection, changed-record rejection, exact-record removal, post-clear reacquisition, and owner-record-aware lease-drop cleanup.
 
 Unix integration continues to prove that a long-lived routed handle can survive a completed offline compact switch and send its first later mutation only to the newly authoritative generation.
