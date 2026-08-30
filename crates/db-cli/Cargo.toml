@@ -24,6 +24,10 @@ name = "db-lab-batch-analyze"
 path = "src/bin/db-lab-batch-analyze.rs"
 
 [[bin]]
+name = "db-lab-batch-analysis-bundle"
+path = "src/bin/db-lab-batch-analysis-bundle.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 
