@@ -178,6 +178,13 @@ fn main() -> ExitCode {
 }
 
 fn analyze(args: &Cli) -> Result<AnalysisReport, AnalyzeError> {
+    require_regular_directory(&args.archive_dir, "source archive")?;
+    let source_verification = verify_batch_archive(
+        &args.archive_dir,
+        args.expected_revision.as_deref(),
+        args.require_publication,
+    )?;
+
     let snapshot = snapshot_archive(&args.archive_dir)?;
     let snapshot_dir = snapshot.path();
     let verification = verify_batch_archive(
@@ -185,6 +192,12 @@ fn analyze(args: &Cli) -> Result<AnalysisReport, AnalyzeError> {
         args.expected_revision.as_deref(),
         args.require_publication,
     )?;
+    if verification != source_verification {
+        return Err(AnalyzeError::Invalid(
+            "source archive changed while the verified analysis snapshot was being created"
+                .to_owned(),
+        ));
+    }
 
     let batch = read_json(snapshot_dir, "batch.json")?;
     let sidecars = if matches!(verification.format_version, 10 | 11) {
@@ -216,6 +229,16 @@ fn analyze(args: &Cli) -> Result<AnalysisReport, AnalyzeError> {
     if verification_after != verification {
         return Err(AnalyzeError::Invalid(
             "verified analysis snapshot changed while it was being read".to_owned(),
+        ));
+    }
+    let source_verification_after = verify_batch_archive(
+        &args.archive_dir,
+        args.expected_revision.as_deref(),
+        args.require_publication,
+    )?;
+    if source_verification_after != source_verification {
+        return Err(AnalyzeError::Invalid(
+            "source archive verification summary changed during analysis".to_owned(),
         ));
     }
     verify_source_matches_snapshot(&args.archive_dir, snapshot_dir)?;
