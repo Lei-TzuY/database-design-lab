@@ -8,12 +8,6 @@ enum LogHealth {
     Corrupt,
 }
 
-impl LogHealth {
-    const fn is_openable(self) -> bool {
-        matches!(self, Self::Clean | Self::RecoverableTail)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GenerationState {
     id: u64,
