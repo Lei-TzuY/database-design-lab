@@ -47,6 +47,8 @@ pub enum CommitMarkerError {
     Reserved(u16),
     #[error("marker committed prefix has {found} bytes, need at least {minimum}")]
     PrefixTooShort { found: u64, minimum: u64 },
+    #[error("marker committed prefix record count {record_count} cannot advance to a next sequence")]
+    PrefixSequenceOverflow { record_count: u64 },
     #[error(
         "marker committed prefix record_count={record_count} requires next_sequence={expected}, found {next_sequence}"
     )]
@@ -216,14 +218,11 @@ fn validate_committed_prefix(prefix: CommittedPrefix) -> Result<(), CommitMarker
             minimum: MIN_COMMITTED_PREFIX_BYTES,
         });
     }
-    let expected = prefix
-        .record_count
-        .checked_add(1)
-        .ok_or(CommitMarkerError::PrefixSequence {
+    let expected = prefix.record_count.checked_add(1).ok_or(
+        CommitMarkerError::PrefixSequenceOverflow {
             record_count: prefix.record_count,
-            next_sequence: prefix.next_sequence,
-            expected: u64::MAX,
-        })?;
+        },
+    )?;
     if prefix.next_sequence != expected {
         return Err(CommitMarkerError::PrefixSequence {
             record_count: prefix.record_count,
@@ -321,6 +320,17 @@ mod tests {
         assert!(matches!(
             encode_commit_marker(7, invalid),
             Err(CommitMarkerError::PrefixSequence { .. })
+        ));
+    }
+
+    #[test]
+    fn exhausted_record_count_is_rejected() {
+        let mut invalid = proof();
+        invalid.record_count = u64::MAX;
+        invalid.next_sequence = u64::MAX;
+        assert!(matches!(
+            encode_commit_marker(7, invalid),
+            Err(CommitMarkerError::PrefixSequenceOverflow { .. })
         ));
     }
 
