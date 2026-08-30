@@ -1,12 +1,12 @@
 # Append-log generation-switch recovery law
 
-This document freezes the recovery law that an authoritative append-log compaction switch must implement. The executable oracle defines which generation recovery is allowed to select after every interruption point. Concrete read-side filenames, marker bytes, and committed-prefix verification are now defined by `docs/append-log-generation-directory.md`; writer-side durable publication is still intentionally separate.
+This document freezes the recovery law for authoritative append-log compaction switching. The executable oracle defines which generation recovery may select after every interruption point. Concrete retained bytes are defined by `docs/append-log-generation-directory.md`; Unix marker publication is defined by `docs/append-log-generation-publication.md`; the composed offline switch is defined by `docs/append-log-offline-compact-switch.md`; generation-aware mutation routing is defined by `docs/append-log-generation-routing.md`.
 
 The executable oracle lives in `crates/db-storage-log/tests/generation_switch_model.rs`.
 
 ## Scope and terminology
 
-A **generation** is a candidate append-log v1 file plus durable commit metadata that can make that generation authoritative. Generation ids are monotonically increasing logical identifiers. The current legacy one-file append-log API remains unchanged.
+A **generation** is a candidate append-log v1 file plus commit metadata that can make that generation authoritative. Generation ids are monotonically increasing logical identifiers. The legacy one-file append-log API remains available, while the generation-aware wrapper owns directory-level authority selection.
 
 The model classifies a generation log as one of:
 
@@ -15,11 +15,11 @@ The model classifies a generation log as one of:
 - `missing`;
 - `corrupt`: anything else that the v1 verifier rejects.
 
-A generation is **committed** only after the future writer protocol's commit marker is durably published. A higher generation file with no durable marker is an orphan candidate, not authoritative state.
+A generation is **committed** only when its final commit marker is authoritative under the publication/recovery contract. A higher generation file without a final marker is an orphan candidate, not authoritative state.
 
 ## Authoritative selection rule
 
-Recovery MUST select the highest generation id that has a durable commit marker. Directory enumeration order is irrelevant.
+Recovery MUST select the highest generation id that has a final commit marker. Directory enumeration order is irrelevant.
 
 For that selected generation:
 
@@ -29,23 +29,15 @@ For that selected generation:
 - `missing` -> fail closed;
 - `corrupt` -> fail closed.
 
-Recovery MUST NOT fall back to a lower committed generation when the highest committed generation is missing or corrupt.
-
-That no-fallback rule is deliberate. Once a generation has been committed it may have accepted later synchronized mutations. Falling back to an older generation after discovering damage in the highest committed generation could silently acknowledge less state than was previously durable.
+Recovery MUST NOT fall back to a lower committed generation when the highest committed generation is missing or corrupt. Once a generation has been committed it may have accepted later synchronized mutations; fallback could silently acknowledge less state than was previously durable.
 
 ## Uncommitted generations
 
-Higher generation ids without durable commit markers never override the last committed generation, regardless of whether their files are:
-
-- absent;
-- partially written or corrupt;
-- fully constructed and valid.
-
-Those files are crash orphans until a future cleanup protocol proves they are safe to remove. Recovery selection does not infer commitment from a valid-looking generation file.
+Higher generation ids without final commit markers never override the last committed generation, regardless of whether their files are absent, partially written/corrupt, or fully valid. They remain crash orphans until a cleanup protocol proves they are safe to remove. Recovery never infers commitment from a valid-looking generation file.
 
 ## Required writer order
 
-Any future generation switch must preserve this order:
+Every generation switch must preserve this order:
 
 1. retain the old committed generation;
 2. construct the next generation without making it authoritative;
@@ -55,15 +47,9 @@ Any future generation switch must preserve this order:
 6. durably publish the v2 commit marker binding that generation id and verified complete base prefix;
 7. only after marker durability may old-generation cleanup become eligible.
 
-The executable model covers every valid prefix of that sequence and requires recovery to choose exactly the old or new generation.
+The Unix offline implementation additionally re-verifies the old authority/live state immediately before publication and re-verifies the new authority/exact compact image after publication.
 
-Invalid writer orders include:
-
-- publishing the new marker before the new generation is durable;
-- publishing a marker whose committed-prefix proof does not describe a complete verified compact image;
-- deleting or corrupting the old committed generation before the new marker is durable.
-
-The model treats the resulting states as fail-closed conditions rather than inventing recovery heuristics.
+Invalid writer orders include publishing the marker before the new generation is durable, publishing a marker whose prefix proof does not describe a complete verified compact image, or deleting/corrupting the old committed generation before the new marker is durable. These states fail closed rather than invoking recovery heuristics.
 
 ## Crash-state table
 
@@ -77,37 +63,28 @@ The model treats the resulting states as fail-closed conditions rather than inve
 | during old cleanup | missing/damaged old | committed + clean new | new |
 | after old cleanup | absent old | committed + clean new | new |
 
-A committed new generation with a canonical recoverable final append selects the new generation and delegates only that tail repair to the existing append-log v1 recovery rule **only** when the marker proves that the verified complete compacted base prefix is intact and the incomplete bytes follow it. Without that proof, recovery fails closed: the same apparent tail could be an incomplete compact image published too early.
+A committed new generation with a canonical recoverable final append selects the new generation and delegates only that tail repair to append-log v1 when the marker proves the complete compacted base prefix is intact and the incomplete bytes follow it. Without that proof, recovery fails closed. A committed new generation that is missing or corrupt never causes re-selection of the old generation.
 
-A committed new generation that is missing or corrupt fails closed. It never reselects the old generation.
+## Implemented repository contracts
 
-## Concrete read-side status
+`append_log_generation_directory_v2` provides strict canonical namespace parsing, marker-v2 decoding, generation/format binding, committed-prefix byte/CRC/record/sequence proof, source-read-only prefix verification, and highest-marker/no-rollback selection.
 
-`append_log_generation_directory_v2` now gives the abstract proof obligation retained bytes:
+`append_log_generation_marker_publication_unix_v1` provides Unix generation-file and parent-directory synchronization, same-directory synced staging markers, no-overwrite final-marker publication, final directory synchronization, post-publication proof verification, and a distinct durability-uncertain error when final-marker visibility may precede confirmed parent-directory durability. Non-Unix platforms fail before publication I/O.
 
-- canonical generation and marker filenames;
-- a fixed marker v2 byte format and marker CRC;
-- generation-id and append-log-format binding;
-- exact committed-prefix byte length and CRC binding;
-- committed-prefix record-count and next-sequence binding;
-- independent source-read-only structural re-verification of that exact prefix;
-- fail-closed verification when the current valid prefix or recoverable-tail boundary intrudes into the marker-bound base;
-- no-rollback selection of only the highest committed generation.
+`append_log_offline_generation_compact_switch_unix_v1` now composes source selection, allocation above every observed canonical id, exact live-state compact-copy construction, stale-source detection, durable publication, and final authority/image verification. A deterministic late-write test proves pre-publication source drift leaves only an uncommitted orphan and preserves old authority.
 
-That reader is still evidence interpretation, not evidence publication. A marker file existing in a hosted-CI fixture does not establish that a real filesystem made the marker directory entry durable.
+`GenerationLogEngine` adds generation-aware normal mutation routing. A serialized handle adopts a newly published higher final marker before its next operation and refuses marker regression or malformed higher authority rather than continuing on a stale old generation.
 
-## What remains before production generation switching
+Hosted-CI fixtures validate format/recovery semantics. They do not by themselves prove real power-loss durability of arbitrary filesystems or hardware.
 
-The unresolved work is writer-side and lifecycle-side:
+## What remains before broad Phase 1 compaction completion
 
-- the exact generation-file and marker-file synchronization sequence;
-- parent-directory durability on Linux, macOS, and Windows;
-- cross-platform create-new/rename/link mechanics for marker publication;
-- adversarial crash injection before and after every durability boundary;
-- create-new generation allocation above every observed canonical id;
-- orphan discovery and safe cleanup;
-- mutation routing after the authoritative generation changes;
-- migration from the current one-file layout;
-- an engine API that opens a generation directory instead of one v1 file.
+The remaining lifecycle work is narrower but still material:
 
-Those mechanics must be implemented and tested against this frozen recovery law and the v2 reader. The general Phase 1 compaction milestone remains incomplete until an authoritative switch exists on the default branch.
+- one ownership/exclusion mechanism that closes the namespace-check-to-append and final-check-to-publication races instead of relying on caller quiescence;
+- Windows-equivalent durable final-marker publication;
+- cross-operation deterministic fault injection at the composed switch boundaries beyond existing component-level durability tests;
+- safe cleanup of obsolete committed generations and uncommitted crash orphans;
+- migration/coexistence rules for legacy one-file users and a decision about where the generation-directory contract ultimately lives in the crate layering.
+
+Until writer exclusion and lifecycle integration exist, the broad roadmap `Compaction` item remains intentionally open even though a real Unix offline authoritative switch and generation-aware routing layer now exist.
