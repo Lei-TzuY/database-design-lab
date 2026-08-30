@@ -52,6 +52,10 @@ name = "db-lab-log-generation-publish"
 path = "src/bin/db-lab-log-generation-publish.rs"
 
 [[bin]]
+name = "db-lab-log-generation-compact-switch"
+path = "src/bin/db-lab-log-generation-compact-switch.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 
