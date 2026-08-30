@@ -122,9 +122,11 @@ fn verify_generation_directory(
         ));
     }
 
-    let committed_prefix_verification =
-        verify_committed_prefix(log_path, marker.committed_prefix).map_err(|error| {
-            VerifyError::Invalid(format!("highest commit marker prefix proof failed: {error}"))
+    let committed_prefix_verification = verify_committed_prefix(log_path, marker.committed_prefix)
+        .map_err(|error| {
+            VerifyError::Invalid(format!(
+                "highest commit marker prefix proof failed: {error}"
+            ))
         })?;
 
     if log_verification.valid_bytes < marker.committed_prefix.bytes {
