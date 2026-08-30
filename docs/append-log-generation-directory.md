@@ -132,16 +132,15 @@ Canonical staging markers exist specifically so interruption before final public
 
 Non-Unix targets currently fail before writing any marker. In particular, Windows support remains intentionally disabled until an equivalent parent-directory entry durability mechanism is implemented and tested. See `docs/append-log-generation-publication.md` for the full ordering and crash-state contract.
 
-## What remains before the compaction switch is complete
+## Compaction lifecycle status
 
-The Unix marker publisher closes one writer-side gap but does not complete authoritative compaction. Remaining work includes:
+The Unix offline compact switch now allocates above every observed canonical id, constructs the next generation from the exact authoritative live state, coordinates its authority-changing section with generation-aware routed writers, publishes the marker, and re-verifies the new authority. A deterministic composed fault matrix requires exact old-or-new logical recovery across candidate, staging-marker, and final-marker durability boundaries.
 
-- create-new generation allocation above every observed canonical id;
-- construction of the next compact generation from the current authoritative live state as one controlled operation;
-- routing subsequent mutations through a generation-directory engine after commit;
+The broader lifecycle still lacks:
+
 - Windows-equivalent durable marker publication;
-- exact crash injection or power-loss validation across generation construction and switching;
 - safe old-generation and orphan cleanup only after the new marker is durably committed;
-- migration or coexistence rules for the current legacy single-file `LogEngine` path.
+- migration or coexistence rules for the current legacy single-file `LogEngine` path;
+- stronger ownership if non-cooperating raw-path writers must be prevented rather than administratively quiesced.
 
-Until those pieces exist and are tested against the v2 reader and executable recovery model, the Phase 1 general compaction milestone remains open.
+The injected-error fixtures and modeled loss of one unsynchronized directory entry are not physical power-loss emulation. Until the remaining pieces exist and are tested against the v2 reader and executable recovery model, the Phase 1 general compaction milestone remains open.

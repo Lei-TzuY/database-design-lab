@@ -56,4 +56,4 @@ After a successful stale clear, the next coordinated operation still performs th
 
 ## Remaining boundary
 
-This closes the repository's stale-lock **operator tooling** gap. It does not provide automatic crash-owner detection, lease timeouts, forced process termination, Windows final-marker durability, obsolete/orphan generation cleanup, composed compact-switch fault injection, or legacy single-file migration/coexistence.
+This closes the repository's stale-lock **operator tooling** gap. It does not provide automatic crash-owner detection, lease timeouts, forced process termination, Windows final-marker durability, obsolete/orphan generation cleanup, or legacy single-file migration/coexistence. Composed compact-switch fault injection is documented separately and deliberately uses graceful injected errors; actual process death may retain the lock evidence governed here.

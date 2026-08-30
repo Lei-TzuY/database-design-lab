@@ -63,12 +63,9 @@ A future Windows implementation must establish and test an explicit directory-en
 
 ## What this still does not complete
 
-This primitive publishes commit authority for an already-created clean generation; it does not yet provide the complete compaction switch. Still missing are:
+This primitive publishes commit authority for an already-created clean generation. The separate offline compact-switch operation now composes allocation, exact live-state construction, routed-writer exclusion, publication, and deterministic interruption checks across these publication boundaries. The broader lifecycle still lacks:
 
-- allocation and construction of the next generation from the current authoritative live state as one operation;
-- mutation routing through a generation-directory engine after commit;
 - Windows-equivalent durable marker publication;
-- crash-injection/power-loss validation across the entire generation build and switch sequence;
 - safe cleanup of old committed generations and uncommitted crash orphans;
 - migration/coexistence rules for legacy single-file `LogEngine` users.
 

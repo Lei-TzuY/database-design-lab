@@ -61,7 +61,12 @@ pub fn publish_generation_marker(
 ) -> Result<GenerationPublicationSummary, GenerationPublicationError> {
     #[cfg(unix)]
     {
-        unix::publish_generation_marker(directory, generation)
+        unix::publish_generation_marker(
+            directory,
+            generation,
+            #[cfg(test)]
+            None,
+        )
     }
 
     #[cfg(not(unix))]
@@ -70,6 +75,9 @@ pub fn publish_generation_marker(
         Err(GenerationPublicationError::UnsupportedPlatform)
     }
 }
+
+#[cfg(all(test, unix))]
+pub(crate) use unix::{publish_generation_marker_with_fault, GenerationPublicationFaultPoint};
 
 #[cfg(unix)]
 mod unix {
@@ -92,9 +100,42 @@ mod unix {
 
     const CRC_BUFFER_BYTES: usize = 64 * 1024;
 
+    #[cfg(test)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum GenerationPublicationFaultPoint {
+        GenerationDurable,
+        StagingMarkerPartiallyWritten,
+        StagingMarkerDurable,
+        FinalMarkerLinked,
+        FinalDirectoryDurable,
+    }
+
+    #[cfg(test)]
+    impl GenerationPublicationFaultPoint {
+        const fn label(self) -> &'static str {
+            match self {
+                Self::GenerationDurable => "generation_durable",
+                Self::StagingMarkerPartiallyWritten => "staging_marker_partially_written",
+                Self::StagingMarkerDurable => "staging_marker_durable",
+                Self::FinalMarkerLinked => "final_marker_linked",
+                Self::FinalDirectoryDurable => "final_directory_durable",
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_generation_marker_with_fault(
+        directory: &Path,
+        generation: u64,
+        fault: Option<GenerationPublicationFaultPoint>,
+    ) -> Result<GenerationPublicationSummary, GenerationPublicationError> {
+        publish_generation_marker(directory, generation, fault)
+    }
+
     pub(super) fn publish_generation_marker(
         directory: &Path,
         generation: u64,
+        #[cfg(test)] fault: Option<GenerationPublicationFaultPoint>,
     ) -> Result<GenerationPublicationSummary, GenerationPublicationError> {
         if generation == 0 {
             return invalid("generation id must be greater than zero");
@@ -127,15 +168,26 @@ mod unix {
         sync_regular_file(&log_path)?;
         sync_directory(&directory).map_err(|source| io_error(&directory, source))?;
         require_exact_clean_generation(&log_path, &baseline, committed_prefix)?;
+        #[cfg(test)]
+        inject_fault(fault, GenerationPublicationFaultPoint::GenerationDurable)?;
 
         let encoded = encode_commit_marker(generation, committed_prefix).map_err(|error| {
             GenerationPublicationError::Invalid(format!("cannot encode commit marker: {error}"))
         })?;
-        write_synced_staging(&staging_path, &encoded)?;
+        write_synced_staging(
+            &staging_path,
+            &encoded,
+            #[cfg(test)]
+            fault,
+        )?;
+        #[cfg(test)]
+        inject_fault(fault, GenerationPublicationFaultPoint::StagingMarkerDurable)?;
 
         require_exact_clean_generation(&log_path, &baseline, committed_prefix)?;
         fs::hard_link(&staging_path, &marker_path)
             .map_err(|source| io_error(&marker_path, source))?;
+        #[cfg(test)]
+        inject_fault(fault, GenerationPublicationFaultPoint::FinalMarkerLinked)?;
 
         if let Err(source) = sync_directory(&directory) {
             return Err(GenerationPublicationError::DurabilityUncertain {
@@ -143,6 +195,11 @@ mod unix {
                 source,
             });
         }
+        #[cfg(test)]
+        inject_fault(
+            fault,
+            GenerationPublicationFaultPoint::FinalDirectoryDurable,
+        )?;
 
         verify_published_marker(&marker_path, generation, committed_prefix)?;
         let _ = verify_committed_prefix(&log_path, committed_prefix)?;
@@ -232,15 +289,43 @@ mod unix {
     fn write_synced_staging(
         path: &Path,
         encoded: &[u8; COMMIT_MARKER_LEN],
+        #[cfg(test)] fault: Option<GenerationPublicationFaultPoint>,
     ) -> Result<(), GenerationPublicationError> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .map_err(|source| io_error(path, source))?;
+        #[cfg(not(test))]
         file.write_all(encoded)
             .map_err(|source| io_error(path, source))?;
+        #[cfg(test)]
+        {
+            let split = encoded.len() / 2;
+            file.write_all(&encoded[..split])
+                .map_err(|source| io_error(path, source))?;
+            inject_fault(
+                fault,
+                GenerationPublicationFaultPoint::StagingMarkerPartiallyWritten,
+            )?;
+            file.write_all(&encoded[split..])
+                .map_err(|source| io_error(path, source))?;
+        }
         file.sync_all().map_err(|source| io_error(path, source))
+    }
+
+    #[cfg(test)]
+    fn inject_fault(
+        selected: Option<GenerationPublicationFaultPoint>,
+        current: GenerationPublicationFaultPoint,
+    ) -> Result<(), GenerationPublicationError> {
+        if selected == Some(current) {
+            return invalid(format!(
+                "injected generation publication fault at {}",
+                current.label()
+            ));
+        }
+        Ok(())
     }
 
     fn sync_regular_file(path: &Path) -> Result<(), GenerationPublicationError> {
