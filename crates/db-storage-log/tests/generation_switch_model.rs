@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 enum LogHealth {
     Missing,
     Clean,
-    RecoverableTail,
+    RecoverableTail { committed_prefix_proven: bool },
     Corrupt,
 }
 
@@ -27,6 +27,7 @@ enum FailureReason {
     DuplicateGenerationId,
     HighestCommittedLogMissing,
     HighestCommittedLogCorrupt,
+    HighestCommittedPrefixUnproven,
 }
 
 fn select_authoritative_generation(states: &[GenerationState]) -> RecoveryDecision {
@@ -51,10 +52,15 @@ fn select_authoritative_generation(states: &[GenerationState]) -> RecoveryDecisi
             id: authoritative.id,
             repair_tail_on_open: false,
         },
-        LogHealth::RecoverableTail => RecoveryDecision::OpenGeneration {
+        LogHealth::RecoverableTail {
+            committed_prefix_proven: true,
+        } => RecoveryDecision::OpenGeneration {
             id: authoritative.id,
             repair_tail_on_open: true,
         },
+        LogHealth::RecoverableTail {
+            committed_prefix_proven: false,
+        } => RecoveryDecision::FailClosed(FailureReason::HighestCommittedPrefixUnproven),
         LogHealth::Missing => {
             RecoveryDecision::FailClosed(FailureReason::HighestCommittedLogMissing)
         }
@@ -76,6 +82,12 @@ fn open(id: u64) -> RecoveryDecision {
     RecoveryDecision::OpenGeneration {
         id,
         repair_tail_on_open: false,
+    }
+}
+
+const fn recoverable_tail(committed_prefix_proven: bool) -> LogHealth {
+    LogHealth::RecoverableTail {
+        committed_prefix_proven,
     }
 }
 
@@ -130,15 +142,16 @@ fn higher_uncommitted_orphans_never_override_last_committed_generation() {
         generation(11, false, LogHealth::Clean),
         generation(12, false, LogHealth::Corrupt),
         generation(13, false, LogHealth::Missing),
+        generation(14, false, recoverable_tail(false)),
     ];
     assert_eq!(select_authoritative_generation(&states), open(10));
 }
 
 #[test]
-fn committed_generation_with_recoverable_final_append_remains_authoritative() {
+fn marker_bound_recoverable_tail_remains_authoritative() {
     let states = [
         generation(3, true, LogHealth::Clean),
-        generation(4, true, LogHealth::RecoverableTail),
+        generation(4, true, recoverable_tail(true)),
     ];
     assert_eq!(
         select_authoritative_generation(&states),
@@ -146,6 +159,18 @@ fn committed_generation_with_recoverable_final_append_remains_authoritative() {
             id: 4,
             repair_tail_on_open: true,
         }
+    );
+}
+
+#[test]
+fn unproven_recoverable_tail_never_becomes_authoritative() {
+    let states = [
+        generation(3, true, LogHealth::Clean),
+        generation(4, true, recoverable_tail(false)),
+    ];
+    assert_eq!(
+        select_authoritative_generation(&states),
+        RecoveryDecision::FailClosed(FailureReason::HighestCommittedPrefixUnproven)
     );
 }
 
@@ -173,9 +198,13 @@ fn committed_new_generation_corruption_never_falls_back_to_old_state() {
 }
 
 #[test]
-fn publishing_marker_before_new_log_is_durable_is_an_invalid_writer_order() {
+fn publishing_marker_before_new_log_is_proven_durable_is_an_invalid_writer_order() {
     let old = generation(30, true, LogHealth::Clean);
-    for health in [LogHealth::Missing, LogHealth::Corrupt] {
+    for health in [
+        LogHealth::Missing,
+        LogHealth::Corrupt,
+        recoverable_tail(false),
+    ] {
         let states = [old, generation(31, true, health)];
         assert!(matches!(
             select_authoritative_generation(&states),
@@ -221,7 +250,8 @@ fn arbitrary_lower_generation_damage_cannot_roll_back_a_valid_higher_commit() {
     for lower_health in [
         LogHealth::Missing,
         LogHealth::Clean,
-        LogHealth::RecoverableTail,
+        recoverable_tail(true),
+        recoverable_tail(false),
         LogHealth::Corrupt,
     ] {
         let states = [

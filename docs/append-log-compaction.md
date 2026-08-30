@@ -91,6 +91,6 @@ Successful stdout is JSON containing:
 
 This primitive intentionally does **not** repoint an existing `LogEngine` path to the compact copy and does not delete the historical source. `docs/append-log-generation-switch.md` now freezes the executable recovery law for that later transition: the highest durably committed generation is authoritative, higher uncommitted files are ignored, and damage to the highest committed generation fails closed rather than silently rolling back to an older generation.
 
-The remaining implementation must still assign concrete generation/marker bytes and names, make marker publication durable across Linux/macOS/Windows, route future mutations to the selected generation, and adversarially test every filesystem interruption point against that recovery law.
+The remaining implementation must still assign concrete generation/marker bytes and names, bind each marker to the verified complete compacted base prefix, make marker publication durable across Linux/macOS/Windows, route future mutations to the selected generation, and adversarially test every filesystem interruption point against that recovery law.
 
 Until that protocol exists and is tested adversarially, the roadmap's general append-log compaction milestone remains open.
