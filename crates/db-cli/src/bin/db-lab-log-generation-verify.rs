@@ -20,6 +20,7 @@ const GENERATION_PREFIX: &str = "generation-";
 const GENERATION_SUFFIX: &str = ".log";
 const COMMIT_PREFIX: &str = "commit-";
 const COMMIT_SUFFIX: &str = ".marker";
+const STAGING_COMMIT_PREFIX: &str = "staging-commit-";
 const GENERATION_ID_WIDTH: usize = 20;
 const MAX_DIRECTORY_ENTRIES: usize = 8_192;
 
@@ -43,6 +44,7 @@ struct GenerationVerificationSummary {
     authoritative_log: String,
     highest_observed_generation: u64,
     marker_generation_ids: Vec<u64>,
+    staging_marker_generation_ids: Vec<u64>,
     uncommitted_generation_ids: Vec<u64>,
     committed_prefix: CommittedPrefix,
     committed_prefix_verification: VerificationReport,
@@ -52,6 +54,7 @@ struct GenerationVerificationSummary {
 struct GenerationNamespace {
     generation_files: BTreeMap<u64, PathBuf>,
     marker_files: BTreeMap<u64, PathBuf>,
+    staging_marker_files: BTreeMap<u64, PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -148,10 +151,12 @@ fn verify_generation_directory(
         .generation_files
         .keys()
         .chain(namespace.marker_files.keys())
+        .chain(namespace.staging_marker_files.keys())
         .copied()
         .max()
         .ok_or_else(|| VerifyError::Invalid("generation directory is empty".to_owned()))?;
     let marker_generation_ids = namespace.marker_files.keys().copied().collect();
+    let staging_marker_generation_ids = namespace.staging_marker_files.keys().copied().collect();
     let uncommitted_generation_ids = namespace
         .generation_files
         .keys()
@@ -173,6 +178,7 @@ fn verify_generation_directory(
         authoritative_log,
         highest_observed_generation,
         marker_generation_ids,
+        staging_marker_generation_ids,
         uncommitted_generation_ids,
         committed_prefix: marker.committed_prefix,
         committed_prefix_verification,
@@ -183,6 +189,7 @@ fn verify_generation_directory(
 fn scan_namespace(directory: &Path) -> Result<GenerationNamespace, VerifyError> {
     let mut generation_files = BTreeMap::new();
     let mut marker_files = BTreeMap::new();
+    let mut staging_marker_files = BTreeMap::new();
     let entries = fs::read_dir(directory).map_err(|source| io_error(directory, source))?;
 
     for (index, entry) in entries.enumerate() {
@@ -206,12 +213,17 @@ fn scan_namespace(directory: &Path) -> Result<GenerationNamespace, VerifyError> 
             let _ = marker_files.insert(id, path);
             continue;
         }
+        if let Some(id) = parse_canonical_staging_commit_name(name)? {
+            let _ = staging_marker_files.insert(id, path);
+            continue;
+        }
         return invalid(format!("unexpected generation directory entry {name:?}"));
     }
 
     Ok(GenerationNamespace {
         generation_files,
         marker_files,
+        staging_marker_files,
     })
 }
 
@@ -221,6 +233,15 @@ fn parse_canonical_generation_name(name: &str) -> Result<Option<u64>, VerifyErro
 
 fn parse_canonical_commit_name(name: &str) -> Result<Option<u64>, VerifyError> {
     parse_canonical_id(name, COMMIT_PREFIX, COMMIT_SUFFIX, "commit marker")
+}
+
+fn parse_canonical_staging_commit_name(name: &str) -> Result<Option<u64>, VerifyError> {
+    parse_canonical_id(
+        name,
+        STAGING_COMMIT_PREFIX,
+        COMMIT_SUFFIX,
+        "staging commit marker",
+    )
 }
 
 fn parse_canonical_id(
@@ -322,7 +343,13 @@ mod tests {
                 .expect("parse marker"),
             Some(42)
         );
+        assert_eq!(
+            parse_canonical_staging_commit_name("staging-commit-00000000000000000042.marker")
+                .expect("parse staging marker"),
+            Some(42)
+        );
         assert!(parse_canonical_generation_name("generation-42.log").is_err());
         assert!(parse_canonical_commit_name("commit-00000000000000000000.marker").is_err());
+        assert!(parse_canonical_staging_commit_name("staging-commit-42.marker").is_err());
     }
 }

@@ -1,6 +1,6 @@
 # Append-log generation directory v2
 
-This document defines the concrete, read-only generation-directory format used by the future append-log compaction switch. It implements the no-rollback selection law from `docs/append-log-generation-switch.md` and the marker-bound committed-prefix proof added by PR #59 without changing append-log file format v1.
+This document defines the concrete generation-directory format used by the append-log compaction switch work. It implements the no-rollback selection law from `docs/append-log-generation-switch.md` and the marker-bound committed-prefix proof added by PR #59 without changing append-log file format v1.
 
 The verifier command is:
 
@@ -10,17 +10,17 @@ db-lab-log-generation-verify --directory data/log-generations
 
 Its protocol identifier is `append_log_generation_directory_v2`.
 
-This protocol defines **how retained generation evidence is read and validated**. It still does not implement the writer that durably publishes a marker, so a passing hosted-CI fixture is not evidence that parent-directory durability has been solved on a real filesystem.
+The reader defines how retained generation evidence is selected and validated. `docs/append-log-generation-publication.md` defines the first writer-side marker publication primitive: durable publication on supported Unix targets. Mutation routing, old-generation cleanup, Windows-equivalent publication, and the complete compaction switch remain unfinished.
 
 ## Strict directory namespace
 
-A generation directory is a real directory, not a symlink. Its namespace is intentionally closed and permits only canonical pairs such as:
+A generation directory is a real directory, not a symlink. Its namespace is intentionally closed and permits only canonical names of these forms:
 
 ```text
 generation-00000000000000000001.log
 commit-00000000000000000001.marker
+staging-commit-00000000000000000002.marker
 generation-00000000000000000002.log
-commit-00000000000000000002.marker
 ...
 ```
 
@@ -28,7 +28,9 @@ Generation ids are decimal `u64` values greater than zero, encoded as exactly 20
 
 At most 8,192 directory entries are scanned. This bound prevents an untrusted directory from turning verification into unbounded metadata work.
 
-A canonical generation log without a matching marker is an **uncommitted generation**. It may be a complete compact image or a crash orphan; the verifier records its id but never opens it merely because its bytes look valid.
+A canonical generation log without a matching final marker is an **uncommitted generation**. It may be a complete compact image or a crash orphan; the verifier records its id but never opens it merely because its bytes look valid.
+
+A canonical `staging-commit-%020d.marker` is **non-authoritative publication residue**. Its bytes are not decoded or trusted for selection. The reader records its generation id for observability and otherwise ignores it. This allows a crash before final marker publication to leave a staging name without blocking recovery. Only final `commit-%020d.marker` names carry commit authority.
 
 ## Commit marker format v2
 
@@ -70,13 +72,13 @@ For the highest committed generation the reader first runs normal read-only `Log
 
 The temporary copy exists only to reuse the canonical parser without duplicating append-log decoding rules. Generation-directory verification never mutates, truncates, repairs, renames, or deletes the source generation or marker files.
 
-This proves that a later recoverable tail starts **after** a retained complete marker-bound base prefix. It does not cryptographically prove who produced that prefix or that the future writer followed the required filesystem durability ordering; writer-side crash tests remain necessary.
+This proves that a later recoverable tail starts **after** a retained complete marker-bound base prefix. It does not cryptographically prove who produced that prefix. Writer-side ordering is a separate property; the Unix publisher establishes an explicit synchronization order documented in `docs/append-log-generation-publication.md`.
 
 ## Selection algorithm
 
-The verifier enumerates canonical names, then selects the **highest generation id for which a commit-marker filename exists**. It does not search for the highest valid-looking generation log.
+The verifier enumerates canonical names, then selects the **highest generation id for which a final commit-marker filename exists**. It does not search for the highest valid-looking generation log and never promotes a staging marker.
 
-Only the highest marker is authoritative for selection. The verifier then:
+Only the highest final marker is authoritative for selection. The verifier then:
 
 1. requires that highest marker path to be a real regular file rather than a symlink or non-file;
 2. requires exactly 64 bytes and validates marker v2 completely;
@@ -86,7 +88,7 @@ Only the highest marker is authoritative for selection. The verifier then:
 6. re-verifies the marker-bound committed prefix as described above;
 7. if the current log has a recoverable tail, requires its `record_offset` to be at or after the end of the committed prefix.
 
-If the highest marker is corrupt, its referenced generation log is missing/corrupt, or its committed-prefix proof fails, verification fails closed. It never falls back to a lower marker. This is the retained-artifact form of the no-rollback rule from `docs/append-log-generation-switch.md`.
+If the highest final marker is corrupt, its referenced generation log is missing/corrupt, or its committed-prefix proof fails, verification fails closed. It never falls back to a lower marker. This is the retained-artifact form of the no-rollback rule from `docs/append-log-generation-switch.md`.
 
 Lower marker contents are not used to choose or validate the current authoritative generation. Damage to historical lower generations must not make a valid higher committed generation roll back.
 
@@ -112,27 +114,34 @@ Successful JSON reports:
 - `protocol = "append_log_generation_directory_v2"`;
 - marker format version;
 - authoritative generation id and canonical log filename;
-- highest generation id observed in any canonical log/marker name;
-- all observed marker generation ids;
-- generation-log ids that currently have no marker;
+- highest generation id observed in any canonical generation/final-marker/staging-marker name;
+- all observed final marker generation ids;
+- all observed staging-marker generation ids;
+- generation-log ids that currently have no final marker;
 - the marker-bound `committed_prefix` proof;
 - the independent `committed_prefix_verification` report;
 - the complete current append-log `log_verification` report.
 
-The uncommitted-id list is descriptive crash/orphan evidence. The verifier does not delete it.
+The uncommitted and staging-id lists are descriptive crash/orphan evidence. The verifier does not delete either class.
 
-## What remains before an authoritative switch exists
+## Writer-side publication now available on Unix
 
-This reader does not create generation directories or markers and does not claim that a marker file written by an arbitrary process is durably published. The writer-side protocol still has to define and test:
+`db-lab-log-generation-publish` can publish a marker-v2 commit for an already-created clean generation on supported Unix targets. It synchronizes the generation file and directory before marker authority, writes and synchronizes a same-directory staging marker, publishes the final marker with no-overwrite hard-link semantics, and synchronizes the directory again before reporting success.
+
+Canonical staging markers exist specifically so interruption before final publication has a protocol-defined non-authoritative representation. A final marker that becomes visible but whose parent-directory sync fails is reported as durability-uncertain; the tool does not claim success or delete historical state.
+
+Non-Unix targets currently fail before writing any marker. In particular, Windows support remains intentionally disabled until an equivalent parent-directory entry durability mechanism is implemented and tested. See `docs/append-log-generation-publication.md` for the full ordering and crash-state contract.
+
+## What remains before the compaction switch is complete
+
+The Unix marker publisher closes one writer-side gap but does not complete authoritative compaction. Remaining work includes:
 
 - create-new generation allocation above every observed canonical id;
-- construction, synchronization, and verification of a complete compact generation before marker publication;
-- capture of the exact v2 committed-prefix byte length, CRC, record count, and next sequence from that verified image;
-- marker create/write/checksum/file-sync mechanics;
-- parent-directory entry durability on Linux, macOS, and Windows;
-- exact crash injection before/during/after marker publication;
-- routing subsequent mutations to the newly committed generation;
+- construction of the next compact generation from the current authoritative live state as one controlled operation;
+- routing subsequent mutations through a generation-directory engine after commit;
+- Windows-equivalent durable marker publication;
+- exact crash injection or power-loss validation across generation construction and switching;
 - safe old-generation and orphan cleanup only after the new marker is durably committed;
 - migration or coexistence rules for the current legacy single-file `LogEngine` path.
 
-Until writer-side publication and recovery are implemented against this v2 reader and the executable recovery model, the Phase 1 general compaction milestone remains open.
+Until those pieces exist and are tested against the v2 reader and executable recovery model, the Phase 1 general compaction milestone remains open.
