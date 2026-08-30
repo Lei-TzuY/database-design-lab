@@ -32,6 +32,10 @@ name = "db-lab-host-preflight"
 path = "src/bin/db-lab-host-preflight.rs"
 
 [[bin]]
+name = "db-lab-host-preflight-verify"
+path = "src/bin/db-lab-host-preflight-verify.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 

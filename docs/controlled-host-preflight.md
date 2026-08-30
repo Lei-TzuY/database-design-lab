@@ -39,7 +39,7 @@ The snapshot also records the OS/architecture, kernel release when readable, and
 2-3,6-7
 ```
 
-Descending ranges, duplicates, overlapping ranges, empty components, and unreasonably large CPU ids are rejected. The process affinity must match the normalized set exactly rather than merely contain it. This prevents a benchmark command that was intended to run on CPUs 2-3 from silently retaining access to other online CPUs.
+Descending ranges, duplicates, overlapping ranges, empty components, unreasonably large CPU ids, and CPU sets above the protocol resource bound are rejected. The process affinity must match the normalized set exactly rather than merely contain it. This prevents a benchmark command that was intended to run on CPUs 2-3 from silently retaining access to other online CPUs.
 
 ## Noise budget
 
@@ -75,6 +75,25 @@ db-lab-host-preflight \
 ```
 
 The output path must not already exist. A fully collected snapshot is written with `create_new`, flushed, and synchronized. This remains true for a control violation: the file records `passed=false` and the complete `violations` array, while the command exits non-zero. Configuration/collection failures that prevent a meaningful snapshot do not fabricate a passed artifact.
+
+## Re-verifying a retained snapshot
+
+`db-lab-host-preflight-verify` is the fail-closed reader for retained v1 snapshots. It does not probe the current machine again. Instead, it verifies that the stored artifact is a valid representation of what the producer recorded:
+
+```text
+db-lab-host-preflight-verify \
+  --snapshot evidence/host-preflight-001.json \
+  --expected-host-label perf-host-01 \
+  --require-passed
+```
+
+Verification rejects symlinks and oversized files, unknown JSON fields, unsupported protocols, malformed/unsorted CPU sets, mismatched governor keys, inconsistent turbo interface/raw/derived state, invalid numeric values, altered frozen limitations, and surrounding whitespace or resource-bound violations in retained text fields. It then recomputes the complete hard-control violation ledger from the stored observations and requires both `violations` and `passed` to agree exactly with that recomputation.
+
+Without `--require-passed`, an internally consistent `passed=false` snapshot remains valid audit evidence: a failed preflight must not become unreadable merely because it correctly recorded a control failure. With `--require-passed`, such an artifact is rejected for later admission. `--expected-host-label` additionally binds the verifier call to one expected named host.
+
+The shared library entry points are `verify_host_preflight_snapshot`, `load_verified_host_preflight_snapshot`, and `validate_host_preflight_snapshot` in `db_cli::host_preflight`. Future publication-session binding should consume this verifier rather than implementing a second JSON interpretation.
+
+This verifier establishes internal integrity of the repository-defined snapshot contract; it is not a cryptographic signature, proof of authorship, proof that an operator attestation was truthful, or proof that the retained observation still describes the machine at a later time.
 
 ## Output boundary
 
