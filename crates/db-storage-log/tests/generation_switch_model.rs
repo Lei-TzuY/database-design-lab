@@ -17,10 +17,7 @@ struct GenerationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecoveryDecision {
-    OpenGeneration {
-        id: u64,
-        repair_tail_on_open: bool,
-    },
+    OpenGeneration { id: u64, repair_tail_on_open: bool },
     FailClosed(FailureReason),
 }
 
@@ -86,11 +83,7 @@ fn open(id: u64) -> RecoveryDecision {
 fn every_valid_compaction_switch_crash_prefix_selects_exactly_old_or_new() {
     let old = generation(7, true, LogHealth::Clean);
     let cases = [
-        (
-            "before next-generation file exists",
-            vec![old],
-            open(7),
-        ),
+        ("before next-generation file exists", vec![old], open(7)),
         (
             "after next-generation name exists but bytes are incomplete",
             vec![old, generation(8, false, LogHealth::Corrupt)],
@@ -168,7 +161,10 @@ fn committed_new_generation_corruption_never_falls_back_to_old_state() {
             FailureReason::HighestCommittedLogCorrupt,
         ),
     ] {
-        let states = [generation(21, true, LogHealth::Clean), generation(22, true, health)];
+        let states = [
+            generation(21, true, LogHealth::Clean),
+            generation(22, true, health),
+        ];
         assert_eq!(
             select_authoritative_generation(&states),
             RecoveryDecision::FailClosed(expected)
