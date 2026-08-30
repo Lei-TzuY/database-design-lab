@@ -517,10 +517,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use db_cli::host_preflight::{
-        validate_host_preflight_snapshot, HostPreflightExpectedControls,
-        HostPreflightObservation, HostPreflightOperatorAttestations, HostPreflightSnapshot,
-        HostPreflightTurboObservation, HOST_PREFLIGHT_EXPECTED_GOVERNOR,
-        HOST_PREFLIGHT_LIMITATIONS, HOST_PREFLIGHT_PROTOCOL,
+        validate_host_preflight_snapshot, HostPreflightExpectedControls, HostPreflightObservation,
+        HostPreflightOperatorAttestations, HostPreflightSnapshot, HostPreflightTurboObservation,
+        HOST_PREFLIGHT_EXPECTED_GOVERNOR, HOST_PREFLIGHT_LIMITATIONS, HOST_PREFLIGHT_PROTOCOL,
     };
 
     use super::{
