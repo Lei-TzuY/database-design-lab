@@ -37,8 +37,9 @@ because later work has begun.
   recovery contract, marker-bound committed-prefix proof, durable final-marker publication, an offline
   authoritative compact switch, generation-aware routed mutations, cooperative cross-process writer
   exclusion around routed operations and the switch publication critical section, and guarded operator
-  recovery for crash-retained writer lease evidence. The milestone remains open until Windows-equivalent
-  marker durability, composed switch fault injection, safe obsolete/orphan cleanup, and legacy single-file
+  recovery for crash-retained writer lease evidence. A deterministic composed switch matrix now covers
+  every retained-state boundary and requires exact old-or-new logical recovery. The milestone remains open
+  until Windows-equivalent marker durability, safe obsolete/orphan cleanup, and legacy single-file
   migration/coexistence are implemented.
 
 ## Phase 2 — B+ tree engine

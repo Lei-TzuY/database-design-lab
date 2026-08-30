@@ -58,6 +58,7 @@ Invalid writer orders include publishing the marker before the new generation is
 | before new file exists | committed + clean | absent | old |
 | during new file construction | committed + clean | uncommitted + incomplete/corrupt | old |
 | after new image is complete | committed + clean | uncommitted + clean | old |
+| after final marker link, before directory barrier | committed + clean | final marker may survive or be lost | old or new; verify retained state |
 | after new marker is durable | committed + clean | committed + clean | new |
 | marker exists but base-prefix proof fails | committed + clean | committed + unproven recoverable tail | fail closed |
 | during old cleanup | missing/damaged old | committed + clean new | new |
@@ -71,7 +72,7 @@ A committed new generation with a canonical recoverable final append selects the
 
 `append_log_generation_marker_publication_unix_v1` provides Unix generation-file and parent-directory synchronization, same-directory synced staging markers, no-overwrite final-marker publication, final directory synchronization, post-publication proof verification, and a distinct durability-uncertain error when final-marker visibility may precede confirmed parent-directory durability. Non-Unix platforms fail before publication I/O.
 
-`append_log_offline_generation_compact_switch_unix_v1` composes source selection, allocation above every observed canonical id, exact live-state compact-copy construction, stale-source detection, durable publication, and final authority/image verification. A deterministic late-write test proves pre-publication raw-path source drift leaves only an uncommitted orphan and preserves old authority.
+`append_log_offline_generation_compact_switch_unix_v1` composes source selection, allocation above every observed canonical id, exact live-state compact-copy construction, stale-source detection, durable publication, and final authority/image verification. A deterministic late-write test proves pre-publication raw-path source drift leaves only an uncommitted orphan and preserves old authority. A composed fault matrix covers the complete candidate, locked recheck, generation durability, partial and durable staging marker, final-marker link, final directory barrier, and completed-publisher boundaries. Normal recovery must select an exact logical old or new state according to the table above.
 
 `GenerationLogEngine` adds generation-aware normal mutation routing. A handle adopts a newly published higher final marker before its next operation and refuses marker regression or malformed higher authority rather than continuing on a stale old generation.
 
@@ -79,16 +80,14 @@ A committed new generation with a canonical recoverable final append selects the
 
 The lock deliberately lives outside the retained generation namespace, so transient coordination does not alter recovery evidence or generation-id allocation. Raw-path `LogEngine` users do not participate and remain outside the exclusion contract.
 
-Hosted-CI fixtures validate format/recovery and cooperative exclusion semantics. They do not by themselves prove real power-loss durability of arbitrary filesystems or prevent a process that intentionally bypasses the protocol.
+Hosted-CI fixtures validate format/recovery, composed interruption states, and cooperative exclusion semantics. The pre-directory-sync final-link case explicitly permits old or new: the tests exercise a visible marker and a modeled loss of that unsynchronized directory entry, not a physical power-loss emulator. Hosted CI does not by itself prove real power-loss durability of arbitrary filesystems or prevent a process that intentionally bypasses the protocol.
 
 ## What remains before broad Phase 1 compaction completion
 
 The remaining lifecycle work is narrower but still material:
 
 - Windows-equivalent durable final-marker publication;
-- cross-operation deterministic fault injection at the composed switch boundaries beyond existing component-level durability tests;
 - safe cleanup of obsolete committed generations and uncommitted crash orphans;
-- explicit stale-lock recovery/operator tooling and lifecycle evidence;
 - migration/coexistence rules for legacy one-file users and a decision about where the generation-directory contract ultimately lives in the crate layering;
 - stronger ownership if the project later wants to protect against non-cooperating raw-path writers rather than only generation-aware participants.
 
