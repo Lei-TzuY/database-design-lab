@@ -184,11 +184,8 @@ fn create_bundle(
     let target_dir = canonical_fresh_target(bundle_dir)?;
     reject_nested_paths(&source_dir, &target_dir)?;
 
-    let source_verification = verify_batch_archive(
-        &source_dir,
-        expected_revision,
-        require_publication,
-    )?;
+    let source_verification =
+        verify_batch_archive(&source_dir, expected_revision, require_publication)?;
 
     fs::create_dir(&target_dir).map_err(|source| BundleError::Io {
         path: target_dir.clone(),
@@ -207,39 +204,27 @@ fn create_bundle(
             copy_regular_file(&source_dir.join(name), &evidence_dir.join(name))?;
         }
 
-        let evidence_verification = verify_batch_archive(
-            &evidence_dir,
-            expected_revision,
-            require_publication,
-        )?;
+        let evidence_verification =
+            verify_batch_archive(&evidence_dir, expected_revision, require_publication)?;
         if evidence_verification != source_verification {
             return Err(BundleError::Invalid(
                 "source verification summary changed while evidence was copied".to_owned(),
             ));
         }
 
-        let analysis = analyzer_impl::analyze_value(
-            &evidence_dir,
-            expected_revision,
-            require_publication,
-        )
-        .map_err(BundleError::Analysis)?;
+        let analysis =
+            analyzer_impl::analyze_value(&evidence_dir, expected_revision, require_publication)
+                .map_err(BundleError::Analysis)?;
 
-        let evidence_verification_after = verify_batch_archive(
-            &evidence_dir,
-            expected_revision,
-            require_publication,
-        )?;
+        let evidence_verification_after =
+            verify_batch_archive(&evidence_dir, expected_revision, require_publication)?;
         if evidence_verification_after != evidence_verification {
             return Err(BundleError::Invalid(
                 "bundled evidence changed while analysis was being computed".to_owned(),
             ));
         }
-        let source_verification_after = verify_batch_archive(
-            &source_dir,
-            expected_revision,
-            require_publication,
-        )?;
+        let source_verification_after =
+            verify_batch_archive(&source_dir, expected_revision, require_publication)?;
         if source_verification_after != source_verification {
             return Err(BundleError::Invalid(
                 "source verification summary changed while the bundle was being created".to_owned(),
@@ -283,12 +268,11 @@ fn verify_bundle(
     require_exact_bundle_entries(&bundle_dir)?;
 
     let index_path = bundle_dir.join(INDEX_FILE);
-    let index: AnalysisBundleIndex = serde_json::from_value(read_json(&index_path)?).map_err(|source| {
-        BundleError::Json {
+    let index: AnalysisBundleIndex =
+        serde_json::from_value(read_json(&index_path)?).map_err(|source| BundleError::Json {
             path: index_path.clone(),
             source,
-        }
-    })?;
+        })?;
     validate_index(&index, expected_revision)?;
 
     let evidence_dir = bundle_dir.join(EVIDENCE_DIRECTORY);
@@ -335,7 +319,10 @@ fn verify_bundle(
         ));
     }
 
-    Ok(summary_from_verification(&verification, index.evidence_files.len()))
+    Ok(summary_from_verification(
+        &verification,
+        index.evidence_files.len(),
+    ))
 }
 
 fn validate_index(
@@ -625,12 +612,13 @@ fn compare_regular_files(
     let mut source_buffer = [0_u8; 64 * 1024];
     let mut evidence_buffer = [0_u8; 64 * 1024];
     loop {
-        let source_read = source_reader
-            .read(&mut source_buffer)
-            .map_err(|source| BundleError::Io {
-                path: source_path.to_path_buf(),
-                source,
-            })?;
+        let source_read =
+            source_reader
+                .read(&mut source_buffer)
+                .map_err(|source| BundleError::Io {
+                    path: source_path.to_path_buf(),
+                    source,
+                })?;
         let evidence_read = evidence_reader
             .read(&mut evidence_buffer)
             .map_err(|source| BundleError::Io {
