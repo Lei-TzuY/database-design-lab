@@ -111,7 +111,8 @@ pub fn verify_host_preflight_snapshot(
     expected_host_label: Option<&str>,
     require_passed: bool,
 ) -> Result<HostPreflightVerificationSummary, HostPreflightVerifyError> {
-    let snapshot = load_verified_host_preflight_snapshot(path, expected_host_label, require_passed)?;
+    let snapshot =
+        load_verified_host_preflight_snapshot(path, expected_host_label, require_passed)?;
     Ok(HostPreflightVerificationSummary {
         valid: true,
         protocol: snapshot.protocol.clone(),
@@ -141,22 +142,24 @@ pub fn validate_host_preflight_snapshot(
     require_passed: bool,
 ) -> Result<(), HostPreflightVerifyError> {
     if snapshot.protocol != HOST_PREFLIGHT_PROTOCOL {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "unsupported protocol {:?}; expected {HOST_PREFLIGHT_PROTOCOL:?}",
             snapshot.protocol
         )));
     }
     if snapshot.recorded_unix_seconds == 0 {
-        return Err(HostPreflightVerifyError::Invalid(
-            "recorded_unix_seconds must be greater than zero".to_owned(),
-        ));
+        return Err(invalid("recorded_unix_seconds must be greater than zero"));
     }
-    validate_trimmed_text("host_label", &snapshot.host_label, HOST_PREFLIGHT_MAX_TEXT_BYTES)?;
-    if let Some(expected_host_label) = expected_host_label {
-        if snapshot.host_label != expected_host_label {
-            return Err(HostPreflightVerifyError::Invalid(format!(
+    validate_trimmed_text(
+        "host_label",
+        &snapshot.host_label,
+        HOST_PREFLIGHT_MAX_TEXT_BYTES,
+    )?;
+    if let Some(expected) = expected_host_label {
+        if snapshot.host_label != expected {
+            return Err(invalid(format!(
                 "host label {:?} differs from expected label {:?}",
-                snapshot.host_label, expected_host_label
+                snapshot.host_label, expected
             )));
         }
     }
@@ -164,34 +167,33 @@ pub fn validate_host_preflight_snapshot(
     let expected_cpus = validate_cpu_vector(
         "expected.process_cpu_affinity",
         &snapshot.expected.process_cpu_affinity,
-        false,
     )?;
     if snapshot.expected.scaling_governor != HOST_PREFLIGHT_EXPECTED_GOVERNOR {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "expected.scaling_governor must be {HOST_PREFLIGHT_EXPECTED_GOVERNOR:?}; found {:?}",
             snapshot.expected.scaling_governor
         )));
     }
     if !snapshot.expected.turbo_disabled {
-        return Err(HostPreflightVerifyError::Invalid(
-            "expected.turbo_disabled must be true for protocol v1".to_owned(),
-        ));
+        return Err(invalid("expected.turbo_disabled must be true for protocol v1"));
     }
-    if !snapshot.expected.max_load_per_cpu.is_finite()
-        || snapshot.expected.max_load_per_cpu < 0.0
-    {
-        return Err(HostPreflightVerifyError::Invalid(
-            "expected.max_load_per_cpu must be finite and non-negative".to_owned(),
+    if !snapshot.expected.max_load_per_cpu.is_finite() || snapshot.expected.max_load_per_cpu < 0.0 {
+        return Err(invalid(
+            "expected.max_load_per_cpu must be finite and non-negative",
         ));
     }
 
     if snapshot.observation.target_os != "linux" {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "observation.target_os must be \"linux\"; found {:?}",
             snapshot.observation.target_os
         )));
     }
-    validate_trimmed_text("observation.target_arch", &snapshot.observation.target_arch, 128)?;
+    validate_trimmed_text(
+        "observation.target_arch",
+        &snapshot.observation.target_arch,
+        128,
+    )?;
     validate_optional_trimmed_text(
         "observation.kernel_release",
         snapshot.observation.kernel_release.as_deref(),
@@ -204,33 +206,29 @@ pub fn validate_host_preflight_snapshot(
     )?;
 
     if let Some(actual) = snapshot.observation.process_allowed_cpus.as_ref() {
-        validate_cpu_vector("observation.process_allowed_cpus", actual, false)?;
+        validate_cpu_vector("observation.process_allowed_cpus", actual)?;
     }
     if let Some(online) = snapshot.observation.online_cpus.as_ref() {
-        validate_cpu_vector("observation.online_cpus", online, false)?;
+        validate_cpu_vector("observation.online_cpus", online)?;
     }
 
     let governor_keys: BTreeSet<u32> = snapshot.observation.governors.keys().copied().collect();
     if governor_keys != expected_cpus {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "observation.governors keys {governor_keys:?} differ from expected CPU set {expected_cpus:?}"
         )));
     }
     for (cpu, governor) in &snapshot.observation.governors {
         if let Some(governor) = governor {
-            validate_trimmed_text(
-                &format!("observation.governors[{cpu}]"),
-                governor,
-                128,
-            )?;
+            validate_trimmed_text(&format!("observation.governors[{cpu}]"), governor, 128)?;
         }
     }
 
     validate_turbo_observation(&snapshot.observation.turbo)?;
     if let Some(load_one) = snapshot.observation.load_one {
         if !load_one.is_finite() || load_one < 0.0 {
-            return Err(HostPreflightVerifyError::Invalid(
-                "observation.load_one must be finite and non-negative when present".to_owned(),
+            return Err(invalid(
+                "observation.load_one must be finite and non-negative when present",
             ));
         }
     }
@@ -251,11 +249,15 @@ pub fn validate_host_preflight_snapshot(
         HOST_PREFLIGHT_MAX_TEXT_BYTES,
     )?;
 
-    let expected_limitations: Vec<&str> = HOST_PREFLIGHT_LIMITATIONS.into_iter().collect();
-    let actual_limitations: Vec<&str> = snapshot.limitations.iter().map(String::as_str).collect();
-    if actual_limitations != expected_limitations {
-        return Err(HostPreflightVerifyError::Invalid(format!(
-            "limitations differ from the frozen v1 protocol: found {actual_limitations:?}"
+    let limitations_match = snapshot
+        .limitations
+        .iter()
+        .map(String::as_str)
+        .eq(HOST_PREFLIGHT_LIMITATIONS);
+    if !limitations_match {
+        return Err(invalid(format!(
+            "limitations differ from the frozen v1 protocol: found {:?}",
+            snapshot.limitations
         )));
     }
 
@@ -268,24 +270,28 @@ pub fn validate_host_preflight_snapshot(
     }
     let recomputed = recompute_violations(snapshot);
     if snapshot.violations != recomputed {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "violations do not match recomputed hard-control failures: stored {:?}, recomputed {recomputed:?}",
             snapshot.violations
         )));
     }
     let recomputed_passed = recomputed.is_empty();
     if snapshot.passed != recomputed_passed {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "passed={} disagrees with recomputed hard-control result {recomputed_passed}",
             snapshot.passed
         )));
     }
     if require_passed && !snapshot.passed {
-        return Err(HostPreflightVerifyError::Invalid(
-            "snapshot is internally valid but records passed=false".to_owned(),
+        return Err(invalid(
+            "snapshot is internally valid but records passed=false",
         ));
     }
     Ok(())
+}
+
+fn invalid(message: impl Into<String>) -> HostPreflightVerifyError {
+    HostPreflightVerifyError::Invalid(message.into())
 }
 
 fn read_snapshot(path: &Path) -> Result<HostPreflightSnapshot, HostPreflightVerifyError> {
@@ -294,13 +300,13 @@ fn read_snapshot(path: &Path) -> Result<HostPreflightSnapshot, HostPreflightVeri
         source,
     })?;
     if !metadata.file_type().is_file() {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "snapshot path must be a regular file rather than a symlink or non-file: {}",
             path.display()
         )));
     }
     if metadata.len() > HOST_PREFLIGHT_MAX_SNAPSHOT_BYTES as u64 {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "snapshot has {} bytes; maximum is {HOST_PREFLIGHT_MAX_SNAPSHOT_BYTES}",
             metadata.len()
         )));
@@ -318,7 +324,7 @@ fn read_snapshot(path: &Path) -> Result<HostPreflightSnapshot, HostPreflightVeri
             source,
         })?;
     if encoded.len() > HOST_PREFLIGHT_MAX_SNAPSHOT_BYTES {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "snapshot exceeds maximum {HOST_PREFLIGHT_MAX_SNAPSHOT_BYTES} bytes"
         )));
     }
@@ -331,33 +337,29 @@ fn read_snapshot(path: &Path) -> Result<HostPreflightSnapshot, HostPreflightVeri
 fn validate_cpu_vector(
     label: &str,
     cpus: &[u32],
-    allow_empty: bool,
 ) -> Result<BTreeSet<u32>, HostPreflightVerifyError> {
-    if !allow_empty && cpus.is_empty() {
-        return Err(HostPreflightVerifyError::Invalid(format!(
-            "{label} must not be empty"
-        )));
+    if cpus.is_empty() {
+        return Err(invalid(format!("{label} must not be empty")));
     }
     if cpus.len() > HOST_PREFLIGHT_MAX_CPUS {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "{label} contains {} CPUs; maximum is {HOST_PREFLIGHT_MAX_CPUS}",
             cpus.len()
         )));
     }
+
     let mut previous = None;
     let mut set = BTreeSet::new();
     for &cpu in cpus {
         if cpu > HOST_PREFLIGHT_MAX_CPU_ID {
-            return Err(HostPreflightVerifyError::Invalid(format!(
+            return Err(invalid(format!(
                 "{label} contains CPU id {cpu} above maximum {HOST_PREFLIGHT_MAX_CPU_ID}"
             )));
         }
-        if let Some(previous) = previous {
-            if cpu <= previous {
-                return Err(HostPreflightVerifyError::Invalid(format!(
-                    "{label} must be strictly increasing and duplicate-free"
-                )));
-            }
+        if previous.is_some_and(|previous| cpu <= previous) {
+            return Err(invalid(format!(
+                "{label} must be strictly increasing and duplicate-free"
+            )));
         }
         set.insert(cpu);
         previous = Some(cpu);
@@ -371,30 +373,25 @@ fn validate_turbo_observation(
     match (&turbo.interface, &turbo.raw_value, turbo.disabled) {
         (None, None, None) => Ok(()),
         (Some(interface), Some(raw), Some(disabled)) => {
+            validate_trimmed_text("observation.turbo.raw_value", raw, 128)?;
             let expected_disabled = match interface.as_str() {
                 INTEL_NO_TURBO_PATH => raw == "1",
                 GENERIC_BOOST_PATH => raw == "0",
                 other => {
-                    return Err(HostPreflightVerifyError::Invalid(format!(
+                    return Err(invalid(format!(
                         "unsupported turbo observation interface {other:?}"
                     )))
                 }
             };
-            if raw.len() > 128 {
-                return Err(HostPreflightVerifyError::Invalid(
-                    "turbo raw value exceeds 128 bytes".to_owned(),
-                ));
-            }
             if disabled != expected_disabled {
-                return Err(HostPreflightVerifyError::Invalid(format!(
+                return Err(invalid(format!(
                     "turbo disabled={disabled} disagrees with interface {interface:?} raw value {raw:?}"
                 )));
             }
             Ok(())
         }
-        _ => Err(HostPreflightVerifyError::Invalid(
-            "turbo interface, raw_value, and disabled must either all be present or all be absent"
-                .to_owned(),
+        _ => Err(invalid(
+            "turbo interface, raw_value, and disabled must either all be present or all be absent",
         )),
     }
 }
@@ -405,7 +402,7 @@ fn validate_trimmed_text(
     maximum_bytes: usize,
 ) -> Result<(), HostPreflightVerifyError> {
     if value.is_empty() || value.len() > maximum_bytes || value.trim() != value {
-        return Err(HostPreflightVerifyError::Invalid(format!(
+        return Err(invalid(format!(
             "{label} must contain 1..={maximum_bytes} UTF-8 bytes without surrounding whitespace"
         )));
     }
@@ -543,29 +540,35 @@ mod tests {
         snapshot.observation.process_allowed_cpus = Some(vec![2, 3, 4]);
         snapshot.passed = false;
         snapshot.violations.clear();
-        assert!(validate_host_preflight_snapshot(&snapshot, None, false)
-            .expect_err("tampered violation ledger must fail")
-            .to_string()
-            .contains("violations do not match"));
+        assert!(
+            validate_host_preflight_snapshot(&snapshot, None, false)
+                .expect_err("tampered violation ledger must fail")
+                .to_string()
+                .contains("violations do not match")
+        );
     }
 
     #[test]
     fn turbo_raw_value_and_derived_state_must_agree() {
         let mut snapshot = passing_snapshot();
         snapshot.observation.turbo.raw_value = Some("0".to_owned());
-        assert!(validate_host_preflight_snapshot(&snapshot, None, false)
-            .expect_err("inconsistent turbo state must fail")
-            .to_string()
-            .contains("turbo disabled"));
+        assert!(
+            validate_host_preflight_snapshot(&snapshot, None, false)
+                .expect_err("inconsistent turbo state must fail")
+                .to_string()
+                .contains("turbo disabled")
+        );
     }
 
     #[test]
     fn expected_host_label_is_enforced() {
         let snapshot = passing_snapshot();
-        assert!(validate_host_preflight_snapshot(&snapshot, Some("different-host"), true)
-            .expect_err("host label mismatch must fail")
-            .to_string()
-            .contains("differs from expected"));
+        assert!(
+            validate_host_preflight_snapshot(&snapshot, Some("different-host"), true)
+                .expect_err("host label mismatch must fail")
+                .to_string()
+                .contains("differs from expected")
+        );
     }
 
     #[test]
@@ -583,10 +586,12 @@ mod tests {
             serde_json::to_vec_pretty(&value).expect("encode tampered snapshot"),
         )
         .expect("write snapshot");
-        assert!(verify_host_preflight_snapshot(&path, None, false)
-            .expect_err("unknown fields must fail")
-            .to_string()
-            .contains("unknown field"));
+        assert!(
+            verify_host_preflight_snapshot(&path, None, false)
+                .expect_err("unknown fields must fail")
+                .to_string()
+                .contains("unknown field")
+        );
     }
 
     fn passing_snapshot() -> HostPreflightSnapshot {
@@ -613,9 +618,7 @@ mod tests {
                     (3, Some("performance".to_owned())),
                 ]),
                 turbo: HostPreflightTurboObservation {
-                    interface: Some(
-                        "/sys/devices/system/cpu/intel_pstate/no_turbo".to_owned(),
-                    ),
+                    interface: Some("/sys/devices/system/cpu/intel_pstate/no_turbo".to_owned()),
                     raw_value: Some("1".to_owned()),
                     disabled: Some(true),
                 },
