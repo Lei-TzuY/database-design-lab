@@ -212,7 +212,9 @@ fn create_session_inner(
         return invalid("source archive changed while the session was being created");
     }
     if publication_host_label(source_archive)? != host_label {
-        return invalid("source publication host label changed while the session was being created");
+        return invalid(
+            "source publication host label changed while the session was being created",
+        );
     }
     compare_files(source_preflight, &copied_preflight, PREFLIGHT_FILE)?;
     compare_directories(source_archive, &evidence)?;
@@ -240,12 +242,11 @@ fn verify_session(
     require_session_layout(&session)?;
 
     let index_path = session.join(INDEX_FILE);
-    let index: SessionIndex = serde_json::from_value(read_json(&index_path)?).map_err(|source| {
-        SessionError::Json {
+    let index: SessionIndex =
+        serde_json::from_value(read_json(&index_path)?).map_err(|source| SessionError::Json {
             path: index_path.clone(),
             source,
-        }
-    })?;
+        })?;
     validate_index(&index, expected_revision)?;
 
     let preflight = load_verified_host_preflight_snapshot(
@@ -296,7 +297,10 @@ fn verify_session(
     })
 }
 
-fn validate_index(index: &SessionIndex, expected_revision: Option<&str>) -> Result<(), SessionError> {
+fn validate_index(
+    index: &SessionIndex,
+    expected_revision: Option<&str>,
+) -> Result<(), SessionError> {
     if index.format_version != FORMAT_VERSION {
         return invalid(format!(
             "unsupported publication-session format {}; expected {FORMAT_VERSION}",
@@ -324,7 +328,9 @@ fn validate_index(index: &SessionIndex, expected_revision: Option<&str>) -> Resu
     if index.repository_revision.trim().is_empty()
         || index.repository_revision.trim() != index.repository_revision
     {
-        return invalid("index repository_revision must be non-empty without surrounding whitespace");
+        return invalid(
+            "index repository_revision must be non-empty without surrounding whitespace",
+        );
     }
     if let Some(expected) = expected_revision {
         if index.repository_revision != expected {
@@ -400,7 +406,12 @@ fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, SessionError
 
 fn fresh_target(path: &Path) -> Result<PathBuf, SessionError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => return invalid(format!("session destination already exists: {}", path.display())),
+        Ok(_) => {
+            return invalid(format!(
+                "session destination already exists: {}",
+                path.display()
+            ))
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => return Err(io_error(path, source)),
     }
@@ -420,7 +431,9 @@ fn fresh_target(path: &Path) -> Result<PathBuf, SessionError> {
 
 fn reject_overlap(source: &Path, target: &Path) -> Result<(), SessionError> {
     if source == target || source.starts_with(target) || target.starts_with(source) {
-        return invalid("source archive and publication session must be distinct, non-nested paths");
+        return invalid(
+            "source archive and publication session must be distinct, non-nested paths",
+        );
     }
     Ok(())
 }
@@ -476,10 +489,16 @@ fn entry_names(path: &Path, label: &str) -> Result<BTreeSet<String>, SessionErro
 fn copy_new(source: &Path, target: &Path) -> Result<(), SessionError> {
     let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
     if !metadata.file_type().is_file() {
-        return invalid(format!("source entry {} is not a regular file", source.display()));
+        return invalid(format!(
+            "source entry {} is not a regular file",
+            source.display()
+        ));
     }
     if metadata.len() > MAX_FILE_BYTES {
-        return invalid(format!("source entry {} exceeds size limit", source.display()));
+        return invalid(format!(
+            "source entry {} exceeds size limit",
+            source.display()
+        ));
     }
 
     let source_file = File::open(source).map_err(|error| io_error(source, error))?;
@@ -490,13 +509,13 @@ fn copy_new(source: &Path, target: &Path) -> Result<(), SessionError> {
         .map_err(|error| io_error(target, error))?;
     let mut reader = BufReader::new(source_file);
     let mut writer = BufWriter::new(target_file);
-    let copied = io::copy(
-        &mut reader.by_ref().take(MAX_FILE_BYTES + 1),
-        &mut writer,
-    )
-    .map_err(|error| io_error(source, error))?;
+    let copied = io::copy(&mut reader.by_ref().take(MAX_FILE_BYTES + 1), &mut writer)
+        .map_err(|error| io_error(source, error))?;
     if copied > MAX_FILE_BYTES {
-        return invalid(format!("source entry {} grew beyond size limit", source.display()));
+        return invalid(format!(
+            "source entry {} grew beyond size limit",
+            source.display()
+        ));
     }
     writer.flush().map_err(|error| io_error(target, error))?;
     writer
@@ -521,8 +540,12 @@ fn compare_directories(source: &Path, copy: &Path) -> Result<(), SessionError> {
 fn compare_files(source: &Path, copy: &Path, label: &str) -> Result<(), SessionError> {
     let source_file = File::open(source).map_err(|error| io_error(source, error))?;
     let copy_file = File::open(copy).map_err(|error| io_error(copy, error))?;
-    let source_metadata = source_file.metadata().map_err(|error| io_error(source, error))?;
-    let copy_metadata = copy_file.metadata().map_err(|error| io_error(copy, error))?;
+    let source_metadata = source_file
+        .metadata()
+        .map_err(|error| io_error(source, error))?;
+    let copy_metadata = copy_file
+        .metadata()
+        .map_err(|error| io_error(copy, error))?;
     if !source_metadata.is_file()
         || !copy_metadata.is_file()
         || source_metadata.len() != copy_metadata.len()
@@ -577,7 +600,9 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), SessionErro
         path: path.to_path_buf(),
         source,
     })?;
-    writer.write_all(b"\n").map_err(|error| io_error(path, error))?;
+    writer
+        .write_all(b"\n")
+        .map_err(|error| io_error(path, error))?;
     writer.flush().map_err(|error| io_error(path, error))?;
     writer
         .get_ref()
