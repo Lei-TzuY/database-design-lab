@@ -1,13 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use db_cli::generation_compaction::compact_switch_generation_offline;
 use db_cli::generation_directory::{
     canonical_generation_name, canonical_marker_name, verify_generation_directory,
 };
 use db_cli::generation_engine::GenerationLogEngine;
 use db_cli::generation_marker::{encode_commit_marker, CommittedPrefix, Crc32Ieee};
-#[cfg(unix)]
-use db_cli::generation_compaction::compact_switch_generation_offline;
 #[cfg(unix)]
 use db_cli::generation_publication::publish_generation_marker;
 use db_core::{DbError, KvEngine};
@@ -42,7 +42,10 @@ fn routing_engine_drives_crud_and_reopen_through_verified_generation() {
     routed.put(b"new", b"value").expect("put new key");
     routed.reopen().expect("reopen routed engine");
     assert_eq!(routed.authoritative_generation(), 1);
-    assert_eq!(routed.get(b"a").expect("get overwritten a"), Some(b"two".to_vec()));
+    assert_eq!(
+        routed.get(b"a").expect("get overwritten a"),
+        Some(b"two".to_vec())
+    );
     assert_eq!(routed.get(b"remove").expect("get deleted key"), None);
     assert_eq!(
         routed.get(b"new").expect("get new key"),
@@ -81,7 +84,10 @@ fn routing_engine_never_rolls_back_after_observing_higher_authority() {
     assert!(matches!(routed.get(b"key"), Err(DbError::Poisoned)));
     routed.reopen().expect("reopen after restoring authority");
     assert_eq!(routed.authoritative_generation(), 2);
-    assert_eq!(routed.get(b"key").expect("get generation 2 value"), Some(b"new".to_vec()));
+    assert_eq!(
+        routed.get(b"key").expect("get generation 2 value"),
+        Some(b"new".to_vec())
+    );
 }
 
 #[test]
@@ -127,8 +133,13 @@ fn existing_routing_handle_adopts_generation_published_by_offline_switch() {
     let switched = compact_switch_generation_offline(&directory).expect("offline compact switch");
     assert_eq!(switched.old_generation, 1);
     assert_eq!(switched.new_generation, 2);
-    assert_eq!(routed.authoritative_generation(), 1, "handle refresh is lazy");
-    let old_after_switch = fs::read(generation_path(&directory, 1)).expect("snapshot old generation");
+    assert_eq!(
+        routed.authoritative_generation(),
+        1,
+        "handle refresh is lazy"
+    );
+    let old_after_switch =
+        fs::read(generation_path(&directory, 1)).expect("snapshot old generation");
 
     routed
         .put(b"after-switch", b"new-authority")
@@ -139,13 +150,18 @@ fn existing_routing_handle_adopts_generation_published_by_offline_switch() {
         old_after_switch,
         "post-switch routed mutation must not append to the stale generation handle"
     );
-    let mut generation2 = LogEngine::open(generation_path(&directory, 2)).expect("open generation 2");
+    let mut generation2 =
+        LogEngine::open(generation_path(&directory, 2)).expect("open generation 2");
     assert_eq!(
-        generation2.get(b"after-switch").expect("get post-switch value"),
+        generation2
+            .get(b"after-switch")
+            .expect("get post-switch value"),
         Some(b"new-authority".to_vec())
     );
     assert_eq!(
-        generation2.get(b"before-switch").expect("get compacted value"),
+        generation2
+            .get(b"before-switch")
+            .expect("get compacted value"),
         Some(b"durable".to_vec())
     );
     let verified = verify_generation_directory(&directory).expect("verify final authority");
