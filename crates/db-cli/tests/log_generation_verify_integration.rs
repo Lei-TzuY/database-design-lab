@@ -25,9 +25,18 @@ fn verifier_selects_highest_commit_and_ignores_higher_uncommitted_orphans() {
     );
     write_marker(directory.path(), 2, 2);
 
+    fs::remove_file(generation_path(directory.path(), 1)).expect("remove lower generation log");
+    let lower_marker = marker_path(directory.path(), 1);
+    let mut lower_marker_bytes = fs::read(&lower_marker).expect("read lower marker");
+    lower_marker_bytes[0] ^= 0x80;
+    fs::write(&lower_marker, lower_marker_bytes).expect("damage lower marker");
+
     create_generation(directory.path(), 3, &[(b"orphan", b"complete")]);
-    fs::write(generation_path(directory.path(), 4), b"incomplete-or-corrupt-orphan")
-        .expect("write corrupt uncommitted orphan");
+    fs::write(
+        generation_path(directory.path(), 4),
+        b"incomplete-or-corrupt-orphan",
+    )
+    .expect("write corrupt uncommitted orphan");
 
     let output = run_verify(directory.path());
     assert_success("verify generation directory", &output);
