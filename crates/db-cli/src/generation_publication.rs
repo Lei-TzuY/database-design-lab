@@ -50,6 +50,17 @@ pub enum GenerationPublicationError {
     UnsupportedPlatform,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenerationPublicationStage {
+    AfterGenerationSync,
+    AfterGenerationDirectorySync,
+    AfterStagingMarkerSync,
+    AfterFinalMarkerLink,
+    AfterFinalDirectorySync,
+    AfterPublishedEvidenceVerification,
+}
+
 /// Durably publishes a marker that makes an existing clean generation authoritative.
 ///
 /// Unix hosts use the repository's marker-v2 durability protocol. Other platforms fail before
@@ -61,7 +72,7 @@ pub fn publish_generation_marker(
 ) -> Result<GenerationPublicationSummary, GenerationPublicationError> {
     #[cfg(unix)]
     {
-        unix::publish_generation_marker(directory, generation)
+        publish_generation_marker_with_hook(directory, generation, |_| Ok(()))
     }
 
     #[cfg(not(unix))]
@@ -69,6 +80,18 @@ pub fn publish_generation_marker(
         let _ = (directory, generation);
         Err(GenerationPublicationError::UnsupportedPlatform)
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn publish_generation_marker_with_hook<F>(
+    directory: &Path,
+    generation: u64,
+    hook: F,
+) -> Result<GenerationPublicationSummary, GenerationPublicationError>
+where
+    F: FnMut(GenerationPublicationStage) -> Result<(), GenerationPublicationError>,
+{
+    unix::publish_generation_marker(directory, generation, hook)
 }
 
 #[cfg(unix)]
@@ -92,10 +115,14 @@ mod unix {
 
     const CRC_BUFFER_BYTES: usize = 64 * 1024;
 
-    pub(super) fn publish_generation_marker(
+    pub(super) fn publish_generation_marker<F>(
         directory: &Path,
         generation: u64,
-    ) -> Result<GenerationPublicationSummary, GenerationPublicationError> {
+        mut hook: F,
+    ) -> Result<GenerationPublicationSummary, GenerationPublicationError>
+    where
+        F: FnMut(GenerationPublicationStage) -> Result<(), GenerationPublicationError>,
+    {
         if generation == 0 {
             return invalid("generation id must be greater than zero");
         }
@@ -125,17 +152,21 @@ mod unix {
         }
 
         sync_regular_file(&log_path)?;
+        hook(GenerationPublicationStage::AfterGenerationSync)?;
         sync_directory(&directory).map_err(|source| io_error(&directory, source))?;
+        hook(GenerationPublicationStage::AfterGenerationDirectorySync)?;
         require_exact_clean_generation(&log_path, &baseline, committed_prefix)?;
 
         let encoded = encode_commit_marker(generation, committed_prefix).map_err(|error| {
             GenerationPublicationError::Invalid(format!("cannot encode commit marker: {error}"))
         })?;
         write_synced_staging(&staging_path, &encoded)?;
+        hook(GenerationPublicationStage::AfterStagingMarkerSync)?;
 
         require_exact_clean_generation(&log_path, &baseline, committed_prefix)?;
         fs::hard_link(&staging_path, &marker_path)
             .map_err(|source| io_error(&marker_path, source))?;
+        hook(GenerationPublicationStage::AfterFinalMarkerLink)?;
 
         if let Err(source) = sync_directory(&directory) {
             return Err(GenerationPublicationError::DurabilityUncertain {
@@ -143,9 +174,11 @@ mod unix {
                 source,
             });
         }
+        hook(GenerationPublicationStage::AfterFinalDirectorySync)?;
 
         verify_published_marker(&marker_path, generation, committed_prefix)?;
         let _ = verify_committed_prefix(&log_path, committed_prefix)?;
+        hook(GenerationPublicationStage::AfterPublishedEvidenceVerification)?;
 
         let staging_retained = match fs::remove_file(&staging_path) {
             Ok(()) => false,
