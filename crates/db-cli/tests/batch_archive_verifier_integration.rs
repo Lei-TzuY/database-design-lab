@@ -74,8 +74,7 @@ fn real_batch_archive_verifies_analyzes_bundles_and_tampering_fails_closed() {
         2
     );
     assert_eq!(
-        analysis["primary_complete_pairs"]["combined"]["right"]["reopen"]["duration_ns"]
-            ["samples"],
+        analysis["primary_complete_pairs"]["combined"]["right"]["reopen"]["duration_ns"]["samples"],
         2
     );
     assert_eq!(
@@ -117,7 +116,10 @@ fn real_batch_archive_verifies_analyzes_bundles_and_tampering_fails_closed() {
     .expect("decode bundled analysis");
     assert_eq!(bundled_analysis, analysis);
     let bundled_evidence_verified = run_verifier(&bundle_dir.join("evidence"));
-    assert_success("db-lab-batch-verify bundled evidence", &bundled_evidence_verified);
+    assert_success(
+        "db-lab-batch-verify bundled evidence",
+        &bundled_evidence_verified,
+    );
 
     let duplicate_bundle = run_bundle_create(&archive_dir, &bundle_dir);
     assert_failure_contains(
