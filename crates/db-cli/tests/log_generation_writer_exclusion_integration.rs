@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Command;
 
 #[cfg(unix)]
 use db_cli::generation_compaction::{
@@ -78,6 +80,32 @@ fn stale_writer_lock_fails_closed_without_being_stolen() {
         b"stale-lock-evidence",
         "routed open must not steal or rewrite a stale lock"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_publisher_cli_cannot_cross_an_existing_writer_lease() {
+    let root = tempdir().expect("temporary root");
+    let directory = root.path().join("generations");
+    fs::create_dir(&directory).expect("create generation directory");
+    create_generation(&directory, 1, &[(b"key", b"value")]);
+
+    let lease = acquire_generation_writer_lease(&directory).expect("hold writer lease");
+    let output = Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-publish"))
+        .arg("--directory")
+        .arg(&directory)
+        .arg("--generation")
+        .arg("1")
+        .output()
+        .expect("run publisher CLI");
+    assert!(!output.status.success(), "publisher unexpectedly crossed lease");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("writer lock is already held or stale"),
+        "unexpected publisher stderr: {stderr}"
+    );
+    assert!(!marker_path(&directory, 1).exists());
+    drop(lease);
 }
 
 #[cfg(unix)]
