@@ -248,9 +248,7 @@ pub fn parse_canonical_generation_name(
     parse_canonical_id(name, GENERATION_PREFIX, GENERATION_SUFFIX, "generation log")
 }
 
-pub fn parse_canonical_commit_name(
-    name: &str,
-) -> Result<Option<u64>, GenerationDirectoryError> {
+pub fn parse_canonical_commit_name(name: &str) -> Result<Option<u64>, GenerationDirectoryError> {
     parse_canonical_id(name, COMMIT_PREFIX, COMMIT_SUFFIX, "commit marker")
 }
 
@@ -288,10 +286,7 @@ pub fn canonical_real_directory(path: &Path) -> Result<PathBuf, GenerationDirect
     fs::canonicalize(path).map_err(|source| io_error(path, source))
 }
 
-pub fn require_real_regular_file(
-    path: &Path,
-    label: &str,
-) -> Result<(), GenerationDirectoryError> {
+pub fn require_real_regular_file(path: &Path, label: &str) -> Result<(), GenerationDirectoryError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
     if !metadata.file_type().is_file() {
         return invalid(format!(
@@ -353,8 +348,9 @@ fn read_commit_marker(
     let mut bytes = [0_u8; COMMIT_MARKER_LEN];
     file.read_exact(&mut bytes)
         .map_err(|source| io_error(path, source))?;
-    decode_commit_marker(&bytes, filename_generation)
-        .map_err(|error| GenerationDirectoryError::Invalid(format!("highest commit marker {error}")))
+    decode_commit_marker(&bytes, filename_generation).map_err(|error| {
+        GenerationDirectoryError::Invalid(format!("highest commit marker {error}"))
+    })
 }
 
 fn io_error(path: &Path, source: io::Error) -> GenerationDirectoryError {
