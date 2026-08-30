@@ -2,15 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use db_cli::generation_marker::encode_commit_marker;
 use db_core::KvEngine;
 use db_storage_log::LogEngine;
 use serde_json::Value;
 use tempfile::tempdir;
-
-const COMMIT_MARKER_MAGIC: [u8; 8] = *b"DBLGCMT\0";
-const COMMIT_MARKER_VERSION: u16 = 1;
-const COMMIT_MARKER_LEN: usize = 32;
-const APPEND_LOG_FORMAT_VERSION: u16 = 1;
 
 #[test]
 fn verifier_selects_highest_commit_and_ignores_higher_uncommitted_orphans() {
@@ -18,11 +14,7 @@ fn verifier_selects_highest_commit_and_ignores_higher_uncommitted_orphans() {
     create_generation(directory.path(), 1, &[(b"a", b"old")]);
     write_marker(directory.path(), 1, 1);
 
-    create_generation(
-        directory.path(),
-        2,
-        &[(b"a", b"new"), (b"b", b"three")],
-    );
+    create_generation(directory.path(), 2, &[(b"a", b"new"), (b"b", b"three")]);
     write_marker(directory.path(), 2, 2);
 
     fs::remove_file(generation_path(directory.path(), 1)).expect("remove lower generation log");
@@ -93,11 +85,7 @@ fn missing_highest_committed_log_never_falls_back() {
 #[test]
 fn verifier_reports_recoverable_authoritative_tail_without_repairing_it() {
     let directory = tempdir().expect("temporary directory");
-    create_generation(
-        directory.path(),
-        1,
-        &[(b"a", b"one"), (b"b", b"two")],
-    );
+    create_generation(directory.path(), 1, &[(b"a", b"one"), (b"b", b"two")]);
     write_marker(directory.path(), 1, 1);
     let log = generation_path(directory.path(), 1);
     let length = fs::metadata(&log).expect("log metadata").len();
@@ -132,21 +120,25 @@ fn marker_generation_must_match_filename_and_namespace_is_strict() {
 
     fs::remove_file(marker_path(directory.path(), 1)).expect("remove mismatched marker");
     write_marker(directory.path(), 1, 1);
-    fs::write(directory.path().join("README.txt"), b"unexpected")
-        .expect("write unexpected entry");
+    fs::write(directory.path().join("README.txt"), b"unexpected").expect("write unexpected entry");
     let unexpected = run_verify(directory.path());
     assert_failure_contains(&unexpected, "unexpected generation directory entry");
 }
 
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine = LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine =
+        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }
 }
 
 fn write_marker(directory: &Path, filename_id: u64, encoded_id: u64) {
-    fs::write(marker_path(directory, filename_id), encode_marker(encoded_id)).expect("write marker");
+    fs::write(
+        marker_path(directory, filename_id),
+        encode_commit_marker(encoded_id).expect("encode marker"),
+    )
+    .expect("write marker");
 }
 
 fn generation_path(directory: &Path, id: u64) -> PathBuf {
@@ -155,20 +147,6 @@ fn generation_path(directory: &Path, id: u64) -> PathBuf {
 
 fn marker_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("commit-{id:020}.marker"))
-}
-
-fn encode_marker(generation_id: u64) -> [u8; COMMIT_MARKER_LEN] {
-    let mut bytes = [0_u8; COMMIT_MARKER_LEN];
-    bytes[..8].copy_from_slice(&COMMIT_MARKER_MAGIC);
-    bytes[8..10].copy_from_slice(&COMMIT_MARKER_VERSION.to_le_bytes());
-    bytes[10..12].copy_from_slice(&(COMMIT_MARKER_LEN as u16).to_le_bytes());
-    bytes[12..20].copy_from_slice(&generation_id.to_le_bytes());
-    bytes[20..22].copy_from_slice(&APPEND_LOG_FORMAT_VERSION.to_le_bytes());
-    bytes[22..24].copy_from_slice(&0_u16.to_le_bytes());
-    bytes[24..28].copy_from_slice(&0_u32.to_le_bytes());
-    let checksum = crc32fast::hash(&bytes[..28]);
-    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
-    bytes
 }
 
 fn run_verify(directory: &Path) -> Output {
