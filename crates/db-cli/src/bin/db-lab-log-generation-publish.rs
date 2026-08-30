@@ -141,7 +141,9 @@ mod unix {
         let committed_prefix = derive_prefix_proof(&log_path, &baseline)?;
         let prefix_verification = verify_committed_prefix(&log_path, committed_prefix)?;
         if prefix_verification != baseline {
-            return invalid("derived committed-prefix verification disagrees with clean generation");
+            return invalid(
+                "derived committed-prefix verification disagrees with clean generation",
+            );
         }
 
         // The generation bytes and their directory entry must precede commit-marker authority.
@@ -149,13 +151,15 @@ mod unix {
         sync_directory(&directory).map_err(|source| io_error(&directory, source))?;
         require_exact_clean_generation(&log_path, &baseline, committed_prefix)?;
 
-        let encoded = encode_commit_marker(args.generation, committed_prefix)
-            .map_err(|error| PublishError::Invalid(format!("cannot encode commit marker: {error}")))?;
+        let encoded = encode_commit_marker(args.generation, committed_prefix).map_err(|error| {
+            PublishError::Invalid(format!("cannot encode commit marker: {error}"))
+        })?;
         write_synced_staging(&staging_path, &encoded)?;
 
         // Re-check after staging I/O so a caller-serialization violation cannot publish stale proof.
         require_exact_clean_generation(&log_path, &baseline, committed_prefix)?;
-        fs::hard_link(&staging_path, &marker_path).map_err(|source| io_error(&marker_path, source))?;
+        fs::hard_link(&staging_path, &marker_path)
+            .map_err(|source| io_error(&marker_path, source))?;
 
         if let Err(source) = sync_directory(&directory) {
             return Err(PublishError::DurabilityUncertain {
@@ -209,7 +213,9 @@ mod unix {
         }
 
         let mut extra = [0_u8; 1];
-        let trailing = file.read(&mut extra).map_err(|source| io_error(path, source))?;
+        let trailing = file
+            .read(&mut extra)
+            .map_err(|source| io_error(path, source))?;
         if trailing != 0 {
             return invalid("generation changed while its committed-prefix checksum was derived");
         }
@@ -245,7 +251,10 @@ mod unix {
         Ok(())
     }
 
-    fn write_synced_staging(path: &Path, encoded: &[u8; COMMIT_MARKER_LEN]) -> Result<(), PublishError> {
+    fn write_synced_staging(
+        path: &Path,
+        encoded: &[u8; COMMIT_MARKER_LEN],
+    ) -> Result<(), PublishError> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
