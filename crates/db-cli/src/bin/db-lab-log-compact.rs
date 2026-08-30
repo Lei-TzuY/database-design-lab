@@ -194,9 +194,8 @@ fn validate_compacted_state(
     }
     if compacted.verification.live_keys != source.verification.live_keys
         || compacted.verification.record_count
-            != u64::try_from(source.entries.len()).map_err(|_| {
-                CompactError::Invalid("live-key count does not fit u64".to_owned())
-            })?
+            != u64::try_from(source.entries.len())
+                .map_err(|_| CompactError::Invalid("live-key count does not fit u64".to_owned()))?
         || compacted.entries != source.entries
     {
         return invalid("compaction staging does not exactly reproduce the source live state");
