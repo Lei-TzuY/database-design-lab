@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use std::fs;
-use std::io;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -8,10 +8,12 @@ use clap::Parser;
 use db_cli::batch_archive::{verify_batch_archive, VerificationSummary, VerifyError};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use tempfile::TempDir;
 use thiserror::Error;
 
 const MAX_ANALYSIS_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const ANALYSIS_PROTOCOL: &str = "verified_operational_timing_descriptive_v1";
+const SNAPSHOT_PROTOCOL: &str = "copy_verify_compare_v1";
 const ESTIMATOR: &str = "empirical_nearest_rank_p50_p95_v1";
 const INTERPRETATION_BOUNDARY: &str =
     "descriptive_only; performance claims require externally controlled pinned-host review";
@@ -37,6 +39,7 @@ struct Cli {
 #[derive(Debug, Serialize)]
 struct AnalysisReport {
     analysis_protocol: &'static str,
+    snapshot_protocol: &'static str,
     estimator: &'static str,
     interpretation_boundary: &'static str,
     verification: VerificationSummary,
@@ -144,6 +147,16 @@ enum AnalyzeError {
     Invalid(String),
 }
 
+struct ArchiveSnapshot {
+    directory: TempDir,
+}
+
+impl ArchiveSnapshot {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
 fn main() -> ExitCode {
     let args = Cli::parse();
     match analyze(&args) {
@@ -165,15 +178,30 @@ fn main() -> ExitCode {
 }
 
 fn analyze(args: &Cli) -> Result<AnalysisReport, AnalyzeError> {
-    let verification = verify_batch_archive(
+    require_regular_directory(&args.archive_dir, "source archive")?;
+    let source_verification = verify_batch_archive(
         &args.archive_dir,
         args.expected_revision.as_deref(),
         args.require_publication,
     )?;
 
-    let batch = read_json(&args.archive_dir, "batch.json")?;
+    let snapshot = snapshot_archive(&args.archive_dir)?;
+    let snapshot_dir = snapshot.path();
+    let verification = verify_batch_archive(
+        snapshot_dir,
+        args.expected_revision.as_deref(),
+        args.require_publication,
+    )?;
+    if verification != source_verification {
+        return Err(AnalyzeError::Invalid(
+            "source archive changed while the verified analysis snapshot was being created"
+                .to_owned(),
+        ));
+    }
+
+    let batch = read_json(snapshot_dir, "batch.json")?;
     let sidecars = if matches!(verification.format_version, 10 | 11) {
-        Some(read_json(&args.archive_dir, "comparison-failures.json")?)
+        Some(read_json(snapshot_dir, "comparison-failures.json")?)
     } else {
         None
     };
@@ -194,19 +222,30 @@ fn analyze(args: &Cli) -> Result<AnalysisReport, AnalyzeError> {
     }
 
     let verification_after = verify_batch_archive(
-        &args.archive_dir,
+        snapshot_dir,
         args.expected_revision.as_deref(),
         args.require_publication,
     )?;
     if verification_after != verification {
         return Err(AnalyzeError::Invalid(
-            "archive verification summary changed while analysis snapshot was being read"
-                .to_owned(),
+            "verified analysis snapshot changed while it was being read".to_owned(),
         ));
     }
+    let source_verification_after = verify_batch_archive(
+        &args.archive_dir,
+        args.expected_revision.as_deref(),
+        args.require_publication,
+    )?;
+    if source_verification_after != source_verification {
+        return Err(AnalyzeError::Invalid(
+            "source archive verification summary changed during analysis".to_owned(),
+        ));
+    }
+    verify_source_matches_snapshot(&args.archive_dir, snapshot_dir)?;
 
     Ok(AnalysisReport {
         analysis_protocol: ANALYSIS_PROTOCOL,
+        snapshot_protocol: SNAPSHOT_PROTOCOL,
         estimator: ESTIMATOR,
         interpretation_boundary: INTERPRETATION_BOUNDARY,
         verification,
@@ -600,6 +639,185 @@ fn nearest_rank_index(samples: usize, percentile: u8) -> usize {
     usize::try_from(rank.saturating_sub(1)).unwrap_or(samples - 1)
 }
 
+fn snapshot_archive(source_dir: &Path) -> Result<ArchiveSnapshot, AnalyzeError> {
+    require_regular_directory(source_dir, "source archive")?;
+    let directory = tempfile::tempdir().map_err(|source| AnalyzeError::Io {
+        path: std::env::temp_dir(),
+        source,
+    })?;
+    let entries = directory_entry_names(source_dir, "source archive")?;
+    for name in entries {
+        let source_path = source_dir.join(&name);
+        let target_path = directory.path().join(&name);
+        copy_bounded_regular_file(&source_path, &target_path)?;
+    }
+    Ok(ArchiveSnapshot { directory })
+}
+
+fn verify_source_matches_snapshot(
+    source_dir: &Path,
+    snapshot_dir: &Path,
+) -> Result<(), AnalyzeError> {
+    require_regular_directory(source_dir, "source archive")?;
+    require_regular_directory(snapshot_dir, "analysis snapshot")?;
+    let source_entries = directory_entry_names(source_dir, "source archive")?;
+    let snapshot_entries = directory_entry_names(snapshot_dir, "analysis snapshot")?;
+    if source_entries != snapshot_entries {
+        return Err(AnalyzeError::Invalid(format!(
+            "source archive directory entries changed during analysis: source {source_entries:?}, snapshot {snapshot_entries:?}"
+        )));
+    }
+    for name in source_entries {
+        compare_regular_files(&source_dir.join(&name), &snapshot_dir.join(&name), &name)?;
+    }
+    Ok(())
+}
+
+fn require_regular_directory(path: &Path, label: &str) -> Result<(), AnalyzeError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| AnalyzeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(AnalyzeError::Invalid(format!(
+            "{label} must be a real directory rather than a symlink or non-directory"
+        )));
+    }
+    Ok(())
+}
+
+fn directory_entry_names(path: &Path, label: &str) -> Result<BTreeSet<String>, AnalyzeError> {
+    let read_dir = fs::read_dir(path).map_err(|source| AnalyzeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut names = BTreeSet::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|source| AnalyzeError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            AnalyzeError::Invalid(format!("{label} contains a non-UTF-8 entry name"))
+        })?;
+        names.insert(name);
+    }
+    Ok(names)
+}
+
+fn copy_bounded_regular_file(source_path: &Path, target_path: &Path) -> Result<(), AnalyzeError> {
+    let source_file = File::open(source_path).map_err(|source| AnalyzeError::Io {
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    let metadata = source_file.metadata().map_err(|source| AnalyzeError::Io {
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(AnalyzeError::Invalid(format!(
+            "source archive entry {} is not a regular file",
+            source_path.display()
+        )));
+    }
+    if metadata.len() > MAX_ANALYSIS_JSON_BYTES {
+        return Err(AnalyzeError::Invalid(format!(
+            "source archive entry {} has {} bytes; maximum snapshot file size is {MAX_ANALYSIS_JSON_BYTES}",
+            source_path.display(),
+            metadata.len()
+        )));
+    }
+
+    let target_file = File::create(target_path).map_err(|source| AnalyzeError::Io {
+        path: target_path.to_path_buf(),
+        source,
+    })?;
+    let mut reader = BufReader::new(source_file);
+    let mut writer = BufWriter::new(target_file);
+    io::copy(&mut reader, &mut writer).map_err(|source| AnalyzeError::Io {
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    writer.flush().map_err(|source| AnalyzeError::Io {
+        path: target_path.to_path_buf(),
+        source,
+    })?;
+    writer
+        .get_ref()
+        .sync_all()
+        .map_err(|source| AnalyzeError::Io {
+            path: target_path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
+fn compare_regular_files(
+    source_path: &Path,
+    snapshot_path: &Path,
+    name: &str,
+) -> Result<(), AnalyzeError> {
+    let source_file = File::open(source_path).map_err(|source| AnalyzeError::Io {
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    let snapshot_file = File::open(snapshot_path).map_err(|source| AnalyzeError::Io {
+        path: snapshot_path.to_path_buf(),
+        source,
+    })?;
+    let source_metadata = source_file.metadata().map_err(|source| AnalyzeError::Io {
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    let snapshot_metadata = snapshot_file
+        .metadata()
+        .map_err(|source| AnalyzeError::Io {
+            path: snapshot_path.to_path_buf(),
+            source,
+        })?;
+    if !source_metadata.is_file() || !snapshot_metadata.is_file() {
+        return Err(AnalyzeError::Invalid(format!(
+            "archive entry {name:?} ceased to be a regular file during analysis"
+        )));
+    }
+    if source_metadata.len() != snapshot_metadata.len() {
+        return Err(AnalyzeError::Invalid(format!(
+            "source archive entry {name:?} changed size during analysis"
+        )));
+    }
+
+    let mut source_reader = BufReader::new(source_file);
+    let mut snapshot_reader = BufReader::new(snapshot_file);
+    let mut source_buffer = [0_u8; 64 * 1024];
+    let mut snapshot_buffer = [0_u8; 64 * 1024];
+    loop {
+        let source_read =
+            source_reader
+                .read(&mut source_buffer)
+                .map_err(|source| AnalyzeError::Io {
+                    path: source_path.to_path_buf(),
+                    source,
+                })?;
+        let snapshot_read = snapshot_reader
+            .read(&mut snapshot_buffer)
+            .map_err(|source| AnalyzeError::Io {
+                path: snapshot_path.to_path_buf(),
+                source,
+            })?;
+        if source_read != snapshot_read
+            || source_buffer[..source_read] != snapshot_buffer[..snapshot_read]
+        {
+            return Err(AnalyzeError::Invalid(format!(
+                "source archive entry {name:?} changed content during analysis"
+            )));
+        }
+        if source_read == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn read_json(archive_dir: &Path, name: &str) -> Result<Value, AnalyzeError> {
     let path = archive_dir.join(name);
     let metadata = fs::symlink_metadata(&path).map_err(|source| AnalyzeError::Io {
@@ -684,7 +902,10 @@ mod tests {
     use serde_json::{json, Value};
     use tempfile::tempdir;
 
-    use super::{analyze, summarize_distribution, Cli, DistributionSummary};
+    use super::{
+        analyze, snapshot_archive, summarize_distribution, verify_source_matches_snapshot, Cli,
+        DistributionSummary, SNAPSHOT_PROTOCOL,
+    };
 
     const FAILURE_PROTOCOL_V2: &str = "ordered_comparison_failure_sidecar_v2";
 
@@ -708,6 +929,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         write_complete_v6(directory.path());
         let report = analyze(&args(directory.path())).expect("analyze complete v6");
+        assert_eq!(report.snapshot_protocol, SNAPSHOT_PROTOCOL);
         assert_eq!(report.verification.included_pairs, 1);
         assert_eq!(
             report
@@ -791,6 +1013,35 @@ mod tests {
                 .duration_ns
                 .nearest_rank_p50_ns,
             Some(99)
+        );
+    }
+
+    #[test]
+    fn source_change_after_snapshot_is_detected_byte_for_byte() {
+        let directory = tempdir().expect("temporary directory");
+        write_complete_v6(directory.path());
+        let snapshot = snapshot_archive(directory.path()).expect("snapshot archive");
+        verify_source_matches_snapshot(directory.path(), snapshot.path())
+            .expect("unchanged source must match snapshot");
+
+        let batch_path = directory.path().join("batch.json");
+        let mut batch: Value = serde_json::from_slice(&fs::read(&batch_path).expect("read batch"))
+            .expect("parse batch");
+        batch["attempts"][0]["report"]["first"]["comparison"]["left"]["operational_timing"]
+            ["reopen_ns"][0] = json!(999);
+        batch["attempts"][0]["report"]["first"]["comparison"]["left"]["operational_timing"]
+            ["reopen_samples"][0]["duration_ns"] = json!(999);
+        fs::write(
+            &batch_path,
+            serde_json::to_vec_pretty(&batch).expect("encode changed batch"),
+        )
+        .expect("write changed batch");
+
+        assert!(
+            verify_source_matches_snapshot(directory.path(), snapshot.path())
+                .expect_err("timing-only mutation must be detected")
+                .to_string()
+                .contains("changed")
         );
     }
 
