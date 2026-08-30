@@ -200,7 +200,8 @@ fn analyze(args: &Cli) -> Result<AnalysisReport, AnalyzeError> {
     )?;
     if verification_after != verification {
         return Err(AnalyzeError::Invalid(
-            "archive verification summary changed while analysis snapshot was being read".to_owned(),
+            "archive verification summary changed while analysis snapshot was being read"
+                .to_owned(),
         ));
     }
 
@@ -356,16 +357,8 @@ struct FailureCollector {
 impl FailureCollector {
     fn add_ordered_failure(&mut self, ordered: &Value) -> Result<(), AnalyzeError> {
         let order = required_str(ordered, "execution_order", "ordered failure")?;
-        let left = required_field(
-            ordered,
-            "left_operational_timing",
-            "ordered failure",
-        )?;
-        let right = required_field(
-            ordered,
-            "right_operational_timing",
-            "ordered failure",
-        )?;
+        let left = required_field(ordered, "left_operational_timing", "ordered failure")?;
+        let right = required_field(ordered, "right_operational_timing", "ordered failure")?;
         self.combined.add(left, right)?;
         match order {
             "left_then_right" => self.left_then_right.add(left, right)?,
@@ -453,7 +446,10 @@ impl FailedOperationCollector {
     }
 }
 
-fn collect_complete_pairs(batch: &Value, collector: &mut SuccessCollector) -> Result<(), AnalyzeError> {
+fn collect_complete_pairs(
+    batch: &Value,
+    collector: &mut SuccessCollector,
+) -> Result<(), AnalyzeError> {
     let attempts = required_array(batch, "attempts", "batch.json")?;
     for attempt in attempts {
         if required_str(attempt, "disposition", "batch attempt")? != "included" {
@@ -525,7 +521,8 @@ fn collect_success_operation(
             )));
         }
         if required_field(sample, "measured_step_index", "successful timing sample")?.is_null() {
-            collector.measured_step_index_missing = collector.measured_step_index_missing.saturating_add(1);
+            collector.measured_step_index_missing =
+                collector.measured_step_index_missing.saturating_add(1);
         }
         let work = required_field(sample, "work", "successful timing sample")?;
         collect_work_unit(work, &mut collector.work_units)?;
@@ -553,7 +550,8 @@ fn collect_failed_operation(
         let class = required_str(sample, "error_class", "failed timing sample")?;
         *collector.error_classes.entry(class.to_owned()).or_default() += 1;
         if required_field(sample, "measured_step_index", "failed timing sample")?.is_null() {
-            collector.measured_step_index_missing = collector.measured_step_index_missing.saturating_add(1);
+            collector.measured_step_index_missing =
+                collector.measured_step_index_missing.saturating_add(1);
         }
         let work = required_field(sample, "work", "failed timing sample")?;
         if work.is_null() {
@@ -626,7 +624,10 @@ fn read_json(archive_dir: &Path, name: &str) -> Result<Value, AnalyzeError> {
     serde_json::from_slice(&encoded).map_err(|source| AnalyzeError::Json { path, source })
 }
 
-fn required_object<'a>(value: &'a Value, label: &str) -> Result<&'a Map<String, Value>, AnalyzeError> {
+fn required_object<'a>(
+    value: &'a Value,
+    label: &str,
+) -> Result<&'a Map<String, Value>, AnalyzeError> {
     value
         .as_object()
         .ok_or_else(|| AnalyzeError::Invalid(format!("{label} must be a JSON object")))
@@ -637,9 +638,9 @@ fn required_field<'a>(
     field: &str,
     label: &str,
 ) -> Result<&'a Value, AnalyzeError> {
-    required_object(value, label)?
-        .get(field)
-        .ok_or_else(|| AnalyzeError::Invalid(format!("{label} is missing required field {field:?}")))
+    required_object(value, label)?.get(field).ok_or_else(|| {
+        AnalyzeError::Invalid(format!("{label} is missing required field {field:?}"))
+    })
 }
 
 fn optional_field<'a>(
@@ -669,7 +670,9 @@ fn required_str<'a>(value: &'a Value, field: &str, label: &str) -> Result<&'a st
 fn required_u64(value: &Value, field: &str, label: &str) -> Result<u64, AnalyzeError> {
     required_field(value, field, label)?
         .as_u64()
-        .ok_or_else(|| AnalyzeError::Invalid(format!("{label} {field} must be an unsigned integer")))
+        .ok_or_else(|| {
+            AnalyzeError::Invalid(format!("{label} {field} must be an unsigned integer"))
+        })
 }
 
 #[cfg(test)]
@@ -885,7 +888,11 @@ mod tests {
 
     fn timing(reopen: u64, compaction: u64) -> Value {
         let reopen_ns = if reopen == 0 { vec![] } else { vec![reopen] };
-        let compaction_ns = if compaction == 0 { vec![] } else { vec![compaction] };
+        let compaction_ns = if compaction == 0 {
+            vec![]
+        } else {
+            vec![compaction]
+        };
         let reopen_samples = if reopen == 0 {
             json!([])
         } else {
