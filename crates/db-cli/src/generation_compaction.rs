@@ -1,0 +1,225 @@
+use std::io;
+use std::path::{Path, PathBuf};
+
+use db_core::DbError;
+use db_storage_log::{InspectionReport, LogEngine};
+use serde::Serialize;
+use thiserror::Error;
+
+use crate::generation_directory::{
+    canonical_generation_name, verify_generation_directory, GenerationDirectoryError,
+    GenerationVerificationSummary,
+};
+use crate::generation_publication::{
+    publish_generation_marker, GenerationPublicationError, GenerationPublicationSummary,
+};
+use crate::log_compaction::{
+    compact_log_to_fresh_file, LogCompactionError, LogCompactionReport,
+};
+
+pub const OFFLINE_GENERATION_COMPACT_SWITCH_PROTOCOL: &str =
+    "append_log_offline_generation_compact_switch_unix_v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OfflineGenerationCompactSwitchSummary {
+    pub protocol: &'static str,
+    pub old_generation: u64,
+    pub new_generation: u64,
+    pub old_generation_log: String,
+    pub new_generation_log: String,
+    pub compaction: LogCompactionReport,
+    pub publication: GenerationPublicationSummary,
+    pub final_generation: GenerationVerificationSummary,
+}
+
+#[derive(Debug, Error)]
+pub enum OfflineGenerationCompactSwitchError {
+    #[error("offline generation compact switch is unsupported on this platform; no artifact was written")]
+    UnsupportedPlatform,
+    #[error(transparent)]
+    Directory(#[from] GenerationDirectoryError),
+    #[error(transparent)]
+    Database(#[from] DbError),
+    #[error(transparent)]
+    Compaction(#[from] LogCompactionError),
+    #[error(transparent)]
+    Publication(#[from] GenerationPublicationError),
+    #[error("I/O error at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "authoritative source changed while offline compaction was in progress; generation {orphan_generation} remains uncommitted and must not be treated as authoritative"
+    )]
+    SourceChanged { orphan_generation: u64 },
+    #[error("new compact generation {generation} changed before marker publication")]
+    TargetChanged { generation: u64 },
+    #[error(
+        "post-publication verification selected generation {found}, expected newly committed generation {expected}"
+    )]
+    FinalAuthority { found: u64, expected: u64 },
+    #[error("new authoritative generation {generation} does not reproduce the pre-switch live state")]
+    FinalState { generation: u64 },
+}
+
+/// Offline-only authoritative compact switch for a generation directory.
+///
+/// The caller MUST quiesce every writer that can mutate files in `directory` for the entire call.
+/// This function detects source drift before marker publication, but it cannot stop an independent
+/// raw-path `LogEngine` from accepting a mutation in the final check-to-publication window. The
+/// repository does not yet provide a generation-directory writer lock/routing engine, so this API
+/// is intentionally named and documented as an offline operation.
+pub fn compact_switch_generation_offline(
+    directory: &Path,
+) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError> {
+    #[cfg(unix)]
+    {
+        compact_switch_generation_offline_impl(directory, |_| Ok(()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Err(OfflineGenerationCompactSwitchError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(unix)]
+fn compact_switch_generation_offline_impl<F>(
+    directory: &Path,
+    after_compaction: F,
+) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError>
+where
+    F: FnOnce(&Path) -> Result<(), OfflineGenerationCompactSwitchError>,
+{
+    let before = verify_generation_directory(directory)?;
+    let old_generation = before.summary().authoritative_generation;
+    let old_generation_log = before.summary().authoritative_log.clone();
+    let source_path = before.authoritative_log_path();
+    let source_state = LogEngine::inspect(&source_path, true)?;
+    let source_authority = SourceAuthorityWitness::from_summary(before.summary());
+    let new_generation = before.next_generation_id()?;
+    let new_generation_log = canonical_generation_name(new_generation);
+    let new_path = before.directory().join(&new_generation_log);
+
+    let compaction = compact_log_to_fresh_file(&source_path, &new_path)?;
+    after_compaction(&source_path)?;
+
+    let before_publication = verify_generation_directory(before.directory())?;
+    let current_authority = SourceAuthorityWitness::from_summary(before_publication.summary());
+    let current_source_state = LogEngine::inspect(&source_path, true)?;
+    if current_authority != source_authority || current_source_state != source_state {
+        return Err(OfflineGenerationCompactSwitchError::SourceChanged {
+            orphan_generation: new_generation,
+        });
+    }
+
+    let compact_state = LogEngine::inspect(&new_path, true)?;
+    validate_compact_state(new_generation, &source_state, &compact_state)?;
+
+    let publication = publish_generation_marker(before.directory(), new_generation)?;
+    let final_verified = verify_generation_directory(before.directory())?;
+    if final_verified.summary().authoritative_generation != new_generation {
+        return Err(OfflineGenerationCompactSwitchError::FinalAuthority {
+            found: final_verified.summary().authoritative_generation,
+            expected: new_generation,
+        });
+    }
+
+    let final_state = LogEngine::inspect(&new_path, true)?;
+    if final_state.entries != source_state.entries {
+        return Err(OfflineGenerationCompactSwitchError::FinalState {
+            generation: new_generation,
+        });
+    }
+
+    Ok(OfflineGenerationCompactSwitchSummary {
+        protocol: OFFLINE_GENERATION_COMPACT_SWITCH_PROTOCOL,
+        old_generation,
+        new_generation,
+        old_generation_log,
+        new_generation_log,
+        compaction,
+        publication,
+        final_generation: final_verified.summary().clone(),
+    })
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceAuthorityWitness {
+    authoritative_generation: u64,
+    committed_prefix: crate::generation_marker::CommittedPrefix,
+    log_verification: db_storage_log::VerificationReport,
+}
+
+#[cfg(unix)]
+impl SourceAuthorityWitness {
+    fn from_summary(summary: &GenerationVerificationSummary) -> Self {
+        Self {
+            authoritative_generation: summary.authoritative_generation,
+            committed_prefix: summary.committed_prefix,
+            log_verification: summary.log_verification.clone(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn validate_compact_state(
+    generation: u64,
+    source: &InspectionReport,
+    compacted: &InspectionReport,
+) -> Result<(), OfflineGenerationCompactSwitchError> {
+    if compacted.verification.recoverable_tail.is_some()
+        || compacted.verification.live_keys != source.verification.live_keys
+        || compacted.entries != source.entries
+    {
+        return Err(OfflineGenerationCompactSwitchError::TargetChanged { generation });
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+
+    use db_core::KvEngine;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::generation_directory::{canonical_marker_name, verify_generation_directory};
+    use crate::generation_publication::publish_generation_marker;
+
+    #[test]
+    fn source_drift_after_compaction_never_publishes_stale_generation() {
+        let root = tempdir().expect("temporary root");
+        let directory = root.path().join("generations");
+        fs::create_dir(&directory).expect("create generation directory");
+        let source = directory.join(canonical_generation_name(1));
+        {
+            let mut engine = LogEngine::create_new(&source).expect("create source generation");
+            engine.put(b"a", b"one").expect("put initial value");
+        }
+        publish_generation_marker(&directory, 1).expect("publish source generation");
+
+        let error = compact_switch_generation_offline_impl(&directory, |source_path| {
+            let mut engine = LogEngine::open(source_path).expect("open source for injected drift");
+            engine.put(b"late", b"write").expect("inject late write");
+            Ok(())
+        })
+        .expect_err("source drift must fail the switch");
+
+        assert!(matches!(
+            error,
+            OfflineGenerationCompactSwitchError::SourceChanged {
+                orphan_generation: 2
+            }
+        ));
+        assert!(directory.join(canonical_generation_name(2)).is_file());
+        assert!(!directory.join(canonical_marker_name(2)).exists());
+        let verified = verify_generation_directory(&directory).expect("verify old authority");
+        assert_eq!(verified.summary().authoritative_generation, 1);
+    }
+}
