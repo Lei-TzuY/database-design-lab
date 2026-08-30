@@ -148,7 +148,6 @@ fn verify_generation_directory(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CommitMarker {
-    generation_id: u64,
     log_format_version: u16,
 }
 
@@ -275,10 +274,7 @@ fn read_commit_marker(path: &Path, filename_generation: u64) -> Result<CommitMar
         return invalid(format!("unsupported commit marker flags {flags:#010x}"));
     }
 
-    Ok(CommitMarker {
-        generation_id,
-        log_format_version,
-    })
+    Ok(CommitMarker { log_format_version })
 }
 
 fn canonical_real_directory(path: &Path) -> Result<PathBuf, VerifyError> {
@@ -370,7 +366,6 @@ mod tests {
             .join("commit-00000000000000000042.marker");
         fs::write(&path, encode_marker(42)).expect("write marker");
         let decoded = read_commit_marker(&path, 42).expect("decode marker");
-        assert_eq!(decoded.generation_id, 42);
         assert_eq!(decoded.log_format_version, APPEND_LOG_FORMAT_VERSION);
 
         let mut corrupt = encode_marker(42);
