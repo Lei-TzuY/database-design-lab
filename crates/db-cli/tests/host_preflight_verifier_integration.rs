@@ -41,9 +41,8 @@ fn verifier_binary_accepts_valid_snapshot_and_rejects_tampering() {
     let mut failed = snapshot;
     failed["observation"]["process_allowed_cpus"] = json!([2, 3, 4]);
     failed["passed"] = Value::Bool(false);
-    failed["violations"] = json!([
-        "process CPU affinity is [2, 3, 4]; expected exactly [2, 3]"
-    ]);
+    failed["violations"] =
+        json!(["process CPU affinity is [2, 3, 4]; expected exactly [2, 3]"]);
     write_json(&snapshot_path, &failed);
 
     let auditable = run_verifier(&snapshot_path, false, None);
