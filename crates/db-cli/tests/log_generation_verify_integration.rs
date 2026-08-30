@@ -51,10 +51,7 @@ fn verifier_selects_highest_commit_and_ignores_higher_uncommitted_orphans() {
         summary["committed_prefix"]["record_count"],
         committed_prefix.record_count
     );
-    assert_eq!(
-        summary["committed_prefix_verification"]["record_count"],
-        2
-    );
+    assert_eq!(summary["committed_prefix_verification"]["record_count"], 2);
     assert!(summary["committed_prefix_verification"]["recoverable_tail"].is_null());
     assert_eq!(summary["log_verification"]["record_count"], 2);
     assert_eq!(summary["log_verification"]["live_keys"], 2);
@@ -103,8 +100,12 @@ fn marker_bound_base_allows_later_recoverable_append_without_repairing_it() {
 
     {
         let mut engine = LogEngine::open(&log).expect("open committed generation");
-        engine.put(b"b", b"two").expect("complete post-commit append");
-        engine.put(b"c", b"three").expect("final post-commit append");
+        engine
+            .put(b"b", b"two")
+            .expect("complete post-commit append");
+        engine
+            .put(b"c", b"three")
+            .expect("final post-commit append");
     }
     let length = fs::metadata(&log).expect("log metadata").len();
     fs::OpenOptions::new()
@@ -150,7 +151,8 @@ fn marker_that_binds_an_incomplete_compacted_prefix_fails_closed() {
         .expect("truncate compacted image");
 
     let truncated = fs::read(&log).expect("read truncated compacted image");
-    let report = LogEngine::verify(&log).expect("truncated final append is structurally reportable");
+    let report =
+        LogEngine::verify(&log).expect("truncated final append is structurally reportable");
     assert!(report.recoverable_tail.is_some());
     let false_proof = CommittedPrefix {
         bytes: truncated.len() as u64,
@@ -234,12 +236,7 @@ fn proof_for_current_clean_log(directory: &Path, id: u64) -> CommittedPrefix {
     }
 }
 
-fn write_marker(
-    directory: &Path,
-    filename_id: u64,
-    encoded_id: u64,
-    proof: CommittedPrefix,
-) {
+fn write_marker(directory: &Path, filename_id: u64, encoded_id: u64, proof: CommittedPrefix) {
     fs::write(
         marker_path(directory, filename_id),
         encode_commit_marker(encoded_id, proof).expect("encode marker"),
