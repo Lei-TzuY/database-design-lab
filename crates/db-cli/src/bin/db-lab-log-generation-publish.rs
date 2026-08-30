@@ -4,9 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 #[cfg(unix)]
 use db_cli::generation_lock::acquire_generation_writer_lease;
-use db_cli::generation_publication::{
-    publish_generation_marker, GenerationPublicationSummary,
-};
+use db_cli::generation_publication::{publish_generation_marker, GenerationPublicationSummary};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,7 +44,8 @@ fn main() -> ExitCode {
 
 #[cfg(unix)]
 fn run_publication(args: &Cli) -> Result<GenerationPublicationSummary, String> {
-    let lease = acquire_generation_writer_lease(&args.directory).map_err(|error| error.to_string())?;
+    let lease =
+        acquire_generation_writer_lease(&args.directory).map_err(|error| error.to_string())?;
     publish_generation_marker(lease.directory(), args.generation).map_err(|error| error.to_string())
 }
 
