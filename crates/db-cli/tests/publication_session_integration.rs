@@ -27,7 +27,10 @@ fn publication_session_binds_preflight_host_to_verified_v7_archive() {
     let summary: Value = serde_json::from_slice(&created.stdout).expect("decode create summary");
     assert_eq!(summary["valid"], true);
     assert_eq!(summary["session_format_version"], 1);
-    assert_eq!(summary["session_protocol"], "controlled_publication_session_v1");
+    assert_eq!(
+        summary["session_protocol"],
+        "controlled_publication_session_v1"
+    );
     assert_eq!(summary["host_label"], "perf-host-01");
     assert_eq!(summary["repository_revision"], "abc123");
     assert_eq!(summary["source_archive_format_version"], 7);
@@ -197,7 +200,10 @@ fn write_publication_archive(path: &Path, host_label: &str, revision: &str) {
         "files": ["trace.json", "batch.json", "environment.json"]
     });
 
-    write_json_file(&path.join("trace.json"), batch.get("trace").expect("batch trace"));
+    write_json_file(
+        &path.join("trace.json"),
+        batch.get("trace").expect("batch trace"),
+    );
     write_json_file(&path.join("batch.json"), &batch);
     write_json_file(&path.join("environment.json"), &environment);
     write_json_file(&path.join("index.json"), &index);
