@@ -158,7 +158,8 @@ mod tests {
         fs::create_dir(&directory).expect("create generation directory");
 
         let lease = acquire_generation_writer_lease(&directory).expect("acquire lease");
-        let namespace = scan_generation_namespace(lease.directory()).expect("scan retained namespace");
+        let namespace =
+            scan_generation_namespace(lease.directory()).expect("scan retained namespace");
         assert!(namespace.generation_files.is_empty());
         assert!(namespace.marker_files.is_empty());
         assert!(namespace.staging_marker_files.is_empty());
