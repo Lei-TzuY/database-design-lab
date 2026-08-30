@@ -268,10 +268,7 @@ mod unix {
         Ok(marker)
     }
 
-    fn require_absent(
-        path: &Path,
-        label: &str,
-    ) -> Result<(), GenerationPublicationError> {
+    fn require_absent(path: &Path, label: &str) -> Result<(), GenerationPublicationError> {
         match fs::symlink_metadata(path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Ok(_) => invalid(format!("{label} already exists: {}", path.display())),
