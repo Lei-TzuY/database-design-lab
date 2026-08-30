@@ -36,7 +36,8 @@ fn unix_publisher_commits_clean_generation_and_reader_ignores_staging_residue() 
     assert!(!staging_marker_path(&directory, 1).exists());
 
     {
-        let mut engine = LogEngine::open(generation_path(&directory, 1)).expect("open committed log");
+        let mut engine =
+            LogEngine::open(generation_path(&directory, 1)).expect("open committed log");
         engine.put(b"b", b"two").expect("post-commit append");
     }
 
@@ -88,11 +89,7 @@ fn unix_publisher_rejects_recoverable_source_before_creating_marker() {
     let root = tempdir().expect("temporary root");
     let directory = root.path().join("generations");
     fs::create_dir(&directory).expect("create generation directory");
-    create_generation(
-        &directory,
-        1,
-        &[(b"a", b"one"), (b"b", b"two")],
-    );
+    create_generation(&directory, 1, &[(b"a", b"one"), (b"b", b"two")]);
     let log = generation_path(&directory, 1);
     let length = fs::metadata(&log).expect("log metadata").len();
     fs::OpenOptions::new()
@@ -134,7 +131,10 @@ fn unsupported_platform_fails_before_writing_any_marker() {
     let entries = fs::read_dir(&directory)
         .expect("read generation directory")
         .count();
-    assert_eq!(entries, 0, "unsupported publisher must not write any artifact");
+    assert_eq!(
+        entries, 0,
+        "unsupported publisher must not write any artifact"
+    );
 }
 
 #[cfg(unix)]
