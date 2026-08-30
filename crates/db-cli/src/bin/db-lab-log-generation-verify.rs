@@ -6,15 +6,16 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use db_cli::generation_marker::{
-    decode_commit_marker, CommitMarker, APPEND_LOG_FORMAT_VERSION, COMMIT_MARKER_LEN,
-    COMMIT_MARKER_VERSION,
+    decode_commit_marker, CommitMarker, CommittedPrefix, APPEND_LOG_FORMAT_VERSION,
+    COMMIT_MARKER_LEN, COMMIT_MARKER_VERSION,
 };
+use db_cli::generation_prefix::verify_committed_prefix;
 use db_core::DbError;
 use db_storage_log::{LogEngine, VerificationReport};
 use serde::Serialize;
 use thiserror::Error;
 
-const GENERATION_DIRECTORY_PROTOCOL: &str = "append_log_generation_directory_v1";
+const GENERATION_DIRECTORY_PROTOCOL: &str = "append_log_generation_directory_v2";
 const GENERATION_PREFIX: &str = "generation-";
 const GENERATION_SUFFIX: &str = ".log";
 const COMMIT_PREFIX: &str = "commit-";
@@ -43,6 +44,8 @@ struct GenerationVerificationSummary {
     highest_observed_generation: u64,
     marker_generation_ids: Vec<u64>,
     uncommitted_generation_ids: Vec<u64>,
+    committed_prefix: CommittedPrefix,
+    committed_prefix_verification: VerificationReport,
     log_verification: VerificationReport,
 }
 
@@ -118,6 +121,26 @@ fn verify_generation_directory(
             log_verification.file_format_version, marker.log_format_version
         ));
     }
+    if log_verification.valid_bytes < marker.committed_prefix.bytes {
+        return invalid(format!(
+            "authoritative log has only {} structurally valid bytes before its tail, but marker binds {} committed prefix bytes",
+            log_verification.valid_bytes, marker.committed_prefix.bytes
+        ));
+    }
+
+    let committed_prefix_verification =
+        verify_committed_prefix(log_path, marker.committed_prefix).map_err(|error| {
+            VerifyError::Invalid(format!("highest commit marker prefix proof failed: {error}"))
+        })?;
+
+    if let Some(tail) = &log_verification.recoverable_tail {
+        if tail.record_offset < marker.committed_prefix.bytes {
+            return invalid(format!(
+                "authoritative recoverable tail starts at byte {}, inside marker-bound committed prefix ending at byte {}",
+                tail.record_offset, marker.committed_prefix.bytes
+            ));
+        }
+    }
 
     let highest_observed_generation = namespace
         .generation_files
@@ -149,6 +172,8 @@ fn verify_generation_directory(
         highest_observed_generation,
         marker_generation_ids,
         uncommitted_generation_ids,
+        committed_prefix: marker.committed_prefix,
+        committed_prefix_verification,
         log_verification,
     })
 }
