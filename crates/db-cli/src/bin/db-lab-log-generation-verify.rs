@@ -46,6 +46,11 @@ struct GenerationVerificationSummary {
     log_verification: VerificationReport,
 }
 
+struct GenerationNamespace {
+    generation_files: BTreeMap<u64, PathBuf>,
+    marker_files: BTreeMap<u64, PathBuf>,
+}
+
 #[derive(Debug, Error)]
 enum VerifyError {
     #[error("invalid generation directory: {0}")]
@@ -83,9 +88,10 @@ fn verify_generation_directory(
     directory: &Path,
 ) -> Result<GenerationVerificationSummary, VerifyError> {
     let directory = canonical_real_directory(directory)?;
-    let (generation_files, marker_files) = scan_namespace(&directory)?;
+    let namespace = scan_namespace(&directory)?;
 
-    let Some((&authoritative_generation, marker_path)) = marker_files.last_key_value() else {
+    let Some((&authoritative_generation, marker_path)) = namespace.marker_files.last_key_value()
+    else {
         return invalid("no committed generation marker exists");
     };
     let marker = read_commit_marker(marker_path, authoritative_generation)?;
@@ -96,7 +102,8 @@ fn verify_generation_directory(
         ));
     }
 
-    let log_path = generation_files
+    let log_path = namespace
+        .generation_files
         .get(&authoritative_generation)
         .ok_or_else(|| {
             VerifyError::Invalid(format!(
@@ -112,16 +119,18 @@ fn verify_generation_directory(
         ));
     }
 
-    let highest_observed_generation = generation_files
+    let highest_observed_generation = namespace
+        .generation_files
         .keys()
-        .chain(marker_files.keys())
+        .chain(namespace.marker_files.keys())
         .copied()
         .max()
         .ok_or_else(|| VerifyError::Invalid("generation directory is empty".to_owned()))?;
-    let marker_generation_ids = marker_files.keys().copied().collect();
-    let uncommitted_generation_ids = generation_files
+    let marker_generation_ids = namespace.marker_files.keys().copied().collect();
+    let uncommitted_generation_ids = namespace
+        .generation_files
         .keys()
-        .filter(|id| !marker_files.contains_key(*id))
+        .filter(|id| !namespace.marker_files.contains_key(*id))
         .copied()
         .collect();
     let authoritative_log = log_path
@@ -144,9 +153,7 @@ fn verify_generation_directory(
     })
 }
 
-fn scan_namespace(
-    directory: &Path,
-) -> Result<(BTreeMap<u64, PathBuf>, BTreeMap<u64, PathBuf>), VerifyError> {
+fn scan_namespace(directory: &Path) -> Result<GenerationNamespace, VerifyError> {
     let mut generation_files = BTreeMap::new();
     let mut marker_files = BTreeMap::new();
     let entries = fs::read_dir(directory).map_err(|source| io_error(directory, source))?;
@@ -175,7 +182,10 @@ fn scan_namespace(
         return invalid(format!("unexpected generation directory entry {name:?}"));
     }
 
-    Ok((generation_files, marker_files))
+    Ok(GenerationNamespace {
+        generation_files,
+        marker_files,
+    })
 }
 
 fn parse_canonical_generation_name(name: &str) -> Result<Option<u64>, VerifyError> {
