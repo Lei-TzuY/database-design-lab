@@ -593,6 +593,7 @@ mod tests {
             .governors
             .insert(2, Some("powersave".to_owned()));
         observation.governors.insert(3, None);
+        observation.turbo.raw_value = Some("0".to_owned());
         observation.turbo.disabled = Some(false);
         observation.load_one = Some(1.0);
         let violations = evaluate_controls(&config, &observation);
