@@ -596,7 +596,7 @@ fn summarize_distribution(values: &mut [u64]) -> DistributionSummary {
 }
 
 fn nearest_rank_index(samples: usize, percentile: u8) -> usize {
-    let rank = ((samples as u128 * u128::from(percentile)) + 99) / 100;
+    let rank = (samples as u128 * u128::from(percentile)).div_ceil(100);
     usize::try_from(rank.saturating_sub(1)).unwrap_or(samples - 1)
 }
 
