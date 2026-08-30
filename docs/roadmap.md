@@ -35,10 +35,11 @@ because later work has begun.
   differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
 - [ ] Compaction. Unix now has a non-destructive compact-copy primitive, retained generation-directory
   recovery contract, marker-bound committed-prefix proof, durable final-marker publication, an offline
-  authoritative compact switch, generation-aware routed mutations, and cooperative cross-process writer
-  exclusion around routed operations and the switch publication critical section. The milestone remains
-  open until Windows-equivalent marker durability, composed switch fault injection, safe obsolete/orphan
-  cleanup, stale-lock recovery tooling, and legacy single-file migration/coexistence are implemented.
+  authoritative compact switch, generation-aware routed mutations, cooperative cross-process writer
+  exclusion around routed operations and the switch publication critical section, and guarded operator
+  recovery for crash-retained writer lease evidence. The milestone remains open until Windows-equivalent
+  marker durability, composed switch fault injection, safe obsolete/orphan cleanup, and legacy single-file
+  migration/coexistence are implemented.
 
 ## Phase 2 — B+ tree engine
 
