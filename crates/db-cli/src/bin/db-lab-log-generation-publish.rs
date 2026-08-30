@@ -54,11 +54,15 @@ fn main() -> ExitCode {
 
 #[cfg(unix)]
 mod unix {
-    use std::collections::BTreeSet;
     use std::fs::{self, File, OpenOptions};
     use std::io::{self, Read, Write};
     use std::path::{Path, PathBuf};
 
+    use db_cli::generation_directory::{
+        canonical_generation_name, canonical_marker_name, canonical_real_directory,
+        canonical_staging_marker_name, require_real_regular_file, scan_generation_namespace,
+        GenerationDirectoryError,
+    };
     use db_cli::generation_marker::{
         decode_commit_marker, encode_commit_marker, CommitMarker, CommittedPrefix, Crc32Ieee,
         COMMIT_MARKER_LEN, COMMIT_MARKER_VERSION,
@@ -72,13 +76,6 @@ mod unix {
     use super::Cli;
 
     const PUBLICATION_PROTOCOL: &str = "append_log_generation_marker_publication_unix_v1";
-    const GENERATION_PREFIX: &str = "generation-";
-    const GENERATION_SUFFIX: &str = ".log";
-    const COMMIT_PREFIX: &str = "commit-";
-    const COMMIT_SUFFIX: &str = ".marker";
-    const STAGING_COMMIT_PREFIX: &str = "staging-commit-";
-    const GENERATION_ID_WIDTH: usize = 20;
-    const MAX_DIRECTORY_ENTRIES: usize = 8_192;
     const CRC_BUFFER_BYTES: usize = 64 * 1024;
 
     #[derive(Debug, Serialize)]
@@ -121,19 +118,23 @@ mod unix {
             return invalid("generation id must be greater than zero");
         }
 
-        let directory = canonical_real_directory(&args.directory)?;
-        let existing_markers = scan_namespace(&directory)?;
-        if existing_markers.iter().any(|id| *id >= args.generation) {
+        let directory = canonical_real_directory(&args.directory).map_err(map_directory_error)?;
+        let namespace = scan_generation_namespace(&directory).map_err(map_directory_error)?;
+        if namespace
+            .marker_files
+            .keys()
+            .any(|id| *id >= args.generation)
+        {
             return invalid(format!(
                 "generation {} is not newer than every existing committed generation",
                 args.generation
             ));
         }
 
-        let log_path = generation_path(&directory, args.generation);
-        let marker_path = marker_path(&directory, args.generation);
-        let staging_path = staging_marker_path(&directory, args.generation);
-        require_real_regular_file(&log_path, "generation log")?;
+        let log_path = directory.join(canonical_generation_name(args.generation));
+        let marker_path = directory.join(canonical_marker_name(args.generation));
+        let staging_path = directory.join(canonical_staging_marker_name(args.generation));
+        require_real_regular_file(&log_path, "generation log").map_err(map_directory_error)?;
         require_absent(&marker_path, "commit marker")?;
         remove_stale_staging_if_safe(&staging_path)?;
 
@@ -279,7 +280,7 @@ mod unix {
         generation: u64,
         committed_prefix: CommittedPrefix,
     ) -> Result<CommitMarker, PublishError> {
-        require_real_regular_file(path, "published commit marker")?;
+        require_real_regular_file(path, "published commit marker").map_err(map_directory_error)?;
         let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
         let marker = decode_commit_marker(&bytes, generation)
             .map_err(|error| PublishError::Invalid(format!("published commit marker: {error}")))?;
@@ -287,105 +288,6 @@ mod unix {
             return invalid("published commit marker prefix differs from staged proof");
         }
         Ok(marker)
-    }
-
-    fn scan_namespace(directory: &Path) -> Result<BTreeSet<u64>, PublishError> {
-        let mut committed = BTreeSet::new();
-        let entries = fs::read_dir(directory).map_err(|source| io_error(directory, source))?;
-        for (index, entry) in entries.enumerate() {
-            if index >= MAX_DIRECTORY_ENTRIES {
-                return invalid(format!(
-                    "generation directory contains more than {MAX_DIRECTORY_ENTRIES} entries"
-                ));
-            }
-            let entry = entry.map_err(|source| io_error(directory, source))?;
-            let name = entry.file_name();
-            let name = name.to_str().ok_or_else(|| {
-                PublishError::Invalid(
-                    "generation directory contains a non-UTF-8 entry name".to_owned(),
-                )
-            })?;
-
-            if parse_canonical_id(name, GENERATION_PREFIX, GENERATION_SUFFIX, "generation log")?
-                .is_some()
-            {
-                continue;
-            }
-            if let Some(id) =
-                parse_canonical_id(name, COMMIT_PREFIX, COMMIT_SUFFIX, "commit marker")?
-            {
-                let _ = committed.insert(id);
-                continue;
-            }
-            if parse_canonical_id(
-                name,
-                STAGING_COMMIT_PREFIX,
-                COMMIT_SUFFIX,
-                "staging commit marker",
-            )?
-            .is_some()
-            {
-                continue;
-            }
-            return invalid(format!("unexpected generation directory entry {name:?}"));
-        }
-        Ok(committed)
-    }
-
-    fn parse_canonical_id(
-        name: &str,
-        prefix: &str,
-        suffix: &str,
-        kind: &str,
-    ) -> Result<Option<u64>, PublishError> {
-        if !name.starts_with(prefix) {
-            return Ok(None);
-        }
-        let expected_len = prefix
-            .len()
-            .checked_add(GENERATION_ID_WIDTH)
-            .and_then(|len| len.checked_add(suffix.len()))
-            .ok_or_else(|| {
-                PublishError::Invalid("canonical name length overflowed usize".to_owned())
-            })?;
-        if name.len() != expected_len || !name.ends_with(suffix) {
-            return invalid(format!("malformed canonical {kind} name {name:?}"));
-        }
-        let digits = &name[prefix.len()..prefix.len() + GENERATION_ID_WIDTH];
-        if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            return invalid(format!(
-                "malformed canonical {kind} generation id in {name:?}"
-            ));
-        }
-        let id = digits
-            .parse::<u64>()
-            .map_err(|_| PublishError::Invalid(format!("{kind} generation id does not fit u64")))?;
-        if id == 0 || format!("{id:020}") != digits {
-            return invalid(format!("non-canonical {kind} generation id in {name:?}"));
-        }
-        Ok(Some(id))
-    }
-
-    fn canonical_real_directory(path: &Path) -> Result<PathBuf, PublishError> {
-        let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
-        if !metadata.file_type().is_dir() {
-            return invalid(format!(
-                "generation directory must be a real directory rather than a symlink or non-directory: {}",
-                path.display()
-            ));
-        }
-        fs::canonicalize(path).map_err(|source| io_error(path, source))
-    }
-
-    fn require_real_regular_file(path: &Path, label: &str) -> Result<(), PublishError> {
-        let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
-        if !metadata.file_type().is_file() {
-            return invalid(format!(
-                "{label} must be a real regular file rather than a symlink or non-file: {}",
-                path.display()
-            ));
-        }
-        Ok(())
     }
 
     fn require_absent(path: &Path, label: &str) -> Result<(), PublishError> {
@@ -410,24 +312,12 @@ mod unix {
         }
     }
 
-    fn generation_path(directory: &Path, id: u64) -> PathBuf {
-        directory.join(canonical_generation_name(id))
-    }
-
-    fn marker_path(directory: &Path, id: u64) -> PathBuf {
-        directory.join(canonical_marker_name(id))
-    }
-
-    fn staging_marker_path(directory: &Path, id: u64) -> PathBuf {
-        directory.join(format!("{STAGING_COMMIT_PREFIX}{id:020}{COMMIT_SUFFIX}"))
-    }
-
-    fn canonical_generation_name(id: u64) -> String {
-        format!("{GENERATION_PREFIX}{id:020}{GENERATION_SUFFIX}")
-    }
-
-    fn canonical_marker_name(id: u64) -> String {
-        format!("{COMMIT_PREFIX}{id:020}{COMMIT_SUFFIX}")
+    fn map_directory_error(error: GenerationDirectoryError) -> PublishError {
+        match error {
+            GenerationDirectoryError::Invalid(message) => PublishError::Invalid(message),
+            GenerationDirectoryError::Database(error) => PublishError::Database(error),
+            GenerationDirectoryError::Io { path, source } => PublishError::Io { path, source },
+        }
     }
 
     fn io_error(path: &Path, source: io::Error) -> PublishError {
