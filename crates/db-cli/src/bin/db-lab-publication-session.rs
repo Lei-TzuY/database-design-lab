@@ -319,7 +319,9 @@ fn verify_session(
     let format_version = index_value
         .get("format_version")
         .and_then(Value::as_u64)
-        .ok_or_else(|| SessionError::Invalid("session index lacks integer format_version".to_owned()))?;
+        .ok_or_else(|| {
+            SessionError::Invalid("session index lacks integer format_version".to_owned())
+        })?;
 
     match format_version {
         1 => {
@@ -530,7 +532,9 @@ fn validate_common_index(
         return invalid("index preflight recording time must be greater than zero");
     }
     if repository_revision.trim().is_empty() || repository_revision.trim() != repository_revision {
-        return invalid("index repository_revision must be non-empty without surrounding whitespace");
+        return invalid(
+            "index repository_revision must be non-empty without surrounding whitespace",
+        );
     }
     if let Some(expected) = expected_revision {
         if repository_revision != expected {
@@ -611,9 +615,7 @@ fn publication_binding(
         .get("recorded_unix_seconds")
         .and_then(Value::as_u64);
     if require_recorded_time && recorded.is_none_or(|value| value == 0) {
-        return invalid(
-            "v2 publication session requires environment.recorded_unix_seconds > 0",
-        );
+        return invalid("v2 publication session requires environment.recorded_unix_seconds > 0");
     }
     Ok((host_label, recorded))
 }
