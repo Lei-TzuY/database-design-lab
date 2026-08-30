@@ -19,8 +19,6 @@ const INDEX_FILE: &str = "index.json";
 
 #[allow(dead_code)]
 mod analyzer_impl {
-    include!("db-lab-batch-analyze.rs");
-
     pub fn analyze_value(
         archive_dir: &std::path::Path,
         expected_revision: Option<&str>,
@@ -42,6 +40,8 @@ mod analyzer_impl {
     pub const fn snapshot_protocol() -> &'static str {
         SNAPSHOT_PROTOCOL
     }
+
+    include!("db-lab-batch-analyze.rs");
 }
 
 #[derive(Debug, Parser)]
