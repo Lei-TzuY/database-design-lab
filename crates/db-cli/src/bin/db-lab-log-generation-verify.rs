@@ -121,18 +121,18 @@ fn verify_generation_directory(
             log_verification.file_format_version, marker.log_format_version
         ));
     }
-    if log_verification.valid_bytes < marker.committed_prefix.bytes {
-        return invalid(format!(
-            "authoritative log has only {} structurally valid bytes before its tail, but marker binds {} committed prefix bytes",
-            log_verification.valid_bytes, marker.committed_prefix.bytes
-        ));
-    }
 
     let committed_prefix_verification =
         verify_committed_prefix(log_path, marker.committed_prefix).map_err(|error| {
             VerifyError::Invalid(format!("highest commit marker prefix proof failed: {error}"))
         })?;
 
+    if log_verification.valid_bytes < marker.committed_prefix.bytes {
+        return invalid(format!(
+            "authoritative log has only {} structurally valid bytes before its tail, but marker binds {} committed prefix bytes",
+            log_verification.valid_bytes, marker.committed_prefix.bytes
+        ));
+    }
     if let Some(tail) = &log_verification.recoverable_tail {
         if tail.record_offset < marker.committed_prefix.bytes {
             return invalid(format!(
