@@ -64,6 +64,10 @@ name = "db-lab-log-generation-lock"
 path = "src/bin/db-lab-log-generation-lock.rs"
 
 [[bin]]
+name = "db-lab-log-generation-reserve"
+path = "src/bin/db-lab-log-generation-reserve.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 
