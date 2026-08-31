@@ -59,7 +59,8 @@ fn main() -> ExitCode {
         Command::Inspect {
             directory,
             generation,
-        } => inspect_generation_orphan(&directory, generation).and_then(|summary| encode_json(&summary)),
+        } => inspect_generation_orphan(&directory, generation)
+            .and_then(|summary| encode_json(&summary)),
         Command::Retire {
             directory,
             generation,
