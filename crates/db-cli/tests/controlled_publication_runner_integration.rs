@@ -168,7 +168,9 @@ impl Fixture {
 
 fn write_executable(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write fake executable");
-    let mut permissions = fs::metadata(path).expect("fake executable metadata").permissions();
+    let mut permissions = fs::metadata(path)
+        .expect("fake executable metadata")
+        .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).expect("chmod fake executable");
 }
