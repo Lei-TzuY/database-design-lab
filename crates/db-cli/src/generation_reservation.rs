@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::generation_directory::{
-    canonical_reservation_name, verify_generation_directory, GenerationDirectoryError,
-};
-use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
+#[cfg(unix)]
+use crate::generation_directory::{canonical_reservation_name, verify_generation_directory};
+use crate::generation_directory::GenerationDirectoryError;
+#[cfg(unix)]
+use crate::generation_lock::acquire_generation_writer_lease;
+use crate::generation_lock::GenerationWriterLockError;
 
 pub const GENERATION_RESERVATION_PROTOCOL: &str = "append_log_generation_reservation_unix_v1";
 
