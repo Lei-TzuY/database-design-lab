@@ -18,9 +18,11 @@ The automatic deletion set is intentionally narrow:
 - every `generation-%020d.log` with generation id lower than the current authoritative generation, including a lower log whose old marker was already removed by an earlier interrupted cleanup;
 - canonical `staging-commit-%020d.marker` names only when their generation id is at or below current authority.
 
-Higher staging-marker ids are retained even though staging markers are permanently non-authoritative. The generation allocator treats every observed generation, final-marker, and staging-marker id as allocation-frontier evidence. Removing a higher staging id without first persisting an equivalent high watermark could allow a later compaction to reuse an id that the directory had already observed.
+Higher staging-marker ids remain outside **automatic** cleanup even when a durable reservation covers their id. Reservation evidence proves identity retirement, not that a live compactor has abandoned the artifact.
 
-Cleanup also deliberately retains every uncommitted generation log at or above the current authoritative generation. Compact candidate construction occurs before the compact-switch publication lease is acquired, so a higher uncommitted generation may still be under construction. The cleanup protocol does not guess whether such a candidate is abandoned.
+Cleanup also deliberately retains every uncommitted generation log at or above the current authoritative generation. Compact candidate construction occurs outside the compact-switch publication lease, so a higher uncommitted generation may still be under construction. The automatic cleanup protocol does not guess whether such a candidate is abandoned.
+
+When an operator has independently established abandonment, `db-lab-log-generation-abandon-cleanup` provides a separate plan/review/explicit-confirmation protocol. It requires a matching durable reservation, binds the exact directory snapshot and candidate/staging bytes, replays that plan under the writer lease, and leaves the reservation intact so deletion cannot cause id reuse. See `docs/append-log-abandoned-generation-cleanup.md`.
 
 A lower generation can never become authoritative again: final-marker publication is monotonic and requires a generation newer than every existing committed marker. Removing lower retained history therefore cannot create a future valid publication path back to that generation, and current authority itself preserves the allocation frontier above all removed lower ids.
 
@@ -53,18 +55,17 @@ If a directory durability barrier fails after visible removals, cleanup returns 
 
 A later cleanup can finish safe lower-generation residue from an earlier interruption. Examples include a lower generation log whose final marker is already absent, or a lower final marker whose corresponding generation log is already absent. Neither lower artifact participates in highest-marker recovery, so the remaining obsolete name can be removed on the next successful run.
 
-Higher staging markers and higher uncommitted generation logs are reported but retained. They require a separate lifecycle decision because deleting them can either erase allocation-frontier evidence or race candidate construction outside the publication lease.
+Higher staging markers and higher uncommitted generation logs are reported but retained by this automatic command. Reserved higher artifacts can be handled only through the separate explicit abandoned-artifact cleanup protocol; unreserved higher artifacts remain ineligible because deleting them could lower the known allocation frontier.
 
 ## What this does not do
 
-This cleanup does not:
+This automatic cleanup does not:
 
 - delete the current authoritative generation or marker;
-- delete higher staging-marker frontier evidence;
-- delete higher uncommitted generation candidates;
-- infer that an orphan is stale from PID, age, timestamp, or filename alone;
+- infer that a higher orphan is abandoned from PID, age, timestamp, or filename alone;
+- delete unreserved higher candidate/staging frontier evidence;
 - provide Windows-equivalent directory-entry durability;
 - migrate legacy single-file append-log users;
 - protect against non-cooperating direct raw-path mutation.
 
-The broad Phase 1 compaction milestone therefore remains open after this cleanup slice. The remaining lifecycle work is primarily Windows marker durability, guarded handling of higher orphan/frontier candidates, and legacy single-file migration/coexistence.
+The broad Phase 1 compaction milestone therefore remains open after this cleanup slice. The separate explicit abandoned-artifact protocol closes only the reserved higher-artifact lifecycle case; Windows durability, automatic abandonment proof, legacy single-file migration/coexistence, and non-cooperating raw writers remain outside the current contract.
