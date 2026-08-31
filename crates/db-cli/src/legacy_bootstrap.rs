@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use db_core::DbError;
 #[cfg(unix)]
 use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
+#[cfg(not(unix))]
+use db_storage_log::VerificationReport;
 use serde::Serialize;
 use thiserror::Error;
 
