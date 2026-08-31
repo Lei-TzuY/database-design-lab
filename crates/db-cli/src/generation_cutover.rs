@@ -144,7 +144,7 @@ mod unix {
         let lease = acquire_generation_writer_lease(target_directory)?;
         let before = verify_generation_directory(lease.directory())?;
         validate_fresh_import_target(&source_state, &before)?;
-        let target_state = LogEngine::inspect(&before.authoritative_log_path(), true)?;
+        let target_state = LogEngine::inspect(before.authoritative_log_path(), true)?;
         if target_state.entries != source_state.entries {
             return invalid("target generation 1 does not reproduce the current legacy live state");
         }
@@ -202,7 +202,7 @@ mod unix {
 
         let final_verified = verify_generation_directory(lease.directory())?;
         validate_fresh_import_target(&source_state, &final_verified)?;
-        let final_state = LogEngine::inspect(&final_verified.authoritative_log_path(), true)?;
+        let final_state = LogEngine::inspect(final_verified.authoritative_log_path(), true)?;
         if final_state != target_state {
             return invalid(
                 "target generation changed while legacy pathname cutover was in progress",
@@ -306,7 +306,7 @@ mod unix {
 
     fn bounded_path_string(path: &Path, label: &str) -> Result<String, LegacyCutoverError> {
         let value = path.to_string_lossy().into_owned();
-        if value.as_bytes().len() > MAX_SENTINEL_PATH_BYTES {
+        if value.len() > MAX_SENTINEL_PATH_BYTES {
             return invalid(format!(
                 "{label} path exceeds {MAX_SENTINEL_PATH_BYTES} encoded bytes"
             ));
