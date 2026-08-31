@@ -33,15 +33,15 @@ because later work has begun.
   `db-core::minimize_failing_workload` performs chunk-removal delta debugging plus 1-minimal cleanup;
   `db-lab-shrink` replays every probe against a fresh persistent candidate, preserves the original
   differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
-- [ ] Compaction. Unix now has a non-destructive compact-copy primitive, retained generation-directory
-  recovery contract, marker-bound committed-prefix proof, durable final-marker publication, an offline
-  authoritative compact switch, generation-aware routed mutations, cooperative cross-process writer
-  exclusion around routed operations and the switch publication critical section, guarded operator
-  recovery for crash-retained writer lease evidence, and conservative durable cleanup of obsolete lower
-  generations/final markers plus non-authoritative staging-marker residue. A deterministic composed switch
-  matrix covers every retained-state boundary and requires exact old-or-new logical recovery. The milestone
-  remains open until Windows-equivalent marker durability, guarded reclamation of higher abandoned
-  uncommitted candidates, and legacy single-file migration/coexistence are implemented.
+- [ ] Compaction. Unix now has non-destructive compact-copy construction; a strict retained
+  generation-directory recovery contract with marker-bound committed-prefix proof; durable final-marker
+  publication and generation-id reservations; a reservation-before-build authoritative compact switch;
+  generation-aware routed mutations; cooperative cross-process writer exclusion and guarded stale-lock
+  recovery; deterministic composed switch fault coverage; durable cleanup of obsolete lower history;
+  reservation-backed guarded retirement of abandoned higher candidates/staging evidence; and an offline
+  legacy one-file migration that retains the source while handing the imported state to `GenerationLogEngine`.
+  The milestone remains open because Windows-equivalent retained-entry durability is still unsupported and
+  direct raw-path writers can deliberately bypass the generation-aware ownership contract.
 
 ## Phase 2 — B+ tree engine
 
@@ -128,8 +128,8 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
 - [x] Add deterministic compaction durable-write fault injection. The harness records replacement-L1,
   Manifest, first-CURRENT, and mirror-CURRENT publication classes and injects before-write, synchronized
   torn-output, and post-sync reported failures at each class. Every case poisons the live handle, reopens,
-  verifies all logical keys, and requires exactly the complete four-L0 input version or complete one-L1
-  compacted version; torn immutable files remain unreferenced and torn CURRENT slots fail by checksum.
+  verifies all logical keys, and requires exactly the complete old or complete new tree; tests also cover final
+  root clearing and prove torn recycled orphans can be overwritten safely by a later mutation.
   A second matrix covers table-less compaction and requires either all four tombstone L0 inputs or the
   complete zero-SSTable GC version, including the retained-WAL state when rotation is skipped after a
   reported compaction failure.
