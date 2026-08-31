@@ -8,9 +8,7 @@ use crate::generation_directory::{
     scan_generation_namespace, verify_generation_directory, GenerationDirectoryError,
     GenerationVerificationSummary,
 };
-use crate::generation_lock::{
-    acquire_generation_writer_lease, GenerationWriterLockError,
-};
+use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
 
 pub const GENERATION_CLEANUP_PROTOCOL: &str = "append_log_generation_cleanup_unix_v1";
 
@@ -21,6 +19,7 @@ pub struct GenerationCleanupSummary {
     pub removed_marker_generation_ids: Vec<u64>,
     pub removed_generation_ids: Vec<u64>,
     pub removed_staging_marker_generation_ids: Vec<u64>,
+    pub retained_staging_marker_generation_ids: Vec<u64>,
     pub retained_uncommitted_generation_ids: Vec<u64>,
     pub final_generation: GenerationVerificationSummary,
 }
@@ -59,14 +58,14 @@ pub enum GenerationCleanupError {
     },
 }
 
-/// Removes only history that can never become authoritative again.
+/// Removes only retained history whose generation ids remain below the durable allocation frontier.
 ///
 /// On Unix the operation holds the cooperative generation writer lease, verifies the current
-/// highest committed generation, removes every lower final marker plus all non-authoritative
-/// staging-marker names, synchronizes the directory, re-verifies authority, then removes every
-/// lower generation log and synchronizes again. Generation logs at or above the current authority
-/// that lack a final marker are deliberately retained because a compact candidate may be under
-/// construction outside the lease-protected publication critical section.
+/// highest committed generation, removes every lower final marker plus staging markers at or below
+/// current authority, synchronizes the directory, re-verifies authority, then removes every lower
+/// generation log and synchronizes again. Higher staging markers and higher uncommitted generation
+/// logs are deliberately retained because their ids are allocation-frontier evidence; a compact
+/// candidate may also still be under construction outside the lease-protected publication section.
 ///
 /// Non-Unix targets fail before filesystem access because this protocol does not claim an
 /// equivalent parent-directory deletion durability barrier there.
@@ -109,8 +108,12 @@ fn cleanup_obsolete_generations_unix(
         .copied()
         .filter(|id| *id < authoritative_generation)
         .collect();
-    let removed_staging_marker_generation_ids: Vec<u64> =
-        namespace.staging_marker_files.keys().copied().collect();
+    let removed_staging_marker_generation_ids: Vec<u64> = namespace
+        .staging_marker_files
+        .keys()
+        .copied()
+        .filter(|id| *id <= authoritative_generation)
+        .collect();
 
     // Validate the complete deletion plan before removing the first directory entry.
     for id in &removed_marker_generation_ids {
@@ -125,7 +128,7 @@ fn cleanup_obsolete_generations_unix(
             .staging_marker_files
             .get(id)
             .expect("planned staging id came from namespace");
-        require_real_regular_file(path, "staging commit marker")?;
+        require_real_regular_file(path, "obsolete staging commit marker")?;
     }
     for id in &removed_generation_ids {
         let path = namespace
@@ -192,6 +195,8 @@ fn cleanup_obsolete_generations_unix(
         "final post-cleanup verification",
     )?;
     let final_namespace = scan_generation_namespace(lease.directory())?;
+    let retained_staging_marker_generation_ids =
+        final_namespace.staging_marker_files.keys().copied().collect();
     let retained_uncommitted_generation_ids = final_namespace
         .generation_files
         .keys()
@@ -209,6 +214,7 @@ fn cleanup_obsolete_generations_unix(
         removed_marker_generation_ids,
         removed_generation_ids,
         removed_staging_marker_generation_ids,
+        retained_staging_marker_generation_ids,
         retained_uncommitted_generation_ids,
         final_generation: final_verified,
     })
