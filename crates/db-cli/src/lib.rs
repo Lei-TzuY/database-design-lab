@@ -1,4 +1,5 @@
 pub mod batch_archive;
+pub mod generation_abandoned_cleanup;
 pub mod generation_cleanup;
 pub mod generation_compaction;
 pub mod generation_directory;
