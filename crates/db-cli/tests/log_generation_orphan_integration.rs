@@ -36,7 +36,10 @@ fn guarded_retirement_removes_reserved_candidate_and_staging_but_preserves_id() 
     fs::write(staging_path(&directory, 2), b"staging-proof").expect("write staging residue");
 
     let inspection = inspect_json(&directory, 2);
-    assert_eq!(inspection["protocol"], "append_log_generation_orphan_inspect_v2");
+    assert_eq!(
+        inspection["protocol"],
+        "append_log_generation_orphan_inspect_v2"
+    );
     assert_eq!(inspection["authoritative_generation"], 1);
     assert_eq!(inspection["orphan_generation"], 2);
     assert_eq!(inspection["reservation"], canonical_reservation_name(2));
@@ -62,7 +65,10 @@ fn guarded_retirement_removes_reserved_candidate_and_staging_but_preserves_id() 
         Some((staging_bytes, staging_crc)),
         false,
     );
-    assert_failure_contains(&unconfirmed, "requires --confirm-generation-builder-stopped");
+    assert_failure_contains(
+        &unconfirmed,
+        "requires --confirm-generation-builder-stopped",
+    );
     assert!(generation_path(&directory, 2).is_file());
     assert!(staging_path(&directory, 2).is_file());
 
@@ -77,7 +83,10 @@ fn guarded_retirement_removes_reserved_candidate_and_staging_but_preserves_id() 
     );
     assert_success("retire reserved orphan", &retired);
     let summary: Value = serde_json::from_slice(&retired.stdout).expect("decode retirement");
-    assert_eq!(summary["protocol"], "append_log_generation_orphan_retire_unix_v2");
+    assert_eq!(
+        summary["protocol"],
+        "append_log_generation_orphan_retire_unix_v2"
+    );
     assert_eq!(summary["retired_generation"], 2);
     assert_eq!(summary["reservation"], canonical_reservation_name(2));
     assert!(!generation_path(&directory, 2).exists());
@@ -197,7 +206,8 @@ fn create_and_publish(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
 
 #[cfg(unix)]
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine = LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine =
+        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }
