@@ -42,7 +42,8 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     let orphan = generation_path(&directory, 7);
     let frontier_staging = staging_marker_path(&directory, 8);
     let authoritative_log_before = fs::read(&authoritative_log).expect("read authority log");
-    let authoritative_marker_before = fs::read(&authoritative_marker).expect("read authority marker");
+    let authoritative_marker_before =
+        fs::read(&authoritative_marker).expect("read authority marker");
     let orphan_before = fs::read(&orphan).expect("read orphan");
     let frontier_staging_before = fs::read(&frontier_staging).expect("read frontier staging");
 
@@ -51,7 +52,10 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     let summary: Value = serde_json::from_slice(&output.stdout).expect("decode cleanup summary");
     assert_eq!(summary["protocol"], "append_log_generation_cleanup_unix_v1");
     assert_eq!(summary["authoritative_generation"], 3);
-    assert_eq!(summary["removed_marker_generation_ids"], serde_json::json!([1, 2]));
+    assert_eq!(
+        summary["removed_marker_generation_ids"],
+        serde_json::json!([1, 2])
+    );
     assert_eq!(summary["removed_generation_ids"], serde_json::json!([1, 2]));
     assert_eq!(
         summary["removed_staging_marker_generation_ids"],
@@ -93,7 +97,10 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     let second = run_cleanup(&directory);
     assert_success("repeat cleanup", &second);
     let second: Value = serde_json::from_slice(&second.stdout).expect("decode repeat summary");
-    assert_eq!(second["removed_marker_generation_ids"], serde_json::json!([]));
+    assert_eq!(
+        second["removed_marker_generation_ids"],
+        serde_json::json!([])
+    );
     assert_eq!(second["removed_generation_ids"], serde_json::json!([]));
     assert_eq!(
         second["removed_staging_marker_generation_ids"],
@@ -126,7 +133,10 @@ fn cleanup_completes_safe_lower_generation_partial_residue() {
     let output = run_cleanup(&directory);
     assert_success("cleanup partial residue", &output);
     let summary: Value = serde_json::from_slice(&output.stdout).expect("decode cleanup summary");
-    assert_eq!(summary["removed_marker_generation_ids"], serde_json::json!([2]));
+    assert_eq!(
+        summary["removed_marker_generation_ids"],
+        serde_json::json!([2])
+    );
     assert_eq!(summary["removed_generation_ids"], serde_json::json!([1]));
     assert!(!generation_path(&directory, 1).exists());
     assert!(!marker_path(&directory, 2).exists());
@@ -187,7 +197,8 @@ fn create_and_publish(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
 
 #[cfg(unix)]
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine = LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine =
+        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }
