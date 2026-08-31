@@ -33,15 +33,15 @@ because later work has begun.
   `db-core::minimize_failing_workload` performs chunk-removal delta debugging plus 1-minimal cleanup;
   `db-lab-shrink` replays every probe against a fresh persistent candidate, preserves the original
   differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
-- [ ] Compaction. Unix now has a non-destructive compact-copy primitive, retained generation-directory
-  recovery contract, marker-bound committed-prefix proof, durable final-marker publication, an offline
-  authoritative compact switch, generation-aware routed mutations, cooperative cross-process writer
-  exclusion around routed operations and the switch publication critical section, guarded operator
-  recovery for crash-retained writer lease evidence, and conservative durable cleanup of obsolete lower
-  generations/final markers plus non-authoritative staging-marker residue. A deterministic composed switch
-  matrix covers every retained-state boundary and requires exact old-or-new logical recovery. The milestone
-  remains open until Windows-equivalent marker durability, guarded reclamation of higher abandoned
-  uncommitted candidates, and legacy single-file migration/coexistence are implemented.
+- [ ] Compaction. Unix now has non-destructive compact-copy construction; a strict retained
+  generation-directory recovery contract with marker-bound committed-prefix proof; durable final-marker
+  publication and generation-id reservations; a reservation-before-build authoritative compact switch;
+  generation-aware routed mutations; cooperative cross-process writer exclusion and guarded stale-lock
+  recovery; deterministic composed switch fault coverage; durable cleanup of obsolete lower history;
+  reservation-backed guarded retirement of abandoned higher candidates/staging evidence; and an offline
+  legacy one-file migration that retains the source while handing the imported state to `GenerationLogEngine`.
+  The milestone remains open because Windows-equivalent retained-entry durability is still unsupported and
+  direct raw-path writers can deliberately bypass the generation-aware ownership contract.
 
 ## Phase 2 — B+ tree engine
 

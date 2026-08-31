@@ -1,6 +1,6 @@
 # Append-log generation-switch recovery law
 
-This document freezes the recovery law for authoritative append-log compaction switching. The executable oracle defines which generation recovery may select after every interruption point. Concrete retained bytes are defined by `docs/append-log-generation-directory.md`; Unix marker publication is defined by `docs/append-log-generation-publication.md`; durable allocation reservations are defined by `docs/append-log-generation-reservations.md`; the composed offline switch is defined by `docs/append-log-offline-compact-switch.md`; generation-aware mutation routing and writer exclusion are defined by `docs/append-log-generation-routing.md`; conservative retained-history cleanup is defined by `docs/append-log-generation-cleanup.md`.
+This document freezes the recovery law for authoritative append-log compaction switching. The executable oracle defines which generation recovery may select after every interruption point. Concrete retained bytes are defined by `docs/append-log-generation-directory.md`; Unix marker publication is defined by `docs/append-log-generation-publication.md`; durable allocation reservations are defined by `docs/append-log-generation-reservations.md`; the composed offline switch is defined by `docs/append-log-offline-compact-switch.md`; generation-aware mutation routing and writer exclusion are defined by `docs/append-log-generation-routing.md`; conservative retained-history cleanup is defined by `docs/append-log-generation-cleanup.md`; legacy one-file import is defined by `docs/append-log-legacy-migration.md`.
 
 The executable oracle lives in `crates/db-storage-log/tests/generation_switch_model.rs`.
 
@@ -35,24 +35,22 @@ Recovery MUST NOT fall back to a lower committed generation when the highest com
 
 Higher generation ids without final commit markers never override the last committed generation, regardless of whether their files are absent, partially written/corrupt, or fully valid. They remain crash orphans until a cleanup protocol proves they are safe to remove. Recovery never infers commitment from a valid-looking generation file.
 
-Directory v3 adds durable zero-byte reservations. A reservation contributes to the monotonic allocation frontier but does not affect recovery selection. Once reservation N is durably retained, later lifecycle work may reclaim a proven-abandoned candidate/staging artifact for N without making N reusable.
+Directory v3 adds durable zero-byte reservations. A reservation contributes to the monotonic allocation frontier but does not affect recovery selection. Once reservation N is durably retained, a guarded cleanup may reclaim a proven-abandoned candidate/staging artifact for N without making N reusable.
 
 ## Required writer order
 
 Every generation switch must preserve this authority order:
 
 1. retain the old committed generation;
-2. choose a generation id that has never been reused;
-3. construct the next generation without making it authoritative;
+2. durably reserve a generation id that has never been reused;
+3. construct that generation without making it authoritative;
 4. make the complete next-generation log durable;
 5. verify the durable next-generation image;
 6. capture the exact verified base-prefix byte length, CRC-32, record count, and next sequence;
 7. durably publish the v2 commit marker binding that generation id and verified complete base prefix;
 8. only after marker durability may old-generation cleanup become eligible.
 
-The Unix durable reservation primitive now exists to make step 2 independent of candidate lifetime. The current offline compact switch still computes its frontier directly and does not yet create a reservation before construction; wiring that primitive into the switch is the next integration step.
-
-The Unix offline implementation re-verifies the old authority/live state immediately before publication and re-verifies the new authority/exact compact image after publication. The authority-changing critical section is protected by the cooperative generation-writer lease also used by routed operations and the standalone publisher CLI.
+The Unix offline compact switch implements that order. Reservation is completed under the cooperative writer lease before candidate construction; the expensive compact-copy build then runs without monopolizing the lease. The switch reacquires the same lease before its final old-authority/live-state recheck and keeps it through marker publication and final verification.
 
 Invalid writer orders include publishing the marker before the new generation is durable, publishing a marker whose prefix proof does not describe a complete verified compact image, or deleting/corrupting the old committed generation before the new marker is durable. These states fail closed rather than invoking recovery heuristics.
 
@@ -60,9 +58,10 @@ Invalid writer orders include publishing the marker before the new generation is
 
 | Crash point | Old generation | New generation | Recovery |
 | --- | --- | --- | --- |
-| before new file exists | committed + clean | absent or reservation-only | old |
-| during new file construction | committed + clean | uncommitted + incomplete/corrupt | old |
-| after new image is complete | committed + clean | uncommitted + clean | old |
+| before reservation | committed + clean | absent | old |
+| after reservation, before new file exists | committed + clean | reservation-only | old |
+| during new file construction | committed + clean | reserved + uncommitted + incomplete/corrupt | old |
+| after new image is complete | committed + clean | reserved + uncommitted + clean | old |
 | after final marker link, before directory barrier | committed + clean | final marker may survive or be lost | old or new; verify retained state |
 | after new marker is durable | committed + clean | committed + clean | new |
 | marker exists but base-prefix proof fails | committed + clean | committed + unproven recoverable tail | fail closed |
@@ -79,26 +78,30 @@ A committed new generation with a canonical recoverable final append selects the
 
 `append_log_generation_marker_publication_unix_v1` provides Unix generation-file and parent-directory synchronization, same-directory synced staging markers, no-overwrite final-marker publication, final directory synchronization, post-publication proof verification, and a distinct durability-uncertain error when final-marker visibility may precede confirmed parent-directory durability. Non-Unix platforms fail before publication I/O.
 
-`append_log_offline_generation_compact_switch_unix_v1` composes source selection, allocation above every observed canonical id, exact live-state compact-copy construction, stale-source detection, durable publication, and final authority/image verification. A deterministic late-write test proves pre-publication raw-path source drift leaves only an uncommitted orphan and preserves old authority. A composed fault matrix covers the complete candidate, locked recheck, generation durability, partial and durable staging marker, final-marker link, final directory barrier, and completed-publisher boundaries. Normal recovery must select an exact logical old or new state according to the table above. Its next integration is to create a durable reservation before candidate construction rather than relying on candidate/staging names alone for non-reuse evidence.
+`append_log_offline_generation_compact_switch_unix_v2` composes durable reservation, source selection, exact live-state compact-copy construction, stale-source detection, durable publication, and final authority/image verification. It allocates above every observed generation/final-marker/staging-marker/reservation id and keeps the reservation after every later success or failure so generation identity is never reused. A deterministic late-write test proves pre-publication raw-path source drift leaves only an uncommitted reserved orphan and preserves old authority. A composed fault matrix covers reservation/candidate and publication retained-state boundaries and requires exact logical old-or-new recovery.
 
 `GenerationLogEngine` adds generation-aware normal mutation routing. A handle adopts a newly published higher final marker before its next operation and refuses marker regression or malformed higher authority rather than continuing on a stale old generation.
 
-`append_log_generation_writer_lock_v1` adds cooperative cross-process exclusion. Each routed operation holds a create-new sibling lock from before authority refresh through the operation. Compact-switch publication acquires the same lease before its final source/authority recheck and keeps it through marker publication and final verification. The standalone marker-publisher CLI also acquires the lease. A stale crash lock is never stolen automatically; it fails closed until explicitly cleared after operator verification.
+`append_log_generation_writer_lock_v1` adds cooperative cross-process exclusion. Each routed operation holds a create-new sibling lock from before authority refresh through the operation. Compact-switch publication acquires the same lease before its final source/authority recheck and keeps it through marker publication and final verification. The standalone marker-publisher CLI also acquires the lease. A stale crash lock is never stolen automatically; guarded operator tooling can inspect exact retained evidence and clear it only after explicit no-live-writer confirmation.
 
-`append_log_generation_cleanup_unix_v1` adds conservative retained-history cleanup under that same writer lease. It deletes generation logs and final markers only below current authority, plus staging markers only at or below current authority. Higher staging-marker ids and higher uncommitted generation files are still retained because current compact candidate construction can occur outside the publication lease and has not yet been migrated to durable pre-construction reservations. Lower markers are removed and the generation directory synchronized before lower generation logs are removed and synchronized. The current authority is re-verified before deletion, between metadata/data phases, and after cleanup.
+`append_log_generation_cleanup_unix_v1` adds conservative retained-history cleanup under that same writer lease. It removes obsolete lower final markers/staging evidence before obsolete lower generation logs, synchronizes the directory at each visibility boundary, and re-verifies authority before, between, and after deletion phases.
+
+`append_log_generation_orphan_retire_unix_v2` uses retained reservation evidence to reclaim an explicitly abandoned higher uncommitted candidate and optional same-id staging marker without lowering the allocation frontier. Retirement is operator-attested rather than automatic: the inspected candidate/staging fingerprints must still match under the writer lease and the caller must confirm the builder has stopped. The reservation itself is never removed.
+
+`append_log_legacy_to_generation_migration_unix_v1` provides an offline import path from a clean legacy one-file append log into a fresh generation directory. Migration retains the old file, captures a synchronized exact source snapshot, constructs generation 1 from that immutable snapshot, byte-compares the live source before and after publication, durably publishes generation 1, and requires the new directory to reproduce the captured live state. Applications must explicitly cut over to `GenerationLogEngine`; migration does not redirect or disable the old raw path.
 
 The writer lock deliberately lives outside the retained generation namespace, so transient coordination does not alter recovery evidence or generation-id allocation. Raw-path `LogEngine` users do not participate and remain outside the exclusion contract.
 
-Hosted-CI fixtures validate format/recovery, reservation semantics, composed interruption states, cooperative exclusion semantics, and cleanup state transitions. The pre-directory-sync final-link case explicitly permits old or new: the tests exercise a visible marker and a modeled loss of that unsynchronized directory entry, not a physical power-loss emulator. Hosted CI does not by itself prove real power-loss durability of arbitrary filesystems or prevent a process that intentionally bypasses the protocol.
+Hosted-CI fixtures validate format/recovery, reservation semantics, composed interruption states, cooperative exclusion semantics, cleanup/orphan-retirement state transitions, and legacy migration behavior. The pre-directory-sync final-link case explicitly permits old or new: the tests exercise a visible marker and a modeled loss of that unsynchronized directory entry, not a physical power-loss emulator. Hosted CI does not by itself prove real power-loss durability of arbitrary filesystems or prevent a process that intentionally bypasses the protocol.
 
 ## What remains before broad Phase 1 compaction completion
 
-The remaining lifecycle work is narrower but still material:
+The Unix lifecycle is now substantially complete: retained authority, marker-bound recovery, durable reservations, authoritative compact switching, routed mutation adoption, cooperative cross-process exclusion, guarded stale-lock recovery, deterministic composed fault coverage, lower-history cleanup, reservation-backed abandoned-candidate retirement, and offline legacy import all exist.
 
-- wire durable reservations into compact-switch candidate allocation before construction;
-- Windows-equivalent durable final-marker/reservation publication;
-- guarded reclamation of confirmed-abandoned higher generation/staging artifacts while preserving their reservation frontier evidence;
-- migration/coexistence rules for legacy one-file users and a decision about where the generation-directory contract ultimately lives in the crate layering;
-- stronger ownership if the project later wants to protect against non-cooperating raw-path writers rather than only generation-aware participants.
+The remaining material boundaries are:
 
-The broad roadmap `Compaction` item remains intentionally open until the remaining lifecycle pieces are implemented, even though Unix now has an authoritative compact switch, generation-aware mutation routing, cooperative cross-process writer exclusion, conservative obsolete-history cleanup, and a durable generation-id reservation primitive.
+- Windows-equivalent durable retained-entry operations for reservation, final-marker publication, cleanup/orphan retirement, and migration;
+- stronger ownership if the project wants to make direct raw-path legacy/generation writes impossible rather than treating them as an explicitly unsupported bypass;
+- a later crate-layering decision if generation-directory lifecycle support should move below `db-cli` into a dedicated storage-layer API.
+
+The broad roadmap `Compaction` item remains intentionally open until the cross-platform and ownership boundaries are resolved; the repository does not equate Unix-hosted correctness coverage with a portable durability guarantee.
