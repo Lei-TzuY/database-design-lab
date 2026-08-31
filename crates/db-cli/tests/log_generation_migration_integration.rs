@@ -49,11 +49,14 @@ fn unix_migration_imports_live_state_and_leaves_legacy_source_untouched() {
     assert!(target.join("generation-00000000000000000001.log").is_file());
     assert!(target.join("commit-00000000000000000001.marker").is_file());
 
-    let mut routed = GenerationLogEngine::open(&target).expect("open migrated generation directory");
+    let mut routed =
+        GenerationLogEngine::open(&target).expect("open migrated generation directory");
     assert_eq!(routed.get(b"a").expect("get a"), Some(b"two".to_vec()));
     assert_eq!(routed.get(b"b").expect("get b"), None);
     assert_eq!(routed.get(b"c").expect("get c"), Some(Vec::new()));
-    routed.put(b"d", b"four").expect("write through routed engine");
+    routed
+        .put(b"d", b"four")
+        .expect("write through routed engine");
     routed.reopen().expect("reopen routed engine");
     assert_eq!(routed.get(b"d").expect("get d"), Some(b"four".to_vec()));
     assert_eq!(routed.authoritative_generation(), 1);
@@ -105,7 +108,10 @@ fn unix_migration_rejects_recoverable_legacy_tail_before_creating_target() {
 
     let output = run_migrate(&source, &target);
     assert_failure_contains(&output, "complete clean append-log image");
-    assert!(!target.exists(), "invalid source must not create migration target");
+    assert!(
+        !target.exists(),
+        "invalid source must not create migration target"
+    );
     assert_eq!(
         fs::read(&source).expect("read truncated source after rejection"),
         source_before,
