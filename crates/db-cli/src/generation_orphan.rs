@@ -12,10 +12,8 @@ use crate::generation_directory::{
 use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
 use crate::generation_marker::Crc32Ieee;
 
-pub const GENERATION_ORPHAN_RETIRE_PROTOCOL: &str =
-    "append_log_generation_orphan_retire_unix_v2";
-pub const GENERATION_ORPHAN_INSPECT_PROTOCOL: &str =
-    "append_log_generation_orphan_inspect_v2";
+pub const GENERATION_ORPHAN_RETIRE_PROTOCOL: &str = "append_log_generation_orphan_retire_unix_v2";
+pub const GENERATION_ORPHAN_INSPECT_PROTOCOL: &str = "append_log_generation_orphan_inspect_v2";
 const FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -183,7 +181,10 @@ fn retire_generation_orphan_unix(
     require_fingerprint(generation, orphan_path, expected_orphan_fingerprint)?;
     require_staging_fingerprint(
         generation,
-        namespace.staging_marker_files.get(&generation).map(PathBuf::as_path),
+        namespace
+            .staging_marker_files
+            .get(&generation)
+            .map(PathBuf::as_path),
         expected_staging_fingerprint,
     )?;
 
@@ -237,7 +238,9 @@ fn retire_generation_orphan_unix(
     let final_verified = verify_expected_authority(lease.directory(), expected_authority)?;
     let final_namespace = scan_generation_namespace(lease.directory())?;
     if final_namespace.generation_files.contains_key(&generation)
-        || final_namespace.staging_marker_files.contains_key(&generation)
+        || final_namespace
+            .staging_marker_files
+            .contains_key(&generation)
     {
         return invalid(format!(
             "retired generation {generation} still has candidate or staging evidence after synchronized removal"
