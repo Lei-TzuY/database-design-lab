@@ -269,11 +269,11 @@ fn retire_generation_orphan_unix(
     })
 }
 
-fn validate_reserved_orphan_candidate<'a>(
-    namespace: &'a crate::generation_directory::GenerationNamespace,
+fn validate_reserved_orphan_candidate(
+    namespace: &crate::generation_directory::GenerationNamespace,
     authoritative_generation: u64,
     generation: u64,
-) -> Result<&'a Path, GenerationOrphanError> {
+) -> Result<&Path, GenerationOrphanError> {
     if generation == 0 {
         return invalid("orphan generation id must be greater than zero");
     }
