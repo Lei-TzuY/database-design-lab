@@ -76,6 +76,10 @@ name = "db-lab-log-generation-migrate"
 path = "src/bin/db-lab-log-generation-migrate.rs"
 
 [[bin]]
+name = "db-lab-log-generation-cutover"
+path = "src/bin/db-lab-log-generation-cutover.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 

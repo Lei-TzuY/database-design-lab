@@ -50,16 +50,22 @@ A successful return does not delete the legacy source. Retaining it is deliberat
 
 ## After migration
 
-Applications that adopt the migration must explicitly switch configuration from the legacy file path to the new generation directory and use `GenerationLogEngine` (or another generation-aware interface). Normal routed mutations then participate in the shared writer lease, no-rollback authority selection, durable reservation, compact-switch, and cleanup protocols.
+Do not begin routed mutations yet if the deployment wants the repository-enforced Unix legacy-path handoff. While generation 1 is still the untouched imported image, run `db-lab-log-generation-cutover` as documented in `docs/append-log-legacy-cutover.md`.
 
-The old file remains a valid append-log file and therefore can still be mutated by code that deliberately bypasses the generation-aware path. The repository does not claim to prevent that. Operational cutover must stop using the legacy path once the new directory is accepted.
+That explicit second step retains the old append-log inode under a no-overwrite sibling name and atomically replaces the former legacy pathname with a synchronized non-log sentinel. New `LogEngine::open` calls at the old pathname then fail rather than silently continuing the retired database. A preexisting raw file descriptor is isolated onto the retained inode and cannot mutate the generation target.
+
+After successful cutover, configure the application to use `GenerationLogEngine` on the new generation directory. Normal routed mutations then participate in the shared writer lease, no-rollback authority selection, durable reservation, compact-switch, and cleanup protocols.
+
+Migration remains deliberately non-destructive on its own. Deployments that do not run the explicit cutover retain the previous boundary: the old file remains a valid append log and code that deliberately bypasses the generation-aware path can keep mutating it.
 
 ## Platform boundary
 
-Migration is Unix-only because successful creation of a new retained generation directory relies on a parent-directory durability barrier and generation 1 uses the Unix durable marker publisher. Non-Unix targets fail before filesystem access.
+Migration and explicit pathname cutover are Unix-only because successful retained-entry creation/replacement depends on parent-directory durability barriers and generation 1 uses the Unix durable marker publisher. Non-Unix targets fail before filesystem access.
 
-Windows CI therefore validates fail-before-filesystem behavior rather than pretending a Windows migration durability guarantee exists.
+Windows CI therefore validates fail-before-filesystem behavior rather than pretending a Windows migration or cutover durability guarantee exists.
 
 ## Remaining boundary
 
-This migration closes the repository's legacy-layout import gap on Unix, but it does not make the broad Phase 1 compaction milestone cross-platform complete. Remaining issues include Windows-equivalent retained-entry durability and stronger ownership if the project wants to make direct raw-path writes impossible after cutover rather than treating them as an explicitly unsupported bypass.
+The migration-plus-cutover sequence closes normal legacy-path ownership handoff on Unix: new opens at the former legacy pathname are rejected and preexisting descriptors are isolated from generation authority. It does not sandbox a process with arbitrary filesystem access from deliberately opening the retained backup or canonical generation files directly.
+
+The broad Phase 1 compaction milestone remains open primarily because Windows-equivalent retained-entry durability is still unsupported. Cross-platform completion must not be inferred from the Unix protocol.
