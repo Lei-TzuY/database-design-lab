@@ -6,7 +6,7 @@ It implements the common `KvEngine` contract and reports the same append-log log
 
 ## Open and recovery
 
-`GenerationLogEngine::open(directory)` acquires the cooperative generation-writer lease before running the shared `append_log_generation_directory_v2` verifier and mutable open. Only the highest final committed marker may select authority; missing/corrupt highest committed generations fail closed and the wrapper never falls back to an older committed generation.
+`GenerationLogEngine::open(directory)` acquires the cooperative generation-writer lease before running the shared `append_log_generation_directory_v3` verifier and mutable open. Only the highest final committed marker may select authority; reservation evidence affects generation-id allocation only. Missing/corrupt highest committed generations fail closed and the wrapper never falls back to an older committed generation.
 
 Only after the retained marker and committed-prefix proof succeed does the wrapper open the selected append-log file mutably. This preserves the existing rule for a canonical incomplete final append: `LogEngine::open` may repair it only after the generation verifier has proven that the marker-bound compact base prefix is intact and the tail begins after that prefix. The directory is verified again after mutable open/repair and authority must still name the same generation.
 
@@ -23,7 +23,7 @@ After acquiring the lease, ordinary operations inspect the highest **final marke
 
 A poisoned routing handle rejects ordinary operations with `DbError::Poisoned`. Explicit `reopen()` is the recovery boundary: it re-runs the full generation-directory verifier, refuses any authority lower than the generation already observed by the handle, and clears poison only after a valid same-or-higher authority is opened.
 
-The lease is a create-new sibling file of the canonical generation directory, for example `data/generations` uses `data/.generations.append-log-writer.lock`. It deliberately lives **outside** the retained generation namespace, so retained evidence contains only generation logs and marker artifacts. New lock records contain a protocol tag, process id, and acquisition id for operator diagnosis, but the implementation never trusts any of those fields to infer liveness or steal a lock.
+The lease is a create-new sibling file of the canonical generation directory, for example `data/generations` uses `data/.generations.append-log-writer.lock`. It deliberately lives **outside** the retained generation namespace, so retained evidence contains only generation logs, marker artifacts, and durable allocation reservations. New lock records contain a protocol tag, process id, and acquisition id for operator diagnosis, but the implementation never trusts any of those fields to infer liveness or steal a lock.
 
 A crashed process may leave a stale lock. That is a liveness failure, not a reason to risk two writers: subsequent coordinated operations fail closed until an operator independently proves no writer is alive. `db-lab-log-generation-lock inspect` exposes the exact bounded lock evidence; `clear-stale` requires both the exact observed record bytes and an explicit `--confirm-no-live-writer` attestation before removal. See `docs/append-log-generation-lock-recovery.md`. Normal lease drop removes the sibling path only while its bytes still match that lease's own owner record.
 
@@ -47,7 +47,9 @@ This is **cooperative** cross-process exclusion, not protection against arbitrar
 
 The standalone `db-lab-log-generation-publish` CLI acquires the same lease before invoking the lower-level marker publication primitive. The lower-level shared publisher remains a caller-serialized primitive so the compact switch can call it while already holding the lease without self-deadlock.
 
-The project still does not claim Windows final-marker durability, automatic process-liveness inference, old-generation/orphan cleanup, or adversarial protection from a process that intentionally ignores the coordination protocol.
+Directory v3 reservations are non-authoritative and do not alter routing. They only prevent generation-id reuse after candidate/staging cleanup; see `docs/append-log-generation-reservations.md`.
+
+The project still does not claim Windows final-marker/reservation durability, automatic process-liveness inference, complete higher-orphan cleanup, or adversarial protection from a process that intentionally ignores the coordination protocol.
 
 ## Tests
 
