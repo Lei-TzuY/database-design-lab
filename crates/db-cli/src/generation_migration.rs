@@ -147,10 +147,12 @@ mod unix {
         fs::create_dir(&target_directory).map_err(|source| io_error(&target_directory, source))?;
         sync_directory(&target_directory).map_err(|source| io_error(&target_directory, source))?;
         if let Err(source) = sync_directory(&target_parent) {
-            return Err(LegacyGenerationMigrationError::TargetDirectoryDurabilityUncertain {
-                target: target_directory,
-                source,
-            });
+            return Err(
+                LegacyGenerationMigrationError::TargetDirectoryDurabilityUncertain {
+                    target: target_directory,
+                    source,
+                },
+            );
         }
 
         let generation_log = canonical_generation_name(IMPORT_GENERATION);
@@ -161,9 +163,11 @@ mod unix {
 
         let lease = acquire_generation_writer_lease(&target_directory)?;
         if !source_matches_snapshot(&source, snapshot.path())? {
-            return Err(LegacyGenerationMigrationError::SourceChangedBeforePublication {
-                target: target_directory,
-            });
+            return Err(
+                LegacyGenerationMigrationError::SourceChangedBeforePublication {
+                    target: target_directory,
+                },
+            );
         }
 
         let compacted = LogEngine::inspect(&generation_path, true)?;
@@ -183,9 +187,11 @@ mod unix {
         validate_imported_state(IMPORT_GENERATION, &captured, &final_state)?;
 
         if !source_matches_snapshot(&source, snapshot.path())? {
-            return Err(LegacyGenerationMigrationError::SourceChangedAfterPublication {
-                target: target_directory,
-            });
+            return Err(
+                LegacyGenerationMigrationError::SourceChangedAfterPublication {
+                    target: target_directory,
+                },
+            );
         }
 
         Ok(LegacyGenerationMigrationSummary {
@@ -214,7 +220,9 @@ mod unix {
         fs::canonicalize(path).map_err(|source| io_error(path, source))
     }
 
-    fn require_clean_source(path: &Path) -> Result<InspectionReport, LegacyGenerationMigrationError> {
+    fn require_clean_source(
+        path: &Path,
+    ) -> Result<InspectionReport, LegacyGenerationMigrationError> {
         let report = LogEngine::inspect(path, true)?;
         if report.verification.recoverable_tail.is_some()
             || report.verification.file_bytes != report.verification.valid_bytes
@@ -231,12 +239,11 @@ mod unix {
         expected: &InspectionReport,
     ) -> Result<NamedTempFile, LegacyGenerationMigrationError> {
         let mut input = File::open(source).map_err(|error| io_error(source, error))?;
-        let mut snapshot = NamedTempFile::new().map_err(|error| {
-            LegacyGenerationMigrationError::Io {
+        let mut snapshot =
+            NamedTempFile::new().map_err(|error| LegacyGenerationMigrationError::Io {
                 path: PathBuf::from("<temporary legacy migration snapshot>"),
                 source: error,
-            }
-        })?;
+            })?;
         let snapshot_path = snapshot.path().to_path_buf();
         io::copy(&mut input, snapshot.as_file_mut())
             .map_err(|error| io_error(&snapshot_path, error))?;
@@ -255,7 +262,12 @@ mod unix {
         path: &Path,
     ) -> Result<(PathBuf, PathBuf), LegacyGenerationMigrationError> {
         match fs::symlink_metadata(path) {
-            Ok(_) => return invalid(format!("migration target already exists: {}", path.display())),
+            Ok(_) => {
+                return invalid(format!(
+                    "migration target already exists: {}",
+                    path.display()
+                ))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => return Err(io_error(path, source)),
         }
