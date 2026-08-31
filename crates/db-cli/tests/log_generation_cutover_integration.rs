@@ -84,11 +84,13 @@ fn unix_cutover_retires_legacy_path_and_isolates_preexisting_raw_handle() {
     );
 
     let retained_state = LogEngine::inspect(&retained, true).expect("inspect retained source");
+    let stale_entry = retained_state
+        .entries
+        .iter()
+        .find(|entry| entry.key.as_slice() == b"stale")
+        .expect("retained stale entry");
     assert_eq!(
-        retained_state
-            .entries
-            .get(b"stale" as &[u8])
-            .map(Vec::as_slice),
+        stale_entry.value.as_ref().map(|value| value.as_slice()),
         Some(b"isolated" as &[u8])
     );
 
