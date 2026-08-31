@@ -71,4 +71,4 @@ Read-only v3 directory verification remains cross-platform.
 
 This slice establishes durable non-reuse evidence but does not by itself delete higher abandoned candidates. A higher uncommitted generation may still be under construction outside the authority-changing critical section. Future guarded orphan cleanup must establish abandonment separately before deleting candidate or staging artifacts.
 
-The next compact-switch integration must reserve an id before candidate construction. After that migration, guarded cleanup can preserve reservation evidence while reclaiming confirmed-abandoned higher artifacts without lowering the allocation frontier.
+The current compact-switch still allocates directly from retained namespace evidence. The next integration slice must make it call the reservation primitive before candidate construction. Until that migration lands, existing compact candidates continue to preserve their own frontier through generation/staging names.
