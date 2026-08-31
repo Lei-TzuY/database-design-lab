@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::generation_directory::GenerationDirectoryError;
 #[cfg(unix)]
 use crate::generation_directory::{canonical_reservation_name, verify_generation_directory};
-use crate::generation_directory::GenerationDirectoryError;
 #[cfg(unix)]
 use crate::generation_lock::acquire_generation_writer_lease;
 use crate::generation_lock::GenerationWriterLockError;
@@ -102,7 +102,10 @@ fn reserve_next_generation_unix(
     }
 
     let after = verify_generation_directory(lease.directory())?;
-    if !after.summary().reservation_generation_ids.contains(&generation)
+    if !after
+        .summary()
+        .reservation_generation_ids
+        .contains(&generation)
         || after.summary().highest_observed_generation < generation
     {
         return Err(GenerationReservationError::NotRetained { generation });
