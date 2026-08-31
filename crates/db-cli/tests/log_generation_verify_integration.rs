@@ -33,7 +33,7 @@ fn verifier_selects_highest_commit_and_ignores_higher_uncommitted_orphans() {
     let output = run_verify(directory.path());
     assert_success("verify generation directory", &output);
     let summary: Value = serde_json::from_slice(&output.stdout).expect("decode summary");
-    assert_eq!(summary["protocol"], "append_log_generation_directory_v2");
+    assert_eq!(summary["protocol"], "append_log_generation_directory_v3");
     assert_eq!(summary["marker_format_version"], 2);
     assert_eq!(summary["authoritative_generation"], 2);
     assert_eq!(
@@ -42,6 +42,7 @@ fn verifier_selects_highest_commit_and_ignores_higher_uncommitted_orphans() {
     );
     assert_eq!(summary["highest_observed_generation"], 4);
     assert_eq!(summary["marker_generation_ids"], serde_json::json!([1, 2]));
+    assert_eq!(summary["reservation_generation_ids"], serde_json::json!([]));
     assert_eq!(
         summary["uncommitted_generation_ids"],
         serde_json::json!([3, 4])

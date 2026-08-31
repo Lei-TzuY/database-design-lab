@@ -1,6 +1,6 @@
 # Append-log generation marker publication
 
-`db-lab-log-generation-publish` is the writer-side publication primitive for `append_log_generation_directory_v2` commit markers.
+`db-lab-log-generation-publish` is the writer-side marker-v2 publication primitive for the current `append_log_generation_directory_v3` retained namespace.
 
 ```text
 db-lab-log-generation-publish \
@@ -38,7 +38,7 @@ The final marker is not reported as durably committed until step 9 succeeds. No 
 
 ## Crash states and staging markers
 
-`staging-commit-%020d.marker` is a protocol-defined, non-authoritative crash residue. The v2 reader accepts canonical staging names, reports their generation ids, and never uses their contents for generation selection.
+`staging-commit-%020d.marker` is a protocol-defined, non-authoritative crash residue. The v3 directory reader accepts canonical staging names, reports their generation ids, and never uses their contents for generation selection. Directory v3 additionally accepts zero-byte `reserve-%020d.frontier` allocation evidence; reservations are also non-authoritative and are unrelated to marker selection.
 
 This gives the publication sequence explicit crash behavior:
 
@@ -53,7 +53,7 @@ Stale canonical staging files are safe to remove before a retry only when they a
 
 Final markers are published with `hard_link`, not overwrite/rename replacement. The target marker must not already exist, and the requested generation must be newer than every existing committed marker id. A retry therefore cannot silently rewrite retained commit evidence.
 
-Higher uncommitted generation logs and staging markers remain non-authoritative. Selection is still governed by the highest final `commit-%020d.marker`, as defined by `docs/append-log-generation-directory.md`.
+Higher uncommitted generation logs, staging markers, and reservation files remain non-authoritative. Selection is still governed by the highest final `commit-%020d.marker`, as defined by `docs/append-log-generation-directory.md`.
 
 ## Windows boundary
 
@@ -63,10 +63,12 @@ A future Windows implementation must establish and test an explicit directory-en
 
 ## What this still does not complete
 
-This primitive publishes commit authority for an already-created clean generation. The separate offline compact-switch operation now composes allocation, exact live-state construction, routed-writer exclusion, publication, and deterministic interruption checks across these publication boundaries. The broader lifecycle still lacks:
+This primitive publishes commit authority for an already-created clean generation. The separate offline compact-switch operation now composes allocation, exact live-state construction, routed-writer exclusion, publication, and deterministic interruption checks across these publication boundaries. Directory v3 adds a durable reservation primitive, but the compact-switch allocator is not yet wired to create a reservation before candidate construction.
 
-- Windows-equivalent durable marker publication;
-- safe cleanup of old committed generations and uncommitted crash orphans;
+The broader lifecycle still lacks:
+
+- Windows-equivalent durable marker/reservation publication;
+- guarded cleanup of confirmed-abandoned higher generation/staging artifacts while retaining reservation evidence;
 - migration/coexistence rules for legacy single-file `LogEngine` users.
 
 Therefore the general Phase 1 compaction milestone remains open.

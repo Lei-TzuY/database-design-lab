@@ -7,5 +7,6 @@ pub mod generation_lock;
 pub mod generation_marker;
 pub mod generation_prefix;
 pub mod generation_publication;
+pub mod generation_reservation;
 pub mod host_preflight;
 pub mod log_compaction;

@@ -14,12 +14,14 @@ use crate::generation_marker::{
 };
 use crate::generation_prefix::verify_committed_prefix;
 
-pub const GENERATION_DIRECTORY_PROTOCOL: &str = "append_log_generation_directory_v2";
+pub const GENERATION_DIRECTORY_PROTOCOL: &str = "append_log_generation_directory_v3";
 pub const GENERATION_PREFIX: &str = "generation-";
 pub const GENERATION_SUFFIX: &str = ".log";
 pub const COMMIT_PREFIX: &str = "commit-";
 pub const COMMIT_SUFFIX: &str = ".marker";
 pub const STAGING_COMMIT_PREFIX: &str = "staging-commit-";
+pub const RESERVATION_PREFIX: &str = "reserve-";
+pub const RESERVATION_SUFFIX: &str = ".frontier";
 pub const GENERATION_ID_WIDTH: usize = 20;
 pub const MAX_DIRECTORY_ENTRIES: usize = 8_192;
 
@@ -32,6 +34,7 @@ pub struct GenerationVerificationSummary {
     pub highest_observed_generation: u64,
     pub marker_generation_ids: Vec<u64>,
     pub staging_marker_generation_ids: Vec<u64>,
+    pub reservation_generation_ids: Vec<u64>,
     pub uncommitted_generation_ids: Vec<u64>,
     pub committed_prefix: CommittedPrefix,
     pub committed_prefix_verification: VerificationReport,
@@ -74,6 +77,7 @@ pub struct GenerationNamespace {
     pub generation_files: BTreeMap<u64, PathBuf>,
     pub marker_files: BTreeMap<u64, PathBuf>,
     pub staging_marker_files: BTreeMap<u64, PathBuf>,
+    pub reservation_files: BTreeMap<u64, PathBuf>,
 }
 
 impl GenerationNamespace {
@@ -82,6 +86,7 @@ impl GenerationNamespace {
             .keys()
             .chain(self.marker_files.keys())
             .chain(self.staging_marker_files.keys())
+            .chain(self.reservation_files.keys())
             .copied()
             .max()
     }
@@ -163,6 +168,7 @@ pub fn verify_generation_directory(
     })?;
     let marker_generation_ids = namespace.marker_files.keys().copied().collect();
     let staging_marker_generation_ids = namespace.staging_marker_files.keys().copied().collect();
+    let reservation_generation_ids = namespace.reservation_files.keys().copied().collect();
     let uncommitted_generation_ids = namespace
         .generation_files
         .keys()
@@ -189,6 +195,7 @@ pub fn verify_generation_directory(
             highest_observed_generation,
             marker_generation_ids,
             staging_marker_generation_ids,
+            reservation_generation_ids,
             uncommitted_generation_ids,
             committed_prefix: marker.committed_prefix,
             committed_prefix_verification,
@@ -203,6 +210,7 @@ pub fn scan_generation_namespace(
     let mut generation_files = BTreeMap::new();
     let mut marker_files = BTreeMap::new();
     let mut staging_marker_files = BTreeMap::new();
+    let mut reservation_files = BTreeMap::new();
     let entries = fs::read_dir(directory).map_err(|source| io_error(directory, source))?;
 
     for (index, entry) in entries.enumerate() {
@@ -232,6 +240,11 @@ pub fn scan_generation_namespace(
             let _ = staging_marker_files.insert(id, path);
             continue;
         }
+        if let Some(id) = parse_canonical_reservation_name(name)? {
+            require_empty_reservation_file(&path)?;
+            let _ = reservation_files.insert(id, path);
+            continue;
+        }
         return invalid(format!("unexpected generation directory entry {name:?}"));
     }
 
@@ -239,6 +252,7 @@ pub fn scan_generation_namespace(
         generation_files,
         marker_files,
         staging_marker_files,
+        reservation_files,
     })
 }
 
@@ -263,6 +277,17 @@ pub fn parse_canonical_staging_commit_name(
     )
 }
 
+pub fn parse_canonical_reservation_name(
+    name: &str,
+) -> Result<Option<u64>, GenerationDirectoryError> {
+    parse_canonical_id(
+        name,
+        RESERVATION_PREFIX,
+        RESERVATION_SUFFIX,
+        "generation reservation",
+    )
+}
+
 pub fn canonical_generation_name(id: u64) -> String {
     format!("{GENERATION_PREFIX}{id:020}{GENERATION_SUFFIX}")
 }
@@ -273,6 +298,10 @@ pub fn canonical_marker_name(id: u64) -> String {
 
 pub fn canonical_staging_marker_name(id: u64) -> String {
     format!("{STAGING_COMMIT_PREFIX}{id:020}{COMMIT_SUFFIX}")
+}
+
+pub fn canonical_reservation_name(id: u64) -> String {
+    format!("{RESERVATION_PREFIX}{id:020}{RESERVATION_SUFFIX}")
 }
 
 pub fn canonical_real_directory(path: &Path) -> Result<PathBuf, GenerationDirectoryError> {
@@ -291,6 +320,18 @@ pub fn require_real_regular_file(path: &Path, label: &str) -> Result<(), Generat
     if !metadata.file_type().is_file() {
         return invalid(format!(
             "{label} must be a real regular file rather than a symlink or non-file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn require_empty_reservation_file(path: &Path) -> Result<(), GenerationDirectoryError> {
+    require_real_regular_file(path, "generation reservation")?;
+    let metadata = fs::metadata(path).map_err(|source| io_error(path, source))?;
+    if metadata.len() != 0 {
+        return invalid(format!(
+            "generation reservation must contain zero bytes: {}",
             path.display()
         ));
     }
@@ -385,9 +426,15 @@ mod tests {
                 .expect("parse staging marker"),
             Some(42)
         );
+        assert_eq!(
+            parse_canonical_reservation_name("reserve-00000000000000000042.frontier")
+                .expect("parse reservation"),
+            Some(42)
+        );
         assert!(parse_canonical_generation_name("generation-42.log").is_err());
         assert!(parse_canonical_commit_name("commit-00000000000000000000.marker").is_err());
         assert!(parse_canonical_staging_commit_name("staging-commit-42.marker").is_err());
+        assert!(parse_canonical_reservation_name("reserve-42.frontier").is_err());
     }
 
     #[test]
@@ -396,7 +443,8 @@ mod tests {
             generation_files: BTreeMap::from([(3, PathBuf::from("g3"))]),
             marker_files: BTreeMap::from([(2, PathBuf::from("m2"))]),
             staging_marker_files: BTreeMap::from([(7, PathBuf::from("s7"))]),
+            reservation_files: BTreeMap::from([(11, PathBuf::from("r11"))]),
         };
-        assert_eq!(directory.highest_observed_generation(), Some(7));
+        assert_eq!(directory.highest_observed_generation(), Some(11));
     }
 }
