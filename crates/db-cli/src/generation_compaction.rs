@@ -20,11 +20,14 @@ use crate::generation_publication::{
 };
 use crate::generation_publication::{GenerationPublicationError, GenerationPublicationSummary};
 #[cfg(unix)]
+use crate::generation_reservation::reserve_next_generation;
+use crate::generation_reservation::{GenerationReservationError, GenerationReservationSummary};
+#[cfg(unix)]
 use crate::log_compaction::compact_log_to_fresh_file;
 use crate::log_compaction::{LogCompactionError, LogCompactionReport};
 
 pub const OFFLINE_GENERATION_COMPACT_SWITCH_PROTOCOL: &str =
-    "append_log_offline_generation_compact_switch_unix_v1";
+    "append_log_offline_generation_compact_switch_unix_v2";
 
 #[cfg(all(test, unix))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +84,7 @@ pub struct OfflineGenerationCompactSwitchSummary {
     pub new_generation: u64,
     pub old_generation_log: String,
     pub new_generation_log: String,
+    pub reservation: GenerationReservationSummary,
     pub compaction: LogCompactionReport,
     pub publication: GenerationPublicationSummary,
     pub final_generation: GenerationVerificationSummary,
@@ -95,11 +99,20 @@ pub enum OfflineGenerationCompactSwitchError {
     #[error(transparent)]
     WriterLock(#[from] GenerationWriterLockError),
     #[error(transparent)]
+    Reservation(#[from] GenerationReservationError),
+    #[error(transparent)]
     Database(#[from] DbError),
     #[error(transparent)]
     Compaction(#[from] LogCompactionError),
     #[error(transparent)]
     Publication(#[from] GenerationPublicationError),
+    #[error(
+        "reserved generation {reserved_generation} is no longer newer than authoritative generation {authoritative_generation}; retry to reserve a fresh generation id"
+    )]
+    ReservedGenerationObsolete {
+        reserved_generation: u64,
+        authoritative_generation: u64,
+    },
     #[error(
         "authoritative source changed while offline compaction was in progress; generation {orphan_generation} remains uncommitted and must not be treated as authoritative"
     )]
@@ -119,12 +132,14 @@ pub enum OfflineGenerationCompactSwitchError {
 
 /// Offline authoritative compact switch for a generation directory.
 ///
-/// The expensive compact-copy build runs without the writer lease. Immediately before authority can
-/// change, the function acquires the cooperative cross-process writer lease, re-verifies the old
-/// authority and complete source state, verifies the compact candidate, publishes the marker, and
-/// verifies the new authority while still holding the lease. `GenerationLogEngine` operations use
-/// the same lease, closing their final check-to-publication race. Raw-path `LogEngine` users are
-/// outside this coordination contract and still must be quiesced by the caller.
+/// The operation first durably reserves its generation id under the shared writer lease, then releases
+/// the lease while building the expensive compact copy. The retained reservation permanently advances
+/// the allocation frontier even if candidate construction or later publication fails. Immediately before
+/// authority can change, the function reacquires the cooperative cross-process writer lease, re-verifies
+/// the old authority and complete source state, verifies the compact candidate, publishes the marker, and
+/// verifies the new authority while still holding the lease. `GenerationLogEngine` operations use the same
+/// lease, closing their final check-to-publication race. Raw-path `LogEngine` users are outside this
+/// coordination contract and still must be quiesced by the caller.
 pub fn compact_switch_generation_offline(
     directory: &Path,
 ) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError> {
@@ -154,13 +169,22 @@ fn compact_switch_generation_offline_impl<F>(
 where
     F: FnOnce(&Path) -> Result<(), OfflineGenerationCompactSwitchError>,
 {
+    let reservation = reserve_next_generation(directory)?;
     let before = verify_generation_directory(directory)?;
     let old_generation = before.summary().authoritative_generation;
+    if reservation.generation <= old_generation {
+        return Err(
+            OfflineGenerationCompactSwitchError::ReservedGenerationObsolete {
+                reserved_generation: reservation.generation,
+                authoritative_generation: old_generation,
+            },
+        );
+    }
     let old_generation_log = before.summary().authoritative_log.clone();
     let source_path = before.authoritative_log_path();
     let source_state = LogEngine::inspect(&source_path, true)?;
     let source_authority = SourceAuthorityWitness::from_summary(before.summary());
-    let new_generation = before.next_generation_id()?;
+    let new_generation = reservation.generation;
     let new_generation_log = canonical_generation_name(new_generation);
     let new_path = before.directory().join(&new_generation_log);
 
@@ -174,7 +198,7 @@ where
 
     // Only the authority-changing critical section is exclusive. A compliant routed writer may run
     // during compact-copy construction; if it did, this locked recheck detects the drift and leaves
-    // the candidate as a harmless uncommitted orphan.
+    // the candidate as a harmless uncommitted orphan. Its durable reservation keeps the id retired.
     let lease = acquire_generation_writer_lease(before.directory())?;
     let before_publication = verify_generation_directory(lease.directory())?;
     let current_authority = SourceAuthorityWitness::from_summary(before_publication.summary());
@@ -227,6 +251,7 @@ where
         new_generation,
         old_generation_log,
         new_generation_log,
+        reservation,
         compaction,
         publication,
         final_generation: final_verified.summary().clone(),
@@ -479,6 +504,12 @@ mod tests {
                 case.point
             );
             assert_eq!(
+                verified.summary().reservation_generation_ids,
+                vec![2],
+                "fault {:?} must retain its durable reservation",
+                case.point
+            );
+            assert_eq!(
                 verified.summary().uncommitted_generation_ids,
                 if case.expected_authority == 1 {
                     vec![2]
@@ -529,6 +560,7 @@ mod tests {
         let recovered =
             verify_generation_directory(&directory).expect("recover modeled pre-barrier state");
         assert_eq!(recovered.summary().authoritative_generation, 1);
+        assert_eq!(recovered.summary().reservation_generation_ids, vec![2]);
         assert_eq!(recovered.summary().uncommitted_generation_ids, vec![2]);
         assert_eq!(recovered.summary().staging_marker_generation_ids, vec![2]);
         assert_recovered_logical_state(&directory, &source_state, 1);
@@ -568,5 +600,6 @@ mod tests {
         assert!(!directory.join(canonical_marker_name(2)).exists());
         let verified = verify_generation_directory(&directory).expect("verify old authority");
         assert_eq!(verified.summary().authoritative_generation, 1);
+        assert_eq!(verified.summary().reservation_generation_ids, vec![2]);
     }
 }

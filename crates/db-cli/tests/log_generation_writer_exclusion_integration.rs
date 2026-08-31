@@ -16,6 +16,8 @@ use db_cli::generation_lock::{acquire_generation_writer_lease, GenerationWriterL
 use db_cli::generation_marker::{encode_commit_marker, CommittedPrefix, Crc32Ieee};
 #[cfg(unix)]
 use db_cli::generation_publication::publish_generation_marker;
+#[cfg(unix)]
+use db_cli::generation_reservation::GenerationReservationError;
 use db_core::{DbError, KvEngine};
 use db_storage_log::LogEngine;
 use tempfile::tempdir;
@@ -114,7 +116,7 @@ fn standalone_publisher_cli_cannot_cross_an_existing_writer_lease() {
 
 #[cfg(unix)]
 #[test]
-fn compact_switch_cannot_publish_through_held_lease_and_never_reuses_orphan_id() {
+fn compact_switch_cannot_reserve_through_held_lease_and_starts_cleanly_after_release() {
     let root = tempdir().expect("temporary root");
     let directory = root.path().join("generations");
     fs::create_dir(&directory).expect("create generation directory");
@@ -123,29 +125,28 @@ fn compact_switch_cannot_publish_through_held_lease_and_never_reuses_orphan_id()
 
     let lease = acquire_generation_writer_lease(&directory).expect("hold competing writer lease");
     let error = compact_switch_generation_offline(&directory)
-        .expect_err("held lease must stop authority publication");
+        .expect_err("held lease must stop reservation before candidate construction");
     assert!(matches!(
         error,
-        OfflineGenerationCompactSwitchError::WriterLock(GenerationWriterLockError::Busy { .. })
+        OfflineGenerationCompactSwitchError::Reservation(GenerationReservationError::Lock(
+            GenerationWriterLockError::Busy { .. }
+        ))
     ));
-    assert!(generation_path(&directory, 2).is_file());
+    assert!(!generation_path(&directory, 2).exists());
     assert!(!marker_path(&directory, 2).exists());
     let still_old = verify_generation_directory(&directory).expect("verify old authority");
     assert_eq!(still_old.summary().authoritative_generation, 1);
+    assert!(still_old.summary().reservation_generation_ids.is_empty());
 
     drop(lease);
     let switched = compact_switch_generation_offline(&directory).expect("retry compact switch");
     assert_eq!(
-        switched.new_generation, 3,
-        "retry must allocate above the uncommitted generation 2 orphan"
+        switched.new_generation, 2,
+        "a lease-blocked reservation creates no frontier evidence, so retry may reserve generation 2"
     );
-    assert_eq!(
-        verify_generation_directory(&directory)
-            .expect("verify new authority")
-            .summary()
-            .authoritative_generation,
-        3
-    );
+    let verified = verify_generation_directory(&directory).expect("verify new authority");
+    assert_eq!(verified.summary().authoritative_generation, 2);
+    assert_eq!(verified.summary().reservation_generation_ids, vec![2]);
 }
 
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {

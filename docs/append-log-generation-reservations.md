@@ -67,8 +67,20 @@ Durable reservation publication is currently Unix-only because success depends o
 
 Read-only v3 directory verification remains cross-platform.
 
+## Compact-switch integration
+
+`append_log_offline_generation_compact_switch_unix_v2` now calls the reservation primitive before candidate construction. The switch therefore has two deliberately separate lease windows:
+
+1. reserve a fresh generation id durably under the shared writer lease, then release it;
+2. build the expensive compact candidate without monopolizing writers;
+3. reacquire the same lease for the final old-authority/live-state recheck through durable marker publication and final verification.
+
+A successful switch reports its `GenerationReservationSummary` in the JSON result. If candidate construction, source-drift detection, or marker publication later fails, the reservation remains retained and that generation id stays consumed. Retry allocates above it rather than reusing an identity whose candidate may have existed before the failure.
+
+If authority advances after reservation but before the switch snapshots its source and reaches or exceeds the reserved id, the switch fails early with `ReservedGenerationObsolete`; it does not build or publish a candidate under an id that is no longer newer than authority. A higher reservation alone does not invalidate an older still-uncommitted reservation, because reservations carry no authority.
+
 ## Lifecycle boundary
 
-This slice establishes durable non-reuse evidence but does not by itself delete higher abandoned candidates. A higher uncommitted generation may still be under construction outside the authority-changing critical section. Future guarded orphan cleanup must establish abandonment separately before deleting candidate or staging artifacts.
+Reservation-backed compact switching now makes abandoned candidate/staging identity independently reclaimable from allocation history: the reservation can preserve non-reuse even if those artifacts are later deleted.
 
-The current compact-switch still allocates directly from retained namespace evidence. The next integration slice must make it call the reservation primitive before candidate construction. Until that migration lands, existing compact candidates continue to preserve their own frontier through generation/staging names.
+The remaining cleanup problem is therefore narrower. A future guarded orphan-cleanup protocol must still establish that a higher uncommitted candidate or staging artifact is actually abandoned before deleting it; reservation existence proves identity retirement, not process liveness or abandonment. Windows-equivalent durable reservation/marker publication and legacy single-file migration/coexistence also remain unresolved.
