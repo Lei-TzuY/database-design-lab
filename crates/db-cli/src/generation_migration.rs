@@ -116,7 +116,7 @@ pub fn migrate_legacy_append_log(
 #[cfg(unix)]
 mod unix {
     use std::fs::{self, File};
-    use std::io::{Read, Write};
+    use std::io::Read;
 
     use db_storage_log::LogEngine;
     use tempfile::NamedTempFile;
@@ -138,7 +138,7 @@ mod unix {
     ) -> Result<LegacyGenerationMigrationSummary, LegacyGenerationMigrationError> {
         let source = canonical_legacy_source(source)?;
         let captured = require_clean_source(&source)?;
-        let mut snapshot = capture_snapshot(&source, &captured)?;
+        let snapshot = capture_snapshot(&source, &captured)?;
         if !files_equal(&source, snapshot.path())? {
             return Err(LegacyGenerationMigrationError::SourceChangedDuringSnapshot);
         }
@@ -187,12 +187,6 @@ mod unix {
                 target: target_directory,
             });
         }
-
-        // Keep the temporary snapshot alive through every source comparison and final verification.
-        snapshot
-            .as_file_mut()
-            .sync_all()
-            .map_err(|source| io_error(snapshot.path(), source))?;
 
         Ok(LegacyGenerationMigrationSummary {
             protocol: LEGACY_GENERATION_MIGRATION_PROTOCOL,
@@ -243,13 +237,14 @@ mod unix {
                 source: error,
             }
         })?;
+        let snapshot_path = snapshot.path().to_path_buf();
         io::copy(&mut input, snapshot.as_file_mut())
-            .map_err(|error| io_error(snapshot.path(), error))?;
+            .map_err(|error| io_error(&snapshot_path, error))?;
         snapshot
             .as_file_mut()
             .sync_all()
-            .map_err(|error| io_error(snapshot.path(), error))?;
-        let captured = LogEngine::inspect(snapshot.path(), true)?;
+            .map_err(|error| io_error(&snapshot_path, error))?;
+        let captured = LogEngine::inspect(&snapshot_path, true)?;
         if &captured != expected {
             return Err(LegacyGenerationMigrationError::SourceChangedDuringSnapshot);
         }
