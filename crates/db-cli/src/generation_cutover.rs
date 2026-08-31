@@ -54,9 +54,7 @@ pub enum LegacyCutoverError {
         #[source]
         source: io::Error,
     },
-    #[error(
-        "legacy source changed before pathname cutover; no cutover sentinel was published"
-    )]
+    #[error("legacy source changed before pathname cutover; no cutover sentinel was published")]
     SourceChangedBeforeCutover,
     #[error(
         "legacy pathname {legacy_path} now contains the cutover sentinel but retained source {retained_path} changed during cutover; preserve target and retained source and reconcile explicitly"
@@ -148,9 +146,7 @@ mod unix {
         validate_fresh_import_target(&source_state, &before)?;
         let target_state = LogEngine::inspect(&before.authoritative_log_path(), true)?;
         if target_state.entries != source_state.entries {
-            return invalid(
-                "target generation 1 does not reproduce the current legacy live state",
-            );
+            return invalid("target generation 1 does not reproduce the current legacy live state");
         }
 
         let retained_path = sibling_path(&source, RETAINED_SUFFIX)?;
@@ -208,7 +204,9 @@ mod unix {
         validate_fresh_import_target(&source_state, &final_verified)?;
         let final_state = LogEngine::inspect(&final_verified.authoritative_log_path(), true)?;
         if final_state != target_state {
-            return invalid("target generation changed while legacy pathname cutover was in progress");
+            return invalid(
+                "target generation changed while legacy pathname cutover was in progress",
+            );
         }
 
         Ok(LegacyCutoverSummary {
@@ -322,7 +320,8 @@ mod unix {
             .create_new(true)
             .open(path)
             .map_err(|error| io_error(path, error))?;
-        file.write_all(bytes).map_err(|error| io_error(path, error))?;
+        file.write_all(bytes)
+            .map_err(|error| io_error(path, error))?;
         file.sync_all().map_err(|error| io_error(path, error))
     }
 
@@ -390,7 +389,10 @@ mod unix {
     ) -> Result<(), LegacyCutoverError> {
         let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
         if !metadata.file_type().is_file() {
-            return invalid(format!("{label} is not a real regular file: {}", path.display()));
+            return invalid(format!(
+                "{label} is not a real regular file: {}",
+                path.display()
+            ));
         }
         let actual = fs::read(path).map_err(|error| io_error(path, error))?;
         if actual != expected {
@@ -449,7 +451,10 @@ mod unix {
             )
             .expect_err("late source write must abort cutover");
 
-            assert!(matches!(error, LegacyCutoverError::SourceChangedBeforeCutover));
+            assert!(matches!(
+                error,
+                LegacyCutoverError::SourceChangedBeforeCutover
+            ));
             assert!(LogEngine::inspect(&source, true).is_ok());
             assert!(!sibling_path(&source, RETAINED_SUFFIX)
                 .expect("retained path")
