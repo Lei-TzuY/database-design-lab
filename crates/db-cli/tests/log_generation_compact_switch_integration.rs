@@ -97,7 +97,10 @@ fn unix_offline_switch_uses_a_fresh_durable_reservation_above_all_retained_front
     create_generation(&directory, 5, &[(b"orphan", b"candidate")]);
     fs::write(staging_marker_path(&directory, 7), b"crash residue").expect("write staging residue");
     let preexisting_reservation = run_reserve(&directory);
-    assert_success("reserve generation above orphan/staging evidence", &preexisting_reservation);
+    assert_success(
+        "reserve generation above orphan/staging evidence",
+        &preexisting_reservation,
+    );
     let preexisting: Value =
         serde_json::from_slice(&preexisting_reservation.stdout).expect("decode reservation");
     assert_eq!(preexisting["generation"], 8);
