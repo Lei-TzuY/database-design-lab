@@ -21,9 +21,9 @@ On non-Unix targets the operation returns unsupported before touching the suppli
 
 The switch preserves the frozen generation recovery law:
 
-1. verify `append_log_generation_directory_v2` and select only the highest final committed marker;
+1. verify `append_log_generation_directory_v3` and select only the highest final committed marker;
 2. snapshot the authoritative generation's complete inspected live state and marker/recovery witness;
-3. allocate the next generation id strictly above **every** observed generation log, final marker, and staging marker id;
+3. allocate the next generation id strictly above every observed generation log, final marker, staging marker, and durable reservation id;
 4. build a fresh compact log at that canonical generation path through `append_log_compact_copy_v1`;
 5. acquire the cooperative writer lease, re-verify the generation directory, and re-inspect the old authoritative source;
 6. require the authoritative generation, committed-prefix witness, complete log verification, and complete live state to be unchanged;
@@ -34,13 +34,15 @@ The switch preserves the frozen generation recovery law:
 
 The old generation and old marker are retained. This command performs no historical cleanup.
 
+Directory v3 now supplies a separate durable reservation primitive. The current switch observes reservation ids when computing its frontier but does **not yet create** a reservation before candidate construction; that wiring is the next lifecycle slice.
+
 ## Race and crash behavior
 
 A new compact generation has no authority until its final marker is durably published. If the old authoritative source changes before the pre-publication recheck, the command fails with `SourceChanged`; the compact target remains only an uncommitted orphan and recovery continues to select the old committed generation.
 
-The test suite injects a deterministic late source write after compact construction and before marker publication. It requires the switch to fail, requires the new generation file to remain uncommitted, and requires the v2 reader to keep the old generation authoritative.
+The test suite injects a deterministic late source write after compact construction and before marker publication. It requires the switch to fail, requires the new generation file to remain uncommitted, and requires the v3 reader to keep the old generation authoritative.
 
-The allocation frontier also treats uncommitted generation logs and staging markers as consumed ids. Crash residue is never silently reused: if the highest observed id is 7, the next switch attempts generation 8 even when only generation 1 is currently committed.
+The allocation frontier treats uncommitted generation logs, staging markers, and durable reservations as consumed ids. Crash residue is never silently reused while its evidence remains retained: if the highest observed id is 7, the next switch attempts generation 8 even when only generation 1 is currently committed.
 
 Marker publication retains its own durability-uncertain state. If the final marker becomes visible but the final parent-directory durability barrier fails, the operation returns the publication error and does not pretend the switch failed before authority could have changed. Operators must preserve retained generations and run the generation verifier before deciding how to retry.
 
@@ -70,7 +72,7 @@ This is the first concrete operation in the repository that performs the complet
 It closes these previously separate repository-side pieces for the Unix offline case:
 
 - authoritative source selection;
-- fresh allocation above crash residue;
+- fresh allocation above retained crash/reservation evidence;
 - exact live-state compaction;
 - stale-source detection before publication;
 - durable marker publication;
@@ -82,8 +84,9 @@ It closes these previously separate repository-side pieces for the Unix offline 
 
 The broader Phase 1 compaction milestone remains open because the append-log engine still lacks several lifecycle pieces:
 
-- Windows-equivalent durable marker publication;
-- safe deletion policy for obsolete committed generations and uncommitted crash orphans;
+- compact-switch creation of durable reservation evidence before candidate construction;
+- Windows-equivalent durable marker/reservation publication;
+- guarded deletion of confirmed-abandoned higher candidates/staging artifacts while preserving reservation evidence;
 - migration/coexistence rules for legacy one-file append-log users;
 - stronger ownership if non-cooperating raw-path writers must be prevented rather than administratively quiesced.
 
