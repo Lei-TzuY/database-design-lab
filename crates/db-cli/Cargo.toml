@@ -72,6 +72,10 @@ name = "db-lab-log-generation-orphan"
 path = "src/bin/db-lab-log-generation-orphan.rs"
 
 [[bin]]
+name = "db-lab-log-bootstrap"
+path = "src/bin/db-lab-log-bootstrap.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 
