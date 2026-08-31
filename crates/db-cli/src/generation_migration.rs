@@ -365,8 +365,6 @@ mod unix {
 
     #[cfg(test)]
     mod tests {
-        use std::fs;
-
         use db_core::KvEngine;
         use tempfile::tempdir;
 
