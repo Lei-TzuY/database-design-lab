@@ -128,10 +128,11 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
 - [x] Add deterministic compaction durable-write fault injection. The harness records replacement-L1,
   Manifest, first-CURRENT, and mirror-CURRENT publication classes and injects before-write, synchronized
   torn-output, and post-sync reported failures at each class. Every case poisons the live handle, reopens,
-  verifies all logical keys, and requires exactly the complete old or complete new tree; torn immutable
-  files remain unreferenced and torn CURRENT slots fail by checksum. A second matrix covers table-less
-  compaction and requires either all four tombstone L0 inputs or the complete zero-SSTable GC version,
-  including the retained-WAL state when rotation is skipped after a reported compaction failure.
+  verifies all logical keys, and requires exactly the complete four-L0 input version or complete one-L1
+  compacted version; torn immutable files remain unreferenced and torn CURRENT slots fail by checksum.
+  A second matrix covers table-less compaction and requires either all four tombstone L0 inputs or the
+  complete zero-SSTable GC version, including the retained-WAL state when rotation is skipped after a
+  reported compaction failure.
 - [x] Add deterministic compaction differential tests and read/write/space-amplification instrumentation
   validation. Two full-set compaction cycles are checked against the in-memory oracle across overwrites,
   deletes, ranges, and reopen. Resettable process-local counters expose exact integer point-read, range-read,
