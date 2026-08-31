@@ -82,6 +82,7 @@ impl Fixture {
         fs::write(&trace, b"{}\n").expect("write fake trace");
         let run_dir = root.path().join("run");
 
+        write_executable(&bin_dir.join("uname"), FAKE_UNAME);
         write_executable(&bin_dir.join("taskset"), FAKE_TASKSET);
         for name in REQUIRED_BINS {
             write_executable(&bin_dir.join(name), FAKE_DB_LAB);
@@ -171,6 +172,10 @@ fn write_executable(path: &Path, contents: &str) {
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).expect("chmod fake executable");
 }
+
+const FAKE_UNAME: &str = r#"#!/usr/bin/env bash
+printf 'Linux\n'
+"#;
 
 const FAKE_TASKSET: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
