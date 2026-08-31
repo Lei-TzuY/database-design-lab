@@ -32,15 +32,19 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     create_and_publish(&directory, 2, &[(b"key", b"two"), (b"old", b"value")]);
     create_and_publish(&directory, 3, &[(b"key", b"three"), (b"live", b"value")]);
     create_generation(&directory, 7, &[(b"future", b"orphan")]);
-    fs::write(staging_marker_path(&directory, 8), b"stale staging")
-        .expect("write stale staging marker");
+    fs::write(staging_marker_path(&directory, 2), b"obsolete staging")
+        .expect("write obsolete staging marker");
+    fs::write(staging_marker_path(&directory, 8), b"frontier staging")
+        .expect("write higher staging marker");
 
     let authoritative_log = generation_path(&directory, 3);
     let authoritative_marker = marker_path(&directory, 3);
     let orphan = generation_path(&directory, 7);
+    let frontier_staging = staging_marker_path(&directory, 8);
     let authoritative_log_before = fs::read(&authoritative_log).expect("read authority log");
     let authoritative_marker_before = fs::read(&authoritative_marker).expect("read authority marker");
     let orphan_before = fs::read(&orphan).expect("read orphan");
+    let frontier_staging_before = fs::read(&frontier_staging).expect("read frontier staging");
 
     let output = run_cleanup(&directory);
     assert_success("cleanup obsolete history", &output);
@@ -51,6 +55,10 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     assert_eq!(summary["removed_generation_ids"], serde_json::json!([1, 2]));
     assert_eq!(
         summary["removed_staging_marker_generation_ids"],
+        serde_json::json!([2])
+    );
+    assert_eq!(
+        summary["retained_staging_marker_generation_ids"],
         serde_json::json!([8])
     );
     assert_eq!(
@@ -62,7 +70,7 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     assert!(!marker_path(&directory, 1).exists());
     assert!(!generation_path(&directory, 2).exists());
     assert!(!marker_path(&directory, 2).exists());
-    assert!(!staging_marker_path(&directory, 8).exists());
+    assert!(!staging_marker_path(&directory, 2).exists());
     assert_eq!(
         fs::read(&authoritative_log).expect("re-read authority log"),
         authoritative_log_before
@@ -72,9 +80,15 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
         authoritative_marker_before
     );
     assert_eq!(fs::read(&orphan).expect("re-read orphan"), orphan_before);
+    assert_eq!(
+        fs::read(&frontier_staging).expect("re-read frontier staging"),
+        frontier_staging_before,
+        "higher staging id must remain as allocation-frontier evidence"
+    );
 
     let verified = verify_generation_directory(&directory).expect("verify cleaned directory");
     assert_eq!(verified.summary().authoritative_generation, 3);
+    assert_eq!(verified.summary().highest_observed_generation, 8);
 
     let second = run_cleanup(&directory);
     assert_success("repeat cleanup", &second);
@@ -84,6 +98,10 @@ fn cleanup_removes_only_permanently_obsolete_history_and_is_idempotent() {
     assert_eq!(
         second["removed_staging_marker_generation_ids"],
         serde_json::json!([])
+    );
+    assert_eq!(
+        second["retained_staging_marker_generation_ids"],
+        serde_json::json!([8])
     );
     assert_eq!(
         second["retained_uncommitted_generation_ids"],
