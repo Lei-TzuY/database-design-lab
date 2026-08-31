@@ -78,7 +78,7 @@ A committed new generation with a canonical recoverable final append selects the
 
 `append_log_generation_writer_lock_v1` adds cooperative cross-process exclusion. Each routed operation holds a create-new sibling lock from before authority refresh through the operation. Compact-switch publication acquires the same lease before its final source/authority recheck and keeps it through marker publication and final verification. The standalone marker-publisher CLI also acquires the lease. A stale crash lock is never stolen automatically; it fails closed until explicitly cleared after operator verification.
 
-`append_log_generation_cleanup_unix_v1` adds conservative retained-history cleanup under that same writer lease. It deletes only generation logs below current authority, final markers below current authority, and permanently non-authoritative staging-marker names. Lower markers are removed and the generation directory synchronized before lower generation logs are removed and synchronized. The current authority is re-verified before deletion, between metadata/data phases, and after cleanup. Higher uncommitted generation files are reported but deliberately retained because compact candidate construction occurs outside the publication lease.
+`append_log_generation_cleanup_unix_v1` adds conservative retained-history cleanup under that same writer lease. It deletes generation logs and final markers only below current authority, plus staging markers only at or below current authority. Higher staging-marker ids are retained because the allocator treats them as generation-frontier evidence; deleting them without a persisted high watermark could permit id reuse. Lower markers are removed and the generation directory synchronized before lower generation logs are removed and synchronized. The current authority is re-verified before deletion, between metadata/data phases, and after cleanup. Higher uncommitted generation files are also reported but deliberately retained because compact candidate construction occurs outside the publication lease.
 
 The lock deliberately lives outside the retained generation namespace, so transient coordination does not alter recovery evidence or generation-id allocation. Raw-path `LogEngine` users do not participate and remain outside the exclusion contract.
 
@@ -89,7 +89,7 @@ Hosted-CI fixtures validate format/recovery, composed interruption states, coope
 The remaining lifecycle work is narrower but still material:
 
 - Windows-equivalent durable final-marker publication;
-- guarded handling/reclamation of higher uncommitted generation candidates once they can be proven abandoned;
+- guarded handling/reclamation of higher uncommitted generation candidates and higher staging-frontier evidence once abandonment can be proven without permitting id reuse;
 - migration/coexistence rules for legacy one-file users and a decision about where the generation-directory contract ultimately lives in the crate layering;
 - stronger ownership if the project later wants to protect against non-cooperating raw-path writers rather than only generation-aware participants.
 
