@@ -85,12 +85,17 @@ fn unix_cutover_retires_legacy_path_and_isolates_preexisting_raw_handle() {
 
     let retained_state = LogEngine::inspect(&retained, true).expect("inspect retained source");
     assert_eq!(
-        retained_state.entries.get(b"stale" as &[u8]).map(Vec::as_slice),
+        retained_state
+            .entries
+            .get(b"stale" as &[u8])
+            .map(Vec::as_slice),
         Some(b"isolated" as &[u8])
     );
 
     let mut routed = GenerationLogEngine::open(&target).expect("open generation-aware engine");
-    routed.put(b"new", b"authority").expect("route post-cutover mutation");
+    routed
+        .put(b"new", b"authority")
+        .expect("route post-cutover mutation");
     assert_eq!(
         routed.get(b"new").expect("get routed key"),
         Some(b"authority".to_vec())
@@ -114,7 +119,9 @@ fn unix_cutover_rejects_target_mutated_after_migration() {
     assert_success("migrate legacy", &run_migrate(&source, &target));
 
     let mut routed = GenerationLogEngine::open(&target).expect("open routed target");
-    routed.put(b"new", b"value").expect("mutate target after migration");
+    routed
+        .put(b"new", b"value")
+        .expect("mutate target after migration");
 
     let cutover = run_cutover(&source, &target);
     assert_failure_contains(&cutover, "changed since migration publication");
@@ -163,6 +170,7 @@ fn unsupported_platform_fails_before_filesystem_access() {
     assert_eq!(fs::read_dir(root.path()).expect("read root").count(), 0);
 }
 
+#[cfg(unix)]
 fn run_migrate(source: &Path, target: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-migrate"))
         .arg("--source")
