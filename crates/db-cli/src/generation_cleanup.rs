@@ -195,8 +195,11 @@ fn cleanup_obsolete_generations_unix(
         "final post-cleanup verification",
     )?;
     let final_namespace = scan_generation_namespace(lease.directory())?;
-    let retained_staging_marker_generation_ids =
-        final_namespace.staging_marker_files.keys().copied().collect();
+    let retained_staging_marker_generation_ids = final_namespace
+        .staging_marker_files
+        .keys()
+        .copied()
+        .collect();
     let retained_uncommitted_generation_ids = final_namespace
         .generation_files
         .keys()
