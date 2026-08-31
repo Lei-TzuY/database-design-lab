@@ -31,7 +31,10 @@ fn reservations_advance_monotonically_and_include_existing_frontier_evidence() {
     let first = run_reserve(&directory);
     assert_success("reserve generation 2", &first);
     let first_summary: Value = serde_json::from_slice(&first.stdout).expect("decode first summary");
-    assert_eq!(first_summary["protocol"], "append_log_generation_reservation_unix_v1");
+    assert_eq!(
+        first_summary["protocol"],
+        "append_log_generation_reservation_unix_v1"
+    );
     assert_eq!(first_summary["generation"], 2);
     assert_eq!(first_summary["highest_observed_generation"], 2);
     assert_eq!(
@@ -44,7 +47,10 @@ fn reservations_advance_monotonically_and_include_existing_frontier_evidence() {
     let second = run_reserve(&directory);
     assert_success("reserve generation 3", &second);
     let verified = verify_generation_directory(&directory).expect("verify reservations");
-    assert_eq!(verified.summary().protocol, "append_log_generation_directory_v3");
+    assert_eq!(
+        verified.summary().protocol,
+        "append_log_generation_directory_v3"
+    );
     assert_eq!(verified.summary().authoritative_generation, 1);
     assert_eq!(verified.summary().reservation_generation_ids, vec![2, 3]);
     assert_eq!(verified.summary().highest_observed_generation, 3);
@@ -67,7 +73,10 @@ fn reservations_advance_monotonically_and_include_existing_frontier_evidence() {
     assert_eq!(third_summary["highest_observed_generation"], 12);
 
     let verified = verify_generation_directory(&directory).expect("verify final frontier");
-    assert_eq!(verified.summary().reservation_generation_ids, vec![2, 3, 12]);
+    assert_eq!(
+        verified.summary().reservation_generation_ids,
+        vec![2, 3, 12]
+    );
     assert_eq!(verified.summary().highest_observed_generation, 12);
     assert_eq!(verified.summary().uncommitted_generation_ids, vec![9]);
     assert_eq!(verified.summary().staging_marker_generation_ids, vec![11]);
