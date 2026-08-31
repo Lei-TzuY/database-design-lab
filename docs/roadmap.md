@@ -36,11 +36,12 @@ because later work has begun.
 - [ ] Compaction. Unix now has a non-destructive compact-copy primitive, retained generation-directory
   recovery contract, marker-bound committed-prefix proof, durable final-marker publication, an offline
   authoritative compact switch, generation-aware routed mutations, cooperative cross-process writer
-  exclusion around routed operations and the switch publication critical section, and guarded operator
-  recovery for crash-retained writer lease evidence. A deterministic composed switch matrix now covers
-  every retained-state boundary and requires exact old-or-new logical recovery. The milestone remains open
-  until Windows-equivalent marker durability, safe obsolete/orphan cleanup, and legacy single-file
-  migration/coexistence are implemented.
+  exclusion around routed operations and the switch publication critical section, guarded operator
+  recovery for crash-retained writer lease evidence, and conservative durable cleanup of obsolete lower
+  generations/final markers plus non-authoritative staging-marker residue. A deterministic composed switch
+  matrix covers every retained-state boundary and requires exact old-or-new logical recovery. The milestone
+  remains open until Windows-equivalent marker durability, guarded reclamation of higher abandoned
+  uncommitted candidates, and legacy single-file migration/coexistence are implemented.
 
 ## Phase 2 — B+ tree engine
 
