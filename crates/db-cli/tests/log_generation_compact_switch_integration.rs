@@ -45,15 +45,24 @@ fn unix_offline_switch_compacts_full_authoritative_live_state_and_advances_autho
     let summary: Value = serde_json::from_slice(&switched.stdout).expect("decode switch summary");
     assert_eq!(
         summary["protocol"],
-        "append_log_offline_generation_compact_switch_unix_v1"
+        "append_log_offline_generation_compact_switch_unix_v2"
     );
     assert_eq!(summary["old_generation"], 1);
     assert_eq!(summary["new_generation"], 2);
+    assert_eq!(summary["reservation"]["generation"], 2);
+    assert_eq!(
+        summary["reservation"]["reservation"],
+        "reserve-00000000000000000002.frontier"
+    );
     assert_eq!(summary["compaction"]["source_record_count"], 6);
     assert_eq!(summary["compaction"]["live_keys"], 3);
     assert_eq!(summary["compaction"]["compacted_record_count"], 3);
     assert_eq!(summary["publication"]["generation"], 2);
     assert_eq!(summary["final_generation"]["authoritative_generation"], 2);
+    assert_eq!(
+        summary["final_generation"]["reservation_generation_ids"],
+        serde_json::json!([2])
+    );
 
     assert!(generation_path(&directory, 1).is_file());
     assert!(marker_path(&directory, 1).is_file());
@@ -70,11 +79,15 @@ fn unix_offline_switch_compacts_full_authoritative_live_state_and_advances_autho
         serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
     assert_eq!(verified["authoritative_generation"], 2);
     assert_eq!(verified["marker_generation_ids"], serde_json::json!([1, 2]));
+    assert_eq!(
+        verified["reservation_generation_ids"],
+        serde_json::json!([2])
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn unix_offline_switch_allocates_above_orphan_and_staging_residue_without_reuse() {
+fn unix_offline_switch_uses_a_fresh_durable_reservation_above_all_retained_frontier_evidence() {
     let root = tempdir().expect("temporary root");
     let directory = root.path().join("generations");
     fs::create_dir(&directory).expect("create generation directory");
@@ -83,24 +96,31 @@ fn unix_offline_switch_allocates_above_orphan_and_staging_residue_without_reuse(
 
     create_generation(&directory, 5, &[(b"orphan", b"candidate")]);
     fs::write(staging_marker_path(&directory, 7), b"crash residue").expect("write staging residue");
+    let preexisting_reservation = run_reserve(&directory);
+    assert_success("reserve generation above orphan/staging evidence", &preexisting_reservation);
+    let preexisting: Value =
+        serde_json::from_slice(&preexisting_reservation.stdout).expect("decode reservation");
+    assert_eq!(preexisting["generation"], 8);
 
     let switched = run_switch(&directory);
-    assert_success("compact-switch above residue", &switched);
+    assert_success("compact-switch above retained frontier", &switched);
     let summary: Value = serde_json::from_slice(&switched.stdout).expect("decode switch summary");
     assert_eq!(summary["old_generation"], 1);
-    assert_eq!(summary["new_generation"], 8);
+    assert_eq!(summary["new_generation"], 9);
+    assert_eq!(summary["reservation"]["generation"], 9);
     assert!(generation_path(&directory, 5).is_file());
     assert!(staging_marker_path(&directory, 7).is_file());
     assert!(!generation_path(&directory, 2).exists());
-    assert!(generation_path(&directory, 8).is_file());
-    assert!(marker_path(&directory, 8).is_file());
+    assert!(!generation_path(&directory, 8).exists());
+    assert!(generation_path(&directory, 9).is_file());
+    assert!(marker_path(&directory, 9).is_file());
 
     let verified = run_verify(&directory);
     assert_success("verify allocation frontier", &verified);
     let verified: Value =
         serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
-    assert_eq!(verified["authoritative_generation"], 8);
-    assert_eq!(verified["highest_observed_generation"], 8);
+    assert_eq!(verified["authoritative_generation"], 9);
+    assert_eq!(verified["highest_observed_generation"], 9);
     assert_eq!(
         verified["uncommitted_generation_ids"],
         serde_json::json!([5])
@@ -108,6 +128,10 @@ fn unix_offline_switch_allocates_above_orphan_and_staging_residue_without_reuse(
     assert_eq!(
         verified["staging_marker_generation_ids"],
         serde_json::json!([7])
+    );
+    assert_eq!(
+        verified["reservation_generation_ids"],
+        serde_json::json!([8, 9])
     );
 }
 
@@ -170,6 +194,15 @@ fn run_publish(directory: &Path, id: u64) -> Output {
         .arg(id.to_string())
         .output()
         .expect("run generation publisher")
+}
+
+#[cfg(unix)]
+fn run_reserve(directory: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-reserve"))
+        .arg("--directory")
+        .arg(directory)
+        .output()
+        .expect("run generation reservation")
 }
 
 #[cfg(unix)]
