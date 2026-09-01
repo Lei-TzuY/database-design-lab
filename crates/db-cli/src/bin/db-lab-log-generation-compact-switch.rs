@@ -1,8 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+#[cfg(not(windows))]
 use db_cli::generation_compaction::compact_switch_generation_offline;
+use db_cli::generation_compaction::{
+    OfflineGenerationCompactSwitchError, OfflineGenerationCompactSwitchSummary,
+};
+#[cfg(windows)]
+use db_cli::generation_compaction_windows::compact_switch_generation_offline_windows;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,7 +23,7 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    match compact_switch_generation_offline(&Cli::parse().directory) {
+    match run_switch(&Cli::parse().directory) {
         Ok(summary) => match serde_json::to_string_pretty(&summary) {
             Ok(encoded) => {
                 println!("{encoded}");
@@ -33,4 +39,18 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+#[cfg(windows)]
+fn run_switch(
+    directory: &Path,
+) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError> {
+    compact_switch_generation_offline_windows(directory)
+}
+
+#[cfg(not(windows))]
+fn run_switch(
+    directory: &Path,
+) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError> {
+    compact_switch_generation_offline(directory)
 }
