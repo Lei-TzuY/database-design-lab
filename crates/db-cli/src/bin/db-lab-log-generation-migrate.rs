@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+#[cfg(not(windows))]
 use db_cli::generation_migration::migrate_legacy_append_log;
+#[cfg(windows)]
+use db_cli::generation_migration_windows::migrate_legacy_append_log_windows;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -22,7 +25,12 @@ struct Cli {
 
 fn main() -> ExitCode {
     let args = Cli::parse();
-    match migrate_legacy_append_log(&args.source, &args.target_directory) {
+    #[cfg(windows)]
+    let result = migrate_legacy_append_log_windows(&args.source, &args.target_directory);
+    #[cfg(not(windows))]
+    let result = migrate_legacy_append_log(&args.source, &args.target_directory);
+
+    match result {
         Ok(summary) => match serde_json::to_string_pretty(&summary) {
             Ok(encoded) => {
                 println!("{encoded}");

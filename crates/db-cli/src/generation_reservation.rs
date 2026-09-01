@@ -126,15 +126,55 @@ fn reserve_next_generation_unix(
 fn reserve_next_generation_windows(
     directory: &Path,
 ) -> Result<GenerationReservationSummary, GenerationReservationError> {
-    use std::fs::{self, OpenOptions};
-
     let lease = acquire_generation_writer_lease(directory)?;
     let before = verify_generation_directory(lease.directory())?;
     let generation = before.next_generation_id()?;
-    let reservation = canonical_reservation_name(generation);
-    let reservation_path = lease.directory().join(&reservation);
-    let staging_path = windows_staging_path(lease.directory(), generation)?;
+    let reservation = publish_generation_reservation_windows(lease.directory(), generation)?;
 
+    retained_summary(
+        lease.directory(),
+        generation,
+        reservation,
+        GENERATION_RESERVATION_WINDOWS_PROTOCOL,
+    )
+}
+
+/// Publishes one caller-selected durable reservation on Windows.
+///
+/// This is an internal retained-entry primitive for bootstrap flows such as legacy migration. The
+/// caller is responsible for proving that `generation` is the correct fresh id and for holding any
+/// required writer lease. Normal allocation must continue to use [`reserve_next_generation`].
+#[cfg(windows)]
+pub(crate) fn publish_generation_reservation_windows(
+    directory: &Path,
+    generation: u64,
+) -> Result<String, GenerationReservationError> {
+    use std::fs::{self, OpenOptions};
+
+    if generation == 0 {
+        return Err(GenerationReservationError::Directory(
+            GenerationDirectoryError::Invalid(
+                "generation reservation id must be greater than zero".to_owned(),
+            ),
+        ));
+    }
+
+    let reservation = canonical_reservation_name(generation);
+    let reservation_path = directory.join(&reservation);
+    match fs::symlink_metadata(&reservation_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(GenerationReservationError::Directory(
+                GenerationDirectoryError::Invalid(format!(
+                    "generation reservation already exists: {}",
+                    reservation_path.display()
+                )),
+            ))
+        }
+        Err(source) => return Err(io_error(&reservation_path, source)),
+    }
+
+    let staging_path = windows_staging_path(directory, generation)?;
     let staging = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -150,7 +190,7 @@ fn reserve_next_generation_windows(
             Ok(_) => {
                 return Err(GenerationReservationError::DurabilityUncertain {
                     generation,
-                    directory: lease.directory().to_path_buf(),
+                    directory: directory.to_path_buf(),
                     source,
                 });
             }
@@ -161,19 +201,14 @@ fn reserve_next_generation_windows(
             Err(_) => {
                 return Err(GenerationReservationError::DurabilityUncertain {
                     generation,
-                    directory: lease.directory().to_path_buf(),
+                    directory: directory.to_path_buf(),
                     source,
                 });
             }
         }
     }
 
-    retained_summary(
-        lease.directory(),
-        generation,
-        reservation,
-        GENERATION_RESERVATION_WINDOWS_PROTOCOL,
-    )
+    Ok(reservation)
 }
 
 #[cfg(windows)]

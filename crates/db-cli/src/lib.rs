@@ -9,6 +9,7 @@ pub mod generation_engine;
 pub mod generation_lock;
 pub mod generation_marker;
 pub mod generation_migration;
+pub mod generation_migration_windows;
 pub mod generation_orphan;
 pub mod generation_orphan_windows;
 pub mod generation_prefix;

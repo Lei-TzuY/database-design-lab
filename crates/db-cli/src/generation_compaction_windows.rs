@@ -136,7 +136,7 @@ pub fn compact_switch_generation_offline_windows(
 }
 
 #[cfg(windows)]
-fn publish_compacted_generation_marker_windows(
+pub(crate) fn publish_compacted_generation_marker_windows(
     directory: &Path,
     generation: u64,
     expected_compact: &InspectionReport,
