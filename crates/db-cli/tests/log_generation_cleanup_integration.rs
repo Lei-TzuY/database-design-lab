@@ -174,7 +174,7 @@ fn held_writer_lease_blocks_cleanup_without_removing_history() {
     assert!(!marker_path(&directory, 1).exists());
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn unsupported_platform_fails_before_filesystem_access() {
     let root = tempdir().expect("temporary root");
@@ -206,17 +206,17 @@ fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
 
 #[cfg(unix)]
 fn generation_path(directory: &Path, id: u64) -> PathBuf {
-    directory.join(canonical_generation_name(id))
+    directory.join(format!("generation-{id:020}.log"))
 }
 
 #[cfg(unix)]
 fn marker_path(directory: &Path, id: u64) -> PathBuf {
-    directory.join(canonical_marker_name(id))
+    directory.join(format!("commit-{id:020}.marker"))
 }
 
 #[cfg(unix)]
 fn staging_marker_path(directory: &Path, id: u64) -> PathBuf {
-    directory.join(canonical_staging_marker_name(id))
+    directory.join(format!("staging-commit-{id:020}.marker"))
 }
 
 fn run_cleanup(directory: &Path) -> Output {
