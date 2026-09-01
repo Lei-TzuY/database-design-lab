@@ -10,6 +10,8 @@ pub mod generation_migration;
 pub mod generation_orphan;
 pub mod generation_prefix;
 pub mod generation_publication;
+#[cfg(windows)]
+pub(crate) mod generation_publication_windows;
 pub mod generation_reservation;
 pub mod host_preflight;
 pub mod log_compaction;
