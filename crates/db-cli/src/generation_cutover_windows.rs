@@ -2,8 +2,7 @@ use std::path::Path;
 
 use crate::generation_cutover::LegacyCutoverSummary;
 
-pub const LEGACY_CUTOVER_WINDOWS_PROTOCOL: &str =
-    "append_log_legacy_cutover_sentinel_windows_v1";
+pub const LEGACY_CUTOVER_WINDOWS_PROTOCOL: &str = "append_log_legacy_cutover_sentinel_windows_v1";
 pub const LEGACY_CUTOVER_SENTINEL_PROTOCOL: &str = "append_log_legacy_cutover_sentinel_v1";
 
 #[cfg(windows)]
@@ -54,7 +53,9 @@ pub enum LegacyCutoverWindowsError {
         #[source]
         source: io::Error,
     },
-    #[error("legacy source changed before Windows pathname cutover; no cutover sentinel was published")]
+    #[error(
+        "legacy source changed before Windows pathname cutover; no cutover sentinel was published"
+    )]
     SourceChangedBeforeCutover,
     #[error(
         "retained legacy evidence {retained_path} is visible but its write-through publication could not be confirmed: {source}; preserve both legacy pathname and retained evidence and verify explicitly"
@@ -97,9 +98,7 @@ mod windows {
     use super::*;
     use crate::generation_directory::{verify_generation_directory, VerifiedGenerationDirectory};
     use crate::generation_lock::acquire_generation_writer_lease;
-    use crate::windows_durable::{
-        move_no_replace_write_through, move_replace_write_through,
-    };
+    use crate::windows_durable::{move_no_replace_write_through, move_replace_write_through};
 
     const IMPORT_GENERATION: u64 = 1;
     const COMPARE_BUFFER_BYTES: usize = 64 * 1024;
@@ -379,10 +378,7 @@ mod windows {
         Ok(parent.join(staging))
     }
 
-    fn bounded_path_string(
-        path: &Path,
-        label: &str,
-    ) -> Result<String, LegacyCutoverWindowsError> {
+    fn bounded_path_string(path: &Path, label: &str) -> Result<String, LegacyCutoverWindowsError> {
         let value = path.to_string_lossy().into_owned();
         if value.len() > MAX_SENTINEL_PATH_BYTES {
             return invalid(format!(
