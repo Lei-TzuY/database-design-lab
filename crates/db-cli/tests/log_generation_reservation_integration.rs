@@ -3,13 +3,13 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[cfg(windows)]
+use db_cli::generation_directory::canonical_marker_name;
 #[cfg(any(unix, windows))]
 use db_cli::generation_directory::{
     canonical_generation_name, canonical_reservation_name, canonical_staging_marker_name,
     verify_generation_directory,
 };
-#[cfg(windows)]
-use db_cli::generation_directory::canonical_marker_name;
 #[cfg(any(unix, windows))]
 use db_cli::generation_lock::acquire_generation_writer_lease;
 #[cfg(windows)]
