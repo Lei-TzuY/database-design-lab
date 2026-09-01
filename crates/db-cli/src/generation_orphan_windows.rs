@@ -1,25 +1,36 @@
-use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::fs::{self, File};
+#[cfg(windows)]
+use std::io::Read;
 
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
+#[cfg(windows)]
 use crate::generation_directory::{
     canonical_generation_name, canonical_reservation_name, canonical_staging_marker_name,
-    scan_generation_namespace, verify_generation_directory, GenerationDirectoryError,
-    GenerationVerificationSummary,
+    scan_generation_namespace, verify_generation_directory,
 };
-use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
+use crate::generation_lock::GenerationWriterLockError;
+#[cfg(windows)]
+use crate::generation_lock::acquire_generation_writer_lease;
+#[cfg(windows)]
 use crate::generation_marker::Crc32Ieee;
-use crate::generation_orphan::{
-    inspect_generation_orphan, GenerationFileFingerprint, GenerationOrphanError,
-};
+use crate::generation_orphan::{GenerationFileFingerprint, GenerationOrphanError};
+#[cfg(windows)]
+use crate::generation_orphan::inspect_generation_orphan;
+#[cfg(windows)]
 use crate::windows_durable::move_no_replace_write_through;
 
 pub const GENERATION_ORPHAN_RETIRE_WINDOWS_PROTOCOL: &str =
     "append_log_generation_orphan_retire_windows_v1";
+#[cfg(windows)]
 const FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -149,11 +160,7 @@ fn retire_windows(
 
     require_authority(lease.directory(), expected_authority)?;
     if let (Some(expected), Some(target)) = (expected_staging_fingerprint, &staging_quarantine) {
-        move_checked(
-            &staging_path,
-            target,
-            "abandoned staging marker",
-        )?;
+        move_checked(&staging_path, target, "abandoned staging marker")?;
         require_fingerprint(target, expected)?;
         require_absent_source(&staging_path, "staging marker")?;
         require_authority(lease.directory(), expected_authority)?;
@@ -251,9 +258,7 @@ fn quarantine_path(
     })?;
     let mut name = OsString::from(".");
     name.push(base);
-    name.push(format!(
-        ".retired-{kind}-{generation:020}.{extension}"
-    ));
+    name.push(format!(".retired-{kind}-{generation:020}.{extension}"));
     Ok(parent.join(name))
 }
 
@@ -356,6 +361,7 @@ fn require_fingerprint(
     Ok(())
 }
 
+#[cfg(windows)]
 fn io_error(path: &Path, source: io::Error) -> WindowsGenerationOrphanRetirementError {
     WindowsGenerationOrphanRetirementError::Io {
         path: path.to_path_buf(),
@@ -363,6 +369,7 @@ fn io_error(path: &Path, source: io::Error) -> WindowsGenerationOrphanRetirement
     }
 }
 
+#[cfg(windows)]
 fn invalid<T>(
     message: impl Into<String>,
 ) -> Result<T, WindowsGenerationOrphanRetirementError> {
