@@ -138,8 +138,9 @@ pub enum OfflineGenerationCompactSwitchError {
 /// authority can change, the function reacquires the cooperative cross-process writer lease, re-verifies
 /// the old authority and complete source state, verifies the compact candidate, publishes the marker, and
 /// verifies the new authority while still holding the lease. `GenerationLogEngine` operations use the same
-/// lease, closing their final check-to-publication race. Raw-path `LogEngine` users are outside this
-/// coordination contract and still must be quiesced by the caller.
+/// lease, closing their final check-to-publication race. Standalone `LogEngine` constructors reject
+/// canonical generation names; callers that deliberately invoke the explicit managed-generation
+/// constructor without the lease remain outside this cooperative coordination contract.
 pub fn compact_switch_generation_offline(
     directory: &Path,
 ) -> Result<OfflineGenerationCompactSwitchSummary, OfflineGenerationCompactSwitchError> {
@@ -297,6 +298,7 @@ fn validate_compact_state(
     compacted: &InspectionReport,
 ) -> Result<(), OfflineGenerationCompactSwitchError> {
     if compacted.verification.recoverable_tail.is_some()
+        || compacted.verification.record_count != compacted.verification.live_keys as u64
         || compacted.verification.live_keys != source.verification.live_keys
         || compacted.entries != source.entries
     {
@@ -336,7 +338,8 @@ mod tests {
         fs::create_dir(&directory).expect("create generation directory");
         let source = directory.join(canonical_generation_name(1));
         {
-            let mut engine = LogEngine::create_new(&source).expect("create source generation");
+            let mut engine = LogEngine::create_new_managed_generation(&source)
+                .expect("create source generation");
             engine.put(b"a", b"one").expect("put a one");
             engine.put(b"a", b"two").expect("overwrite a");
             engine.put(b"deleted", b"value").expect("put deleted key");
@@ -573,7 +576,8 @@ mod tests {
         fs::create_dir(&directory).expect("create generation directory");
         let source = directory.join(canonical_generation_name(1));
         {
-            let mut engine = LogEngine::create_new(&source).expect("create source generation");
+            let mut engine = LogEngine::create_new_managed_generation(&source)
+                .expect("create source generation");
             engine.put(b"a", b"one").expect("put initial value");
         }
         publish_generation_marker(&directory, 1).expect("publish source generation");
@@ -581,8 +585,8 @@ mod tests {
         let error = compact_switch_generation_offline_impl(
             &directory,
             |source_path| {
-                let mut engine =
-                    LogEngine::open(source_path).expect("open source for injected drift");
+                let mut engine = LogEngine::open_managed_generation(source_path)
+                    .expect("open source for injected protocol-violating drift");
                 engine.put(b"late", b"write").expect("inject late write");
                 Ok(())
             },
