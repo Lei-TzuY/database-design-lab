@@ -18,14 +18,20 @@ On non-Windows targets the function returns `Unsupported` before filesystem acce
 
 The raw Win32 FFI is isolated to this module. The rest of `db-cli` keeps `unsafe_code = "deny"`; `lib.rs` grants a local allowance only for this audited boundary.
 
-## Why this is not yet Windows generation durability
+## First upper-level use: generation reservations
 
-This primitive solves only one namespace transition: **an already-synchronized staging object to a previously absent canonical name**. Existing Unix generation protocols also rely on other durable operations, including generation construction, reservation creation, marker publication, cleanup, migration, and cutover ordering.
+`append_log_generation_reservation_windows_v1` uses the primitive to publish a synchronized, unique sibling staging file into the canonical zero-byte `reserve-%020d.frontier` name while holding the shared generation writer lease. The staging object lives outside the strict retained generation namespace; successful write-through move consumes that staging name, and retained-state verification must then observe the canonical reservation before success is returned.
 
-No upper-level generation protocol uses this Windows primitive yet. The current Windows fail-before-write behavior for unsupported durable generation publication/reservation/cleanup/migration/cutover remains unchanged until each caller is explicitly redesigned around a Windows-safe ordering.
+This is a deliberately narrow lift of the former Windows fail-closed boundary. Reservation publication fits the primitive exactly because the complete retained object can be created and synchronized under a non-authoritative staging name before its one-way no-overwrite namespace transition.
+
+## Why this is not yet full Windows generation durability
+
+The primitive solves only one namespace transition: **an already-synchronized staging object to a previously absent canonical name**. Other generation lifecycle operations have additional ordering and retention requirements, including compact-generation construction, final commit-marker publication, cleanup/orphan retirement, migration, and cutover.
+
+Those upper-level Windows paths remain unsupported until each operation is explicitly redesigned around a complete Windows-safe ordering. In particular, enabling durable reservation does not prove that an already-existing canonical generation filename preceded marker authority durably.
 
 ## Evidence boundary
 
-Windows CI must prove the actual API call succeeds for a fresh target, rejects replacement without altering either retained object, and handles Unicode paths. That is an executable API/contract check on the hosted Windows filesystem.
+Windows CI proves the actual API call succeeds for a fresh target, rejects replacement without altering either retained object, handles Unicode paths, and now exercises the reservation CLI's monotonic frontier / lease / corruption behavior through this primitive. That is executable API/contract evidence on the hosted Windows filesystem.
 
-It is **not** physical power-loss testing and does not claim that every Windows filesystem, storage controller, or device honors persistence identically. The project will only lift an upper-level Windows fail-closed boundary after the complete operation ordering is defensible, not merely because this primitive exists.
+It is **not** physical power-loss testing and does not claim that every Windows filesystem, storage controller, or device honors persistence identically. The project will only lift each upper-level Windows fail-closed boundary after the complete operation ordering is defensible, not merely because this primitive exists.
