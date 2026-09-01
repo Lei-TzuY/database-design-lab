@@ -108,8 +108,14 @@ fn windows_compact_binary_publishes_unicode_output_through_write_through_move() 
     let inspection = LogEngine::inspect(&output, true).expect("inspect unicode compact output");
     assert_eq!(inspection.verification.record_count, 1);
     assert_eq!(inspection.verification.live_keys, 1);
-    assert_eq!(inspection.entries[0].key, b"alpha".to_vec());
-    assert_eq!(inspection.entries[0].value, Some(b"two".to_vec()));
+    assert_eq!(inspection.entries[0].key.as_slice(), b"alpha");
+    assert_eq!(
+        inspection.entries[0]
+            .value
+            .as_ref()
+            .map(|value| value.as_slice()),
+        Some(b"two".as_slice())
+    );
 }
 
 #[test]
