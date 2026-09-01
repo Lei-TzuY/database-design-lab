@@ -81,7 +81,10 @@ fn fresh_cutover_verifier_rejects_retained_rollback_drift() {
     drop(retained_engine);
 
     let verified = run_verify(&source, &target);
-    assert_failure_contains(&verified, "does not reproduce the retained legacy live state");
+    assert_failure_contains(
+        &verified,
+        "does not reproduce the retained legacy live state",
+    );
 }
 
 fn run_migrate(source: &Path, target: &Path) -> Output {
