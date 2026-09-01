@@ -54,13 +54,8 @@ mod windows {
 
         // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that remain alive for the
         // duration of this synchronous Win32 call. The function retains neither pointer.
-        let moved = unsafe {
-            MoveFileExW(
-                source.as_ptr(),
-                target.as_ptr(),
-                MOVEFILE_WRITE_THROUGH,
-            )
-        };
+        let moved =
+            unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
         if moved == 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -114,7 +109,10 @@ mod tests {
             error.raw_os_error().is_some(),
             "Win32 rejection should retain an OS error"
         );
-        assert_eq!(fs::read(&target).expect("re-read target"), b"durable-evidence");
+        assert_eq!(
+            fs::read(&target).expect("re-read target"),
+            b"durable-evidence"
+        );
         assert_eq!(fs::read(&second).expect("source must remain"), b"new");
     }
 
