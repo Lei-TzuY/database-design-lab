@@ -8,6 +8,9 @@ use db_storage_log::{InspectionReport, LogEngine};
 use serde::Serialize;
 use thiserror::Error;
 
+#[cfg(windows)]
+use crate::windows_durable::move_no_replace_write_through;
+
 pub const LOG_COMPACTION_PROTOCOL: &str = "append_log_compact_copy_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -33,6 +36,14 @@ pub enum LogCompactionError {
         #[source]
         source: io::Error,
     },
+    #[error(
+        "compaction output {output} became visible but Windows write-through publication returned an error: {source}; preserve the output as non-authoritative evidence and verify it before retrying"
+    )]
+    PublicationUncertain {
+        output: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("invalid compaction request: {0}")]
     Invalid(String),
 }
@@ -40,8 +51,11 @@ pub enum LogCompactionError {
 /// Builds and publishes a fresh non-destructive compact copy of a clean append-log file.
 ///
 /// The source is always opened read-only. The output path must not already exist. The compacted
-/// image is built under a sibling staging name, verified against the source live state, published
-/// with no-overwrite hard-link semantics, and verified again before staging cleanup.
+/// image is built under a sibling staging name and verified against the source live state. Unix
+/// publishes the verified staging inode with the original no-overwrite hard-link contract. Windows
+/// synchronizes the complete staging file and publishes the fresh output name with the audited
+/// no-overwrite `MOVEFILE_WRITE_THROUGH` primitive. The published image is verified again before
+/// staging cleanup when a second staging name remains.
 pub fn compact_log_to_fresh_file(
     source: &Path,
     output: &Path,
@@ -93,19 +107,20 @@ pub fn compact_log_to_fresh_file(
         return invalid("source changed while the compact copy was being constructed");
     }
 
-    if let Err(error) = fs::hard_link(&staging, &output) {
-        let _ = fs::remove_file(&staging);
-        return Err(io_error(&output, error));
+    if let Err(error) = publish_staging(&staging, &output) {
+        return Err(error);
     }
 
     let published = match LogEngine::inspect(&output, true) {
         Ok(report) if report == compacted_inspection => report,
         Ok(_) => {
+            #[cfg(not(windows))]
             let _ = fs::remove_file(&output);
             let _ = fs::remove_file(&staging);
             return invalid("published compact output differs from its verified staging image");
         }
         Err(error) => {
+            #[cfg(not(windows))]
             let _ = fs::remove_file(&output);
             let _ = fs::remove_file(&staging);
             return Err(error.into());
@@ -118,12 +133,17 @@ pub fn compact_log_to_fresh_file(
     {
         Some(bytes) => bytes,
         None => {
+            #[cfg(not(windows))]
             let _ = fs::remove_file(&output);
             let _ = fs::remove_file(&staging);
             return invalid("compacted file is unexpectedly larger than its source append log");
         }
     };
-    let staging_retained = fs::remove_file(&staging).is_err();
+    let staging_retained = match fs::remove_file(&staging) {
+        Ok(()) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
 
     Ok(LogCompactionReport {
         protocol: LOG_COMPACTION_PROTOCOL,
@@ -136,6 +156,49 @@ pub fn compact_log_to_fresh_file(
         reclaimed_bytes,
         staging_retained,
     })
+}
+
+fn publish_staging(staging: &Path, output: &Path) -> Result<(), LogCompactionError> {
+    #[cfg(windows)]
+    {
+        use std::fs::File;
+
+        let file = File::open(staging).map_err(|source| io_error(staging, source))?;
+        file.sync_all()
+            .map_err(|source| io_error(staging, source))?;
+        drop(file);
+
+        if let Err(source) = move_no_replace_write_through(staging, output) {
+            match fs::symlink_metadata(output) {
+                Ok(_) => {
+                    return Err(LogCompactionError::PublicationUncertain {
+                        output: output.to_path_buf(),
+                        source,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let _ = fs::remove_file(staging);
+                    return Err(io_error(output, source));
+                }
+                Err(_) => {
+                    return Err(LogCompactionError::PublicationUncertain {
+                        output: output.to_path_buf(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(error) = fs::hard_link(staging, output) {
+            let _ = fs::remove_file(staging);
+            return Err(io_error(output, error));
+        }
+        Ok(())
+    }
 }
 
 fn build_staging(path: &Path, source: &InspectionReport) -> Result<(), LogCompactionError> {
