@@ -107,9 +107,7 @@ pub fn compact_log_to_fresh_file(
         return invalid("source changed while the compact copy was being constructed");
     }
 
-    if let Err(error) = publish_staging(&staging, &output) {
-        return Err(error);
-    }
+    publish_staging(&staging, &output)?;
 
     let published = match LogEngine::inspect(&output, true) {
         Ok(report) if report == compacted_inspection => report,
