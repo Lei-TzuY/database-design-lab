@@ -159,9 +159,12 @@ pub fn compact_log_to_fresh_file(
 fn publish_staging(staging: &Path, output: &Path) -> Result<(), LogCompactionError> {
     #[cfg(windows)]
     {
-        use std::fs::File;
+        use std::fs::OpenOptions;
 
-        let file = File::open(staging).map_err(|source| io_error(staging, source))?;
+        let file = OpenOptions::new()
+            .write(true)
+            .open(staging)
+            .map_err(|source| io_error(staging, source))?;
         file.sync_all()
             .map_err(|source| io_error(staging, source))?;
         drop(file);
