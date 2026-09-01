@@ -16,9 +16,7 @@ fn windows_cutover_retires_legacy_path_and_preserves_exact_rollback_copy() {
     let root = tempdir().expect("temporary root");
     let source = root.path().join("legacy-資料.db");
     let target = root.path().join("generations-資料");
-    let retained = root
-        .path()
-        .join("legacy-資料.db.retired-append-log-v1");
+    let retained = root.path().join("legacy-資料.db.retired-append-log-v1");
     {
         let mut engine = LogEngine::create_new(&source).expect("create legacy source");
         engine.put(b"a", b"one").expect("put a one");
