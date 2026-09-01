@@ -9,13 +9,12 @@ use tempfile::tempdir;
 #[test]
 fn mutating_raw_cli_rejects_canonical_generation_path_but_read_only_tools_still_work() {
     let root = tempdir().expect("temporary root");
-    let generation_path = root
-        .path()
-        .join("generation-00000000000000000001.log");
+    let generation_path = root.path().join("generation-00000000000000000001.log");
     let workload_path = root.path().join("workload.json");
 
     {
-        let mut engine = LogEngine::create_new(&generation_path).expect("create canonical-named log");
+        let mut engine =
+            LogEngine::create_new(&generation_path).expect("create canonical-named log");
         engine.put(b"existing", b"value").expect("seed log");
     }
     let before = fs::read(&generation_path).expect("read log before guarded run");
@@ -29,7 +28,10 @@ fn mutating_raw_cli_rejects_canonical_generation_path_but_read_only_tools_still_
         generation_path.to_str().expect("UTF-8 generation path"),
         workload_path.to_str().expect("UTF-8 workload path"),
     ]);
-    assert_failure_contains(&run, "raw append-log mutation refuses canonical generation path");
+    assert_failure_contains(
+        &run,
+        "raw append-log mutation refuses canonical generation path",
+    );
     assert_failure_contains(&run, "db-lab-log-generation-run");
     assert_eq!(
         fs::read(&generation_path).expect("read log after guarded run"),
@@ -54,9 +56,7 @@ fn mutating_raw_cli_rejects_canonical_generation_path_but_read_only_tools_still_
 #[test]
 fn differential_raw_log_rejects_reserved_generation_name_before_creation() {
     let root = tempdir().expect("temporary root");
-    let generation_path = root
-        .path()
-        .join("generation-00000000000000000042.log");
+    let generation_path = root.path().join("generation-00000000000000000042.log");
     let workload_path = root.path().join("workload.json");
     write_put_workload(&workload_path);
 
