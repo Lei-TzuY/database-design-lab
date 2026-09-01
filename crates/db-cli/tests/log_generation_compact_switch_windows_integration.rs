@@ -54,7 +54,10 @@ fn windows_switch_publishes_write_through_candidate_then_marker_authority() {
         "append_log_generation_reservation_windows_v1"
     );
     assert_eq!(summary["reservation"]["generation"], 2);
-    assert_eq!(summary["compaction"]["protocol"], "append_log_compact_copy_v1");
+    assert_eq!(
+        summary["compaction"]["protocol"],
+        "append_log_compact_copy_v1"
+    );
     assert_eq!(summary["compaction"]["source_record_count"], 6);
     assert_eq!(summary["compaction"]["compacted_record_count"], 3);
     assert_eq!(
@@ -72,8 +75,8 @@ fn windows_switch_publishes_write_through_candidate_then_marker_authority() {
     assert!(marker_path(&directory, 2).is_file());
     assert!(!directory.join(canonical_staging_marker_name(2)).exists());
 
-    let compacted =
-        LogEngine::inspect(generation_path(&directory, 2), true).expect("inspect compact generation");
+    let compacted = LogEngine::inspect(generation_path(&directory, 2), true)
+        .expect("inspect compact generation");
     assert_eq!(compacted.entries, source_before.entries);
     assert_eq!(compacted.verification.record_count, 3);
 
@@ -100,7 +103,8 @@ fn windows_standalone_publisher_remains_fail_closed_for_arbitrary_generation() {
 }
 
 fn create_generation(directory: &Path, id: u64, value: &[u8]) {
-    let mut engine = LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine =
+        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
     engine.put(b"key", value).expect("put generation value");
 }
 
