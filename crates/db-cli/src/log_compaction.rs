@@ -26,6 +26,24 @@ pub struct LogCompactionReport {
     pub staging_retained: bool,
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct WindowsDurableCompactOutput {
+    path: PathBuf,
+    inspection: InspectionReport,
+}
+
+#[cfg(windows)]
+impl WindowsDurableCompactOutput {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn inspection(&self) -> &InspectionReport {
+        &self.inspection
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum LogCompactionError {
     #[error(transparent)]
@@ -48,6 +66,12 @@ pub enum LogCompactionError {
     Invalid(String),
 }
 
+struct LogCompactionOutcome {
+    report: LogCompactionReport,
+    output: PathBuf,
+    published: InspectionReport,
+}
+
 /// Builds and publishes a fresh non-destructive compact copy of a clean append-log file.
 ///
 /// The source is always opened read-only. The output path must not already exist. The compacted
@@ -60,6 +84,29 @@ pub fn compact_log_to_fresh_file(
     source: &Path,
     output: &Path,
 ) -> Result<LogCompactionReport, LogCompactionError> {
+    Ok(compact_log_to_fresh_file_inner(source, output)?.report)
+}
+
+/// Windows-only internal variant that proves the returned canonical compact output was published
+/// through this module's write-through path in the current operation. The opaque witness is not
+/// constructible outside this module and is intentionally unavailable to standalone marker callers.
+#[cfg(windows)]
+pub(crate) fn compact_log_to_fresh_file_with_windows_witness(
+    source: &Path,
+    output: &Path,
+) -> Result<(LogCompactionReport, WindowsDurableCompactOutput), LogCompactionError> {
+    let outcome = compact_log_to_fresh_file_inner(source, output)?;
+    let witness = WindowsDurableCompactOutput {
+        path: outcome.output,
+        inspection: outcome.published,
+    };
+    Ok((outcome.report, witness))
+}
+
+fn compact_log_to_fresh_file_inner(
+    source: &Path,
+    output: &Path,
+) -> Result<LogCompactionOutcome, LogCompactionError> {
     let source = canonical_regular_file(source, "source append log")?;
     let output = canonical_fresh_output(output)?;
     if source == output {
@@ -143,7 +190,7 @@ pub fn compact_log_to_fresh_file(
         Err(_) => true,
     };
 
-    Ok(LogCompactionReport {
+    let report = LogCompactionReport {
         protocol: LOG_COMPACTION_PROTOCOL,
         file_format_version: published.verification.file_format_version,
         source_file_bytes: source_verification.file_bytes,
@@ -153,6 +200,12 @@ pub fn compact_log_to_fresh_file(
         compacted_record_count: published.verification.record_count,
         reclaimed_bytes,
         staging_retained,
+    };
+
+    Ok(LogCompactionOutcome {
+        report,
+        output,
+        published,
     })
 }
 
