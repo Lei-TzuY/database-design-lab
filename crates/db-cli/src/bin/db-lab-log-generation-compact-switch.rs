@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+#[cfg(not(windows))]
+use db_cli::generation_compaction::compact_switch_generation_offline;
 use db_cli::generation_compaction::{
     OfflineGenerationCompactSwitchError, OfflineGenerationCompactSwitchSummary,
 };
-#[cfg(not(windows))]
-use db_cli::generation_compaction::compact_switch_generation_offline;
 #[cfg(windows)]
 use db_cli::generation_compaction_windows::compact_switch_generation_offline_windows;
 
