@@ -1,6 +1,6 @@
 # Append-log generation marker publication
 
-`db-lab-log-generation-publish` is the writer-side marker-v2 publication primitive for the current `append_log_generation_directory_v3` retained namespace.
+`db-lab-log-generation-publish` is the standalone writer-side marker-v2 publication primitive for the current `append_log_generation_directory_v3` retained namespace.
 
 ```text
 db-lab-log-generation-publish \
@@ -8,67 +8,79 @@ db-lab-log-generation-publish \
   --generation 2
 ```
 
-The current publication protocol is `append_log_generation_marker_publication_unix_v1` and is intentionally available only on Unix targets. Unsupported targets, including Windows, fail before writing any artifact. This is deliberate: the repository does not claim a cross-platform parent-directory durability barrier that it cannot currently justify.
+The standalone command remains intentionally Unix-only and reports protocol `append_log_generation_marker_publication_unix_v1`. Windows standalone publication still fails before writing any marker. Windows marker authority is available only inside the composed compact-switch path, where an opaque in-process witness proves that the candidate's canonical generation name was just published by the audited write-through compact-output path.
 
-## Preconditions
+## Common marker semantics
 
-The directory must be a real directory using the closed generation-directory namespace. The requested generation id must be greater than zero and newer than every existing committed marker id. Its canonical `generation-%020d.log` must be a real regular file and must pass `LogEngine::verify` as a completely clean append-log v1 image: no recoverable tail and `file_bytes == valid_bytes`.
+A final `commit-%020d.marker` is authoritative only through the shared generation-directory reader. Marker v2 binds:
 
-The publisher derives the marker-v2 `CommittedPrefix` from that exact clean image: byte extent, CRC-32/IEEE, record count, and next sequence. It immediately re-verifies that proof through the shared committed-prefix verifier before publication can continue.
+- generation id;
+- append-log format version;
+- exact committed-prefix byte extent;
+- CRC-32/IEEE of that prefix;
+- committed record count;
+- next sequence.
 
-The tool assumes caller serialization. It actively re-verifies the generation after durability and staging work so concurrent mutation or replacement causes publication to fail instead of committing stale proof.
+The exact bound prefix is independently re-verified through the normal append-log verifier before a marker can be accepted. Higher uncommitted generation logs, staging markers, and reservation files are never authoritative.
 
-## Unix durability order
+## Unix standalone durability order
 
-The successful path is intentionally ordered:
+The Unix standalone publisher requires a real clean canonical generation file, then:
 
-1. verify the requested generation as a clean append-log image;
-2. derive and independently verify its marker-bound committed prefix;
-3. `sync_all` the generation file;
-4. `sync_all` the generation directory so the generation name precedes marker authority durably;
-5. re-verify the exact generation and proof;
-6. create-new `staging-commit-%020d.marker` in the same directory, write the 64-byte marker, and `sync_all` that staging file;
-7. re-verify the generation again after staging I/O;
-8. publish the final `commit-%020d.marker` with a no-overwrite hard link from the synchronized staging inode;
-9. `sync_all` the generation directory again;
-10. only after that directory barrier succeeds, decode the published marker and re-verify its committed prefix;
-11. remove the staging name best-effort.
+1. derives and independently verifies the marker-bound committed prefix;
+2. `sync_all`s the generation file;
+3. `sync_all`s the generation directory so the generation name precedes marker authority durably;
+4. re-verifies the exact generation and proof;
+5. create-news `staging-commit-%020d.marker`, writes the 64-byte marker, and `sync_all`s it;
+6. re-verifies the generation;
+7. hard-links the synchronized staging inode to fresh `commit-%020d.marker`;
+8. `sync_all`s the directory;
+9. decodes the final marker and re-verifies its committed prefix;
+10. removes the staging name best-effort.
 
-The final marker is not reported as durably committed until step 9 succeeds. No old generation is deleted by this command.
+The final marker is not reported as durably committed until the post-link directory barrier succeeds. No old generation is deleted by this command.
+
+## Windows witness-bound compact-switch publication
+
+Windows deliberately does **not** expose the standalone publisher. A clean-looking hand-created `generation-%020d.log` does not prove that its canonical namespace entry was durably published, so allowing an arbitrary caller to attach durable marker authority would widen the trust boundary incorrectly.
+
+The Windows composed compact switch instead obtains an opaque `WindowsDurableCompactOutput` witness from `log_compaction`. That witness is constructible only after the compact candidate has completed all of the following in the same operation:
+
+1. exact live-state construction and verification under a sibling staging name;
+2. writable-handle `sync_all()` of the complete staging file;
+3. no-overwrite `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` publication to the canonical generation name;
+4. post-publication inspection equal to the verified staging image.
+
+Only the crate-internal Windows marker path accepts that witness. It additionally requires the same generation id to have retained durable reservation evidence and requires the witness path to equal the canonical generation path in the verified directory.
+
+The marker path then:
+
+1. re-inspects the canonical generation and requires exact equality with the opaque compact witness;
+2. derives and independently verifies marker-v2 committed-prefix proof;
+3. create-news `staging-commit-%020d.marker`, writes the complete marker, and `sync_all`s it;
+4. re-checks the compact witness immediately before authority changes;
+5. moves staging to fresh final `commit-%020d.marker` with the audited no-overwrite `MOVEFILE_WRITE_THROUGH` primitive;
+6. re-decodes the final marker, re-verifies the bound prefix, and re-checks the compact candidate;
+7. lets the composed switch run the shared generation-directory verifier while still holding the common writer lease.
+
+Successful Windows composed publication reports protocol `append_log_generation_marker_publication_windows_v1`. The write-through move consumes the staging marker, so successful summaries report `staging_retained=false`.
+
+If the Win32 move reports an error after the final marker becomes visible, publication returns durability-uncertain and preserves retained evidence rather than guessing rollback. Hosted Windows CI exercises the API/order and retained-artifact semantics; it is not physical power-loss testing.
 
 ## Crash states and staging markers
 
-`staging-commit-%020d.marker` is a protocol-defined, non-authoritative crash residue. The v3 directory reader accepts canonical staging names, reports their generation ids, and never uses their contents for generation selection. Directory v3 additionally accepts zero-byte `reserve-%020d.frontier` allocation evidence; reservations are also non-authoritative and are unrelated to marker selection.
+`staging-commit-%020d.marker` is protocol-defined, non-authoritative crash residue. The v3 reader reports staging ids but never uses staging contents for authority selection. Zero-byte `reserve-%020d.frontier` files are also non-authoritative and permanently retire allocation ids.
 
-This gives the publication sequence explicit crash behavior:
-
-- Before the final hard link, a crash may leave a staging marker. It has no authority; the previously committed generation remains selected.
-- After the final hard link but before the directory durability barrier completes, the final marker may be visible while persistence is uncertain. If the barrier returns an error, the publisher returns nonzero with a durability-uncertain error. The operator must preserve the old generation and use recovery/verification before any retry; the command does not pretend the marker is safely committed.
-- After the final directory barrier succeeds, the final marker is the authoritative committed-generation evidence under the Unix publication contract. A leftover staging name is harmless and remains non-authoritative.
-- Failure to remove staging after successful commit is reported as `staging_retained=true`; it does not revoke marker authority.
-
-Stale canonical staging files are safe to remove before a retry only when they are real regular files. A symlink or non-file at the staging path fails closed.
+On Unix, a visible final marker before the post-link directory barrier is explicitly durability-uncertain. On Windows composed switching, `MOVEFILE_WRITE_THROUGH` is the documented retained-name transition used for the final marker. In both cases, only final marker evidence can advance authority and the shared reader never falls back from a damaged highest committed generation.
 
 ## No-overwrite and monotonicity
 
-Final markers are published with `hard_link`, not overwrite/rename replacement. The target marker must not already exist, and the requested generation must be newer than every existing committed marker id. A retry therefore cannot silently rewrite retained commit evidence.
+Final marker targets are never overwritten. Unix uses `hard_link`; the Windows composed path uses `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` or `MOVEFILE_COPY_ALLOWED`. The requested generation must be newer than every existing final marker and, on Windows composed switching, must also have its retained durable reservation.
 
-Higher uncommitted generation logs, staging markers, and reservation files remain non-authoritative. Selection is still governed by the highest final `commit-%020d.marker`, as defined by `docs/append-log-generation-directory.md`.
+## Remaining lifecycle boundary
 
-## Windows boundary
+Unix already composes durable reservations, compact construction, cooperative writer exclusion, marker authority, routed mutation adoption, fault-matrix recovery, guarded cleanup/orphan retirement, and legacy migration/cutover.
 
-The current binary fails closed on non-Unix targets before any filesystem mutation. In particular, the project does not equate flushing a marker file with durable publication of its parent-directory entry on Windows.
+Windows now has durable reservations, durable compact-candidate canonical-name publication, and witness-bound final marker authority in the composed compact-switch path. The standalone marker publisher intentionally remains unavailable on Windows.
 
-A future Windows implementation must establish and test an explicit directory-entry durability mechanism with equivalent crash semantics before the platform can be enabled. Until then, Windows CI validates the fail-before-write behavior rather than pretending to validate a durability guarantee that is not implemented.
-
-## What this still does not complete
-
-This primitive publishes commit authority for an already-created clean generation. The separate offline compact-switch operation now composes allocation, exact live-state construction, routed-writer exclusion, publication, and deterministic interruption checks across these publication boundaries. Directory v3 adds a durable reservation primitive, but the compact-switch allocator is not yet wired to create a reservation before candidate construction.
-
-The broader lifecycle still lacks:
-
-- Windows-equivalent durable marker/reservation publication;
-- guarded cleanup of confirmed-abandoned higher generation/staging artifacts while retaining reservation evidence;
-- migration/coexistence rules for legacy single-file `LogEngine` users.
-
-Therefore the general Phase 1 compaction milestone remains open.
+The broad Phase 1 compaction milestone should remain open until the remaining Windows retained-entry lifecycle is filled in, particularly cleanup/orphan retirement and legacy migration/cutover. None of the hosted-CI checks are physical power-loss evidence.
