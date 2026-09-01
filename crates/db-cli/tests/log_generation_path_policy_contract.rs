@@ -18,7 +18,10 @@ fn cli_and_storage_agree_on_canonical_generation_path_policy() {
         ("generation-00000000000000000001.log.extra", false),
         ("x-generation-00000000000000000001.log", false),
         ("GENERATION-00000000000000000001.log", false),
-        ("generation-０００００００００００００００００００１.log", false),
+        (
+            "generation-０００００００００００００００００００１.log",
+            false,
+        ),
         ("ordinary-raw.log", false),
         ("", false),
     ];
@@ -26,7 +29,10 @@ fn cli_and_storage_agree_on_canonical_generation_path_policy() {
     for (name, expected) in cases {
         let cli_canonical = matches!(parse_canonical_generation_name(name), Ok(Some(_)));
         let storage_canonical = is_canonical_generation_path(Path::new(name));
-        assert_eq!(cli_canonical, expected, "unexpected CLI policy for {name:?}");
+        assert_eq!(
+            cli_canonical, expected,
+            "unexpected CLI policy for {name:?}"
+        );
         assert_eq!(
             storage_canonical, expected,
             "unexpected storage policy for {name:?}"
