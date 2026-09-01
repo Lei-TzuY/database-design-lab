@@ -2,22 +2,22 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use db_cli::generation_engine::GenerationLogEngine;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use db_core::KvEngine;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use db_storage_log::LogEngine;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use serde_json::Value;
 use tempfile::tempdir;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
-fn unix_migration_imports_live_state_and_leaves_legacy_source_untouched() {
+fn migration_imports_live_state_and_leaves_legacy_source_untouched() {
     let root = tempdir().expect("temporary root");
-    let source = root.path().join("legacy.db");
-    let target = root.path().join("generations");
+    let source = root.path().join("legacy-資料.db");
+    let target = root.path().join("generations-資料");
     {
         let mut engine = LogEngine::create_new(&source).expect("create legacy source");
         engine.put(b"a", b"one").expect("put a one");
@@ -32,15 +32,26 @@ fn unix_migration_imports_live_state_and_leaves_legacy_source_untouched() {
     let output = run_migrate(&source, &target);
     assert_success("migrate legacy append log", &output);
     let summary: Value = serde_json::from_slice(&output.stdout).expect("decode migration summary");
+    #[cfg(unix)]
     assert_eq!(
         summary["protocol"],
         "append_log_legacy_to_generation_migration_unix_v1"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        summary["protocol"],
+        "append_log_legacy_to_generation_migration_windows_v1"
     );
     assert_eq!(summary["source_file_format_version"], 1);
     assert_eq!(summary["source_record_count"], 6);
     assert_eq!(summary["live_keys"], 2);
     assert_eq!(summary["generation"], 1);
     assert_eq!(summary["final_generation"]["authoritative_generation"], 1);
+    #[cfg(windows)]
+    assert_eq!(
+        summary["final_generation"]["reservation_generation_ids"],
+        serde_json::json!([1])
+    );
     assert_eq!(
         fs::read(&source).expect("read legacy source after migration"),
         source_before,
@@ -48,6 +59,8 @@ fn unix_migration_imports_live_state_and_leaves_legacy_source_untouched() {
     );
     assert!(target.join("generation-00000000000000000001.log").is_file());
     assert!(target.join("commit-00000000000000000001.marker").is_file());
+    #[cfg(windows)]
+    assert!(target.join("reserve-00000000000000000001.frontier").is_file());
 
     let mut routed =
         GenerationLogEngine::open(&target).expect("open migrated generation directory");
@@ -63,13 +76,13 @@ fn unix_migration_imports_live_state_and_leaves_legacy_source_untouched() {
     assert_eq!(
         fs::read(&source).expect("read legacy source after routed mutation"),
         source_before,
-        "post-cutover routed mutations must not touch the retained legacy file"
+        "post-migration routed mutations must not touch the retained legacy file"
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
-fn unix_migration_never_overwrites_an_existing_target() {
+fn migration_never_overwrites_an_existing_target() {
     let root = tempdir().expect("temporary root");
     let source = root.path().join("legacy.db");
     let target = root.path().join("generations");
@@ -86,9 +99,9 @@ fn unix_migration_never_overwrites_an_existing_target() {
     assert_eq!(fs::read(&sentinel).expect("read sentinel"), b"keep-me");
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
-fn unix_migration_rejects_recoverable_legacy_tail_before_creating_target() {
+fn migration_rejects_recoverable_legacy_tail_before_creating_target() {
     let root = tempdir().expect("temporary root");
     let source = root.path().join("legacy.db");
     let target = root.path().join("generations");
@@ -119,7 +132,7 @@ fn unix_migration_rejects_recoverable_legacy_tail_before_creating_target() {
     );
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn unsupported_platform_fails_before_filesystem_access() {
     let root = tempdir().expect("temporary root");
@@ -142,7 +155,7 @@ fn run_migrate(source: &Path, target: &Path) -> Output {
         .expect("run generation migration")
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn assert_success(label: &str, output: &Output) {
     assert!(
         output.status.success(),
