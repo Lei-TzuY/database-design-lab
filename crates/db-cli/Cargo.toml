@@ -60,6 +60,10 @@ name = "db-lab-log-generation-cleanup"
 path = "src/bin/db-lab-log-generation-cleanup.rs"
 
 [[bin]]
+name = "db-lab-log-generation-cleanup-windows"
+path = "src/bin/db-lab-log-generation-cleanup-windows.rs"
+
+[[bin]]
 name = "db-lab-log-generation-lock"
 path = "src/bin/db-lab-log-generation-lock.rs"
 
