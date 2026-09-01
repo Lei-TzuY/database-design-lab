@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+#[cfg(not(windows))]
 use db_cli::generation_compaction::compact_switch_generation_offline;
+#[cfg(windows)]
+use db_cli::generation_compaction_windows::compact_switch_generation_offline_windows as compact_switch_generation_offline;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -11,7 +14,7 @@ use db_cli::generation_compaction::compact_switch_generation_offline;
     about = "Offline compact and durably switch an append-log generation directory"
 )]
 struct Cli {
-    /// Existing verified generation directory. All writers must remain quiesced for this command.
+    /// Existing verified generation directory. Raw-path writers must remain quiesced for this command.
     #[arg(long)]
     directory: PathBuf,
 }
