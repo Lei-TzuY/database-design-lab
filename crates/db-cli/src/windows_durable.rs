@@ -2,8 +2,8 @@
 //!
 //! This module is the only `db-cli` source module allowed to contain raw FFI. The surrounding
 //! package keeps `unsafe_code = "deny"`, and `lib.rs` grants a local allowance only to this module.
-//! The first primitive deliberately exposes one narrow operation whose Win32 durability semantics
-//! are documented by Microsoft: a same-volume move requested with `MOVEFILE_WRITE_THROUGH`.
+//! The primitives deliberately expose narrow same-volume namespace operations whose Win32
+//! write-through semantics are documented by Microsoft.
 
 use std::io;
 use std::path::Path;
@@ -17,7 +17,7 @@ use std::path::Path;
 pub fn move_no_replace_write_through(source: &Path, target: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        windows::move_no_replace_write_through(source, target)
+        windows::move_write_through(source, target, false)
     }
 
     #[cfg(not(windows))]
@@ -30,6 +30,28 @@ pub fn move_no_replace_write_through(source: &Path, target: &Path) -> io::Result
     }
 }
 
+/// Atomically replaces an existing `target` with `source`, requesting write-through completion.
+///
+/// The Windows implementation calls `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING |
+/// MOVEFILE_WRITE_THROUGH` and deliberately omits `MOVEFILE_COPY_ALLOWED`. This primitive is only
+/// suitable when the caller has already retained independent rollback evidence for the target being
+/// replaced. On non-Windows targets it fails before filesystem access.
+pub fn move_replace_write_through(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::move_write_through(source, target, true)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (source, target);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows write-through replacement is unsupported on this platform",
+        ))
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use std::ffi::OsStr;
@@ -37,6 +59,7 @@ mod windows {
 
     use super::*;
 
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 
     #[link(name = "kernel32")]
@@ -48,14 +71,23 @@ mod windows {
         ) -> i32;
     }
 
-    pub(super) fn move_no_replace_write_through(source: &Path, target: &Path) -> io::Result<()> {
+    pub(super) fn move_write_through(
+        source: &Path,
+        target: &Path,
+        replace_existing: bool,
+    ) -> io::Result<()> {
         let source = encode_path(source.as_os_str())?;
         let target = encode_path(target.as_os_str())?;
+        let flags = MOVEFILE_WRITE_THROUGH
+            | if replace_existing {
+                MOVEFILE_REPLACE_EXISTING
+            } else {
+                0
+            };
 
         // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that remain alive for the
         // duration of this synchronous Win32 call. The function retains neither pointer.
-        let moved =
-            unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+        let moved = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), flags) };
         if moved == 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -120,6 +152,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_replace_write_through_replaces_existing_target() {
+        let root = tempdir().expect("temporary root");
+        let source = root.path().join("sentinel-staging.bin");
+        let target = root.path().join("legacy.db");
+        {
+            let mut file = File::create(&source).expect("create replacement source");
+            file.write_all(b"sentinel")
+                .expect("write replacement source");
+            file.sync_all().expect("sync replacement source");
+        }
+        fs::write(&target, b"legacy-bytes").expect("write target bytes");
+
+        move_replace_write_through(&source, &target).expect("replace target write-through");
+        assert!(!source.exists());
+        assert_eq!(fs::read(&target).expect("read replacement"), b"sentinel");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_move_accepts_unicode_paths() {
         let root = tempdir().expect("temporary root");
         let source = root.path().join("暫存-證據.bin");
@@ -144,6 +195,9 @@ mod tests {
         let error = move_no_replace_write_through(&source, &target)
             .expect_err("non-Windows must fail closed");
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        let replace_error = move_replace_write_through(&source, &target)
+            .expect_err("non-Windows replacement must fail closed");
+        assert_eq!(replace_error.kind(), io::ErrorKind::Unsupported);
         assert!(!source.exists());
         assert!(!target.exists());
     }
