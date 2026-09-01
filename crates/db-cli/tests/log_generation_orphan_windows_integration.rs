@@ -1,6 +1,10 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
+
+#[cfg(windows)]
+use std::fs;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 #[cfg(windows)]
 use db_cli::generation_directory::{
