@@ -78,7 +78,9 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use std::fs::{self, File};
+    #[cfg(windows)]
     use std::io::Write;
 
     use tempfile::tempdir;
