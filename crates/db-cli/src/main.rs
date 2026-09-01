@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use db_cli::generation_directory::parse_canonical_generation_name;
 use db_core::{
     compare_experiment_trace, compare_workload, execute_workload, generate_experiment_trace,
     generate_workload, DbError, DifferentialError, ExperimentComparisonReport,
@@ -343,6 +344,7 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
                     "--path is not valid for the in-memory engine".to_owned(),
                 )),
                 (EngineKind::Log, Some(path)) => {
+                    reject_canonical_generation_raw_mutation(&path)?;
                     let mut engine = LogEngine::open(path)?;
                     print_run_report(&mut engine, &workload)
                 }
@@ -367,6 +369,7 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
             let mut reference = MemoryEngine::new();
             match engine {
                 PersistentEngineKind::Log => {
+                    reject_canonical_generation_raw_mutation(&path)?;
                     let mut candidate = LogEngine::create_new(path)?;
                     print_differential_report(&mut reference, &mut candidate, &workload)
                 }
@@ -473,6 +476,19 @@ fn run_cli(cli: Cli) -> Result<(), CliError> {
             write_stdout_json(&report)
         }
     }
+}
+
+fn reject_canonical_generation_raw_mutation(path: &Path) -> Result<(), CliError> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    if matches!(parse_canonical_generation_name(name), Ok(Some(_))) {
+        return Err(CliError::Usage(format!(
+            "raw append-log mutation refuses canonical generation path {}; use db-lab-log-generation-run --directory <generation-directory> --workload <workload> instead",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn print_run_report<E: KvEngine>(engine: &mut E, workload: &Workload) -> Result<(), CliError> {

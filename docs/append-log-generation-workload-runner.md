@@ -14,4 +14,6 @@ The JSON result reports the engine capability name, workload format version and 
 
 The workload input is bounded to 64 MiB, must be a real regular file, must deserialize as the repository's versioned `Workload`, and must pass common operation validation before any generation handle is opened.
 
-This command is the supported workload-level mutation path for generation directories. `db-lab run --engine log` remains the deliberately raw single-file laboratory engine and must not be pointed at canonical generation files. Direct library users with arbitrary filesystem access are still outside the cooperative protocol's threat model; the generation layer is correctness coordination, not an OS sandbox.
+This command is the supported workload-level mutation path for generation directories. The mutating raw CLI paths `db-lab run --engine log` and `db-lab differential --engine log` reserve strict canonical `generation-{id:020}.log` names and fail before opening or creating such a pathname, directing callers here instead. This guard is intentionally mutation-only: `db-lab verify` and `db-lab inspect` may still read canonical generation files directly as evidence/diagnostic inputs.
+
+The raw single-file laboratory engine remains supported under ordinary noncanonical filenames. Direct library users with arbitrary filesystem access are still outside the cooperative protocol's threat model; the generation layer and CLI guard provide correctness coordination and misuse resistance, not an OS sandbox.
