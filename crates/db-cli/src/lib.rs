@@ -1,5 +1,6 @@
 pub mod batch_archive;
 pub mod generation_cleanup;
+pub mod generation_cleanup_windows;
 pub mod generation_compaction;
 pub mod generation_compaction_windows;
 pub mod generation_cutover;
