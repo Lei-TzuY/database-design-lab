@@ -100,7 +100,8 @@ fn marker_bound_base_allows_later_recoverable_append_without_repairing_it() {
     let log = generation_path(directory.path(), 1);
 
     {
-        let mut engine = LogEngine::open_managed_generation(&log).expect("open committed generation");
+        let mut engine =
+            LogEngine::open_managed_generation(&log).expect("open committed generation");
         engine
             .put(b"b", b"two")
             .expect("complete post-commit append");
