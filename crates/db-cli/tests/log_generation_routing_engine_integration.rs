@@ -21,7 +21,8 @@ fn routing_engine_drives_crud_and_reopen_through_verified_generation() {
     fs::create_dir(&directory).expect("create generation directory");
     let generation = generation_path(&directory, 1);
     {
-        let mut log = LogEngine::create_new(&generation).expect("create generation 1");
+        let mut log =
+            LogEngine::create_new_managed_generation(&generation).expect("create generation 1");
         log.put(b"a", b"one").expect("put initial value");
         log.put(b"remove", b"value").expect("put removable value");
     }
@@ -150,8 +151,8 @@ fn existing_routing_handle_adopts_generation_published_by_offline_switch() {
         old_after_switch,
         "post-switch routed mutation must not append to the stale generation handle"
     );
-    let mut generation2 =
-        LogEngine::open(generation_path(&directory, 2)).expect("open generation 2");
+    let mut generation2 = LogEngine::open_managed_generation(generation_path(&directory, 2))
+        .expect("open generation 2");
     assert_eq!(
         generation2
             .get(b"after-switch")
@@ -169,7 +170,8 @@ fn existing_routing_handle_adopts_generation_published_by_offline_switch() {
 }
 
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut log = LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut log = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         log.put(key, value).expect("put generation entry");
     }

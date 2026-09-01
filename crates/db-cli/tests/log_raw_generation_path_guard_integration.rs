@@ -13,8 +13,8 @@ fn mutating_raw_cli_rejects_canonical_generation_path_but_read_only_tools_still_
     let workload_path = root.path().join("workload.json");
 
     {
-        let mut engine =
-            LogEngine::create_new(&generation_path).expect("create canonical-named log");
+        let mut engine = LogEngine::create_new_managed_generation(&generation_path)
+            .expect("create canonical-named managed log fixture");
         engine.put(b"existing", b"value").expect("seed log");
     }
     let before = fs::read(&generation_path).expect("read log before guarded run");

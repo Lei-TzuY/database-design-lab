@@ -100,7 +100,8 @@ fn marker_bound_base_allows_later_recoverable_append_without_repairing_it() {
     let log = generation_path(directory.path(), 1);
 
     {
-        let mut engine = LogEngine::open(&log).expect("open committed generation");
+        let mut engine =
+            LogEngine::open_managed_generation(&log).expect("open committed generation");
         engine
             .put(b"b", b"two")
             .expect("complete post-commit append");
@@ -207,8 +208,8 @@ fn marker_generation_must_match_filename_and_namespace_is_strict() {
 }
 
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }

@@ -127,7 +127,8 @@ fn retirement_requires_durable_reservation_and_exact_inspected_state() {
         .expect("orphan crc") as u32;
 
     {
-        let mut engine = LogEngine::open(generation_path(&directory, 2)).expect("open candidate");
+        let mut engine = LogEngine::open_managed_generation(generation_path(&directory, 2))
+            .expect("open candidate");
         engine.put(b"late", b"change").expect("mutate candidate");
     }
     let changed = run_retire(&directory, 2, 1, orphan_bytes, orphan_crc, None, true);
@@ -206,8 +207,8 @@ fn create_and_publish(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
 
 #[cfg(unix)]
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }

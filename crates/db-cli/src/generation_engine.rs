@@ -13,8 +13,9 @@ use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLo
 ///
 /// Every routed operation acquires the generation-directory writer lease before authority refresh
 /// and keeps it through the operation. This closes the cooperative cross-process scan-to-append race
-/// against the offline compact switch and other `GenerationLogEngine` handles. Raw-path
-/// `LogEngine` users remain outside this coordination contract.
+/// against the offline compact switch and other `GenerationLogEngine` handles. The underlying
+/// `LogEngine` is opened only through its explicit managed-generation constructor, while ordinary
+/// standalone constructors fail closed on canonical generation filenames.
 pub struct GenerationLogEngine {
     directory: PathBuf,
     authoritative_generation: u64,
@@ -176,8 +177,9 @@ fn resolve_authority(directory: &Path, minimum_generation: u64) -> Result<Resolv
     let authoritative_log = verified.authoritative_log_path();
 
     // Mutable open is allowed only after the shared verifier proved the retained commit marker and
-    // committed prefix. It may repair the one canonical post-prefix incomplete append.
-    let inner = LogEngine::open(&authoritative_log)?;
+    // committed prefix and while the caller owns the generation writer lease. It may repair the one
+    // canonical post-prefix incomplete append.
+    let inner = LogEngine::open_managed_generation(&authoritative_log)?;
 
     let after_open =
         verify_generation_directory(&canonical_directory).map_err(map_directory_error)?;

@@ -21,7 +21,8 @@ fn windows_switch_publishes_write_through_candidate_then_marker_authority() {
     fs::create_dir(&directory).expect("create generation directory");
     let source = generation_path(&directory, 1);
     {
-        let mut engine = LogEngine::create_new(&source).expect("create source generation");
+        let mut engine =
+            LogEngine::create_new_managed_generation(&source).expect("create source generation");
         engine.put(b"a", b"one").expect("put a one");
         engine.put(b"a", b"two").expect("overwrite a");
         engine.put(b"b", b"three").expect("put b");
@@ -31,7 +32,8 @@ fn windows_switch_publishes_write_through_candidate_then_marker_authority() {
     write_fixture_marker(&directory, 1);
 
     {
-        let mut engine = LogEngine::open(&source).expect("open authoritative generation");
+        let mut engine =
+            LogEngine::open_managed_generation(&source).expect("open authoritative generation");
         engine
             .put(b"post-marker", b"durable")
             .expect("append after fixture marker");
@@ -103,8 +105,8 @@ fn windows_standalone_publisher_remains_fail_closed_for_arbitrary_generation() {
 }
 
 fn create_generation(directory: &Path, id: u64, value: &[u8]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     engine.put(b"key", value).expect("put generation value");
 }
 

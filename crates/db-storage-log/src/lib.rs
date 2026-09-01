@@ -32,6 +32,33 @@ const RECORD_HEADER_LEN_U64: u64 = RECORD_HEADER_LEN as u64;
 const KIND_PUT: u8 = 1;
 const KIND_DELETE: u8 = 2;
 
+const GENERATION_PREFIX: &str = "generation-";
+const GENERATION_SUFFIX: &str = ".log";
+const GENERATION_ID_WIDTH: usize = 20;
+
+/// Returns whether `path` uses the canonical generation-owned append-log filename.
+///
+/// Canonical generation ids are nonzero `u64` values rendered as exactly 20 decimal digits.
+#[must_use]
+pub fn is_canonical_generation_path(path: impl AsRef<Path>) -> bool {
+    let Some(name) = path.as_ref().file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(digits) = name
+        .strip_prefix(GENERATION_PREFIX)
+        .and_then(|name| name.strip_suffix(GENERATION_SUFFIX))
+    else {
+        return false;
+    };
+    if digits.len() != GENERATION_ID_WIDTH || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(id) = digits.parse::<u64>() else {
+        return false;
+    };
+    id != 0 && format!("{id:020}") == digits
+}
+
 /// Description of a final append that is incomplete but safe to discard as a unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TruncatedTail {
@@ -82,9 +109,16 @@ pub struct InspectionReport {
     pub entries: Vec<InspectionEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathOwnership {
+    Standalone,
+    GenerationManaged,
+}
+
 /// Checksummed append-only engine backed by one file and an in-memory replay index.
 pub struct LogEngine {
     path: PathBuf,
+    path_ownership: PathOwnership,
     file: Option<File>,
     values: BTreeMap<Vec<u8>, Vec<u8>>,
     next_sequence: u64,
@@ -98,6 +132,7 @@ impl std::fmt::Debug for LogEngine {
         formatter
             .debug_struct("LogEngine")
             .field("path", &self.path)
+            .field("path_ownership", &self.path_ownership)
             .field("live_keys", &self.values.len())
             .field("next_sequence", &self.next_sequence)
             .field("record_count", &self.record_count)
@@ -108,27 +143,66 @@ impl std::fmt::Debug for LogEngine {
 }
 
 impl LogEngine {
-    /// Opens an existing engine or atomically reserves a new file and writes its header.
+    /// Opens an existing standalone engine or atomically reserves a new standalone file.
     ///
-    /// A pre-existing zero-length or partial-header file is rejected. A structurally valid
-    /// incomplete final record is truncated back to its record boundary and synchronized.
+    /// Canonical `generation-{id:020}.log` paths are reserved for the generation ownership layer
+    /// and fail closed here. A pre-existing zero-length or partial-header file is rejected. A
+    /// structurally valid incomplete final record is truncated back to its record boundary and
+    /// synchronized.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let (file, created) = open_or_create(&path)?;
-        Self::from_file(path, file, created)
+        reject_standalone_generation_path(&path)?;
+        Self::open_with_ownership(path, PathOwnership::Standalone)
     }
 
-    /// Creates a new engine and fails atomically if the path already exists.
+    /// Opens a canonical generation-owned append log after external ownership checks.
     ///
-    /// This is the required constructor for differential experiments that must not inherit state
-    /// from an earlier run.
+    /// This constructor deliberately bypasses the standalone canonical-name guard. The caller must
+    /// already hold the generation writer lease and must have verified that this exact path is the
+    /// authoritative generation. Ordinary append-log users must call [`Self::open`] instead.
+    pub fn open_managed_generation(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        require_managed_generation_path(&path)?;
+        Self::open_with_ownership(path, PathOwnership::GenerationManaged)
+    }
+
+    fn open_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
+        let (file, created) = open_or_create(&path)?;
+        Self::from_file(path, path_ownership, file, created)
+    }
+
+    /// Creates a new standalone engine and fails atomically if the path already exists.
+    ///
+    /// Canonical `generation-{id:020}.log` paths are reserved for the generation ownership layer
+    /// and fail closed here. This is the required constructor for differential experiments that
+    /// must not inherit state from an earlier run.
     pub fn create_new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = create_new_file(&path)?;
-        Self::from_file(path, file, true)
+        reject_standalone_generation_path(&path)?;
+        Self::create_new_with_ownership(path, PathOwnership::Standalone)
     }
 
-    fn from_file(path: PathBuf, mut file: File, created: bool) -> Result<Self> {
+    /// Creates a canonical generation-owned append log after external ownership checks.
+    ///
+    /// The caller is responsible for the generation reservation/lease/publication protocol.
+    /// Ordinary append-log users must call [`Self::create_new`] instead.
+    pub fn create_new_managed_generation(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        require_managed_generation_path(&path)?;
+        Self::create_new_with_ownership(path, PathOwnership::GenerationManaged)
+    }
+
+    fn create_new_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
+        let file = create_new_file(&path)?;
+        Self::from_file(path, path_ownership, file, true)
+    }
+
+    fn from_file(
+        path: PathBuf,
+        path_ownership: PathOwnership,
+        mut file: File,
+        created: bool,
+    ) -> Result<Self> {
         if created {
             file.write_all(&encode_file_header())?;
             file.sync_all()?;
@@ -143,6 +217,7 @@ impl LogEngine {
 
         Ok(Self {
             path,
+            path_ownership,
             file: Some(file),
             values: scan.values,
             next_sequence: scan.next_sequence,
@@ -287,7 +362,11 @@ impl KvEngine for LogEngine {
 
     fn reopen(&mut self) -> Result<()> {
         self.file.take();
-        match Self::open(&self.path) {
+        let reopened = match self.path_ownership {
+            PathOwnership::Standalone => Self::open(&self.path),
+            PathOwnership::GenerationManaged => Self::open_managed_generation(&self.path),
+        };
+        match reopened {
             Ok(reopened) => {
                 *self = reopened;
                 Ok(())
@@ -356,6 +435,26 @@ struct RecordMetadata {
     value_len: usize,
     total_len: u64,
     expected_record_crc: u32,
+}
+
+fn reject_standalone_generation_path(path: &Path) -> Result<()> {
+    if is_canonical_generation_path(path) {
+        return Err(DbError::InvalidInput(format!(
+            "standalone append-log constructor refuses canonical generation path {}; generation ownership code must use the managed-generation constructor after acquiring the generation writer lease",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn require_managed_generation_path(path: &Path) -> Result<()> {
+    if !is_canonical_generation_path(path) {
+        return Err(DbError::InvalidInput(format!(
+            "managed-generation append-log constructor requires canonical generation-{{id:020}}.log path: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn open_or_create(path: &Path) -> Result<(File, bool)> {
