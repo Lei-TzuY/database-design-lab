@@ -149,7 +149,8 @@ fn unsupported_platform_fails_before_filesystem_access() {
 #[cfg(any(unix, windows))]
 fn create_initial_generation(directory: &Path) {
     let generation = directory.join(canonical_generation_name(1));
-    let mut engine = LogEngine::create_new(&generation).expect("create generation 1");
+    let mut engine =
+        LogEngine::create_new_managed_generation(&generation).expect("create generation 1");
     engine.put(b"key", b"value").expect("write generation 1");
     drop(engine);
 
