@@ -158,7 +158,8 @@ mod tests {
         let target = root.path().join("legacy.db");
         {
             let mut file = File::create(&source).expect("create replacement source");
-            file.write_all(b"sentinel").expect("write replacement source");
+            file.write_all(b"sentinel")
+                .expect("write replacement source");
             file.sync_all().expect("sync replacement source");
         }
         fs::write(&target, b"legacy-bytes").expect("write target bytes");
