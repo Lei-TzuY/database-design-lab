@@ -13,3 +13,5 @@ pub mod generation_publication;
 pub mod generation_reservation;
 pub mod host_preflight;
 pub mod log_compaction;
+#[allow(unsafe_code)]
+pub mod windows_durable;
