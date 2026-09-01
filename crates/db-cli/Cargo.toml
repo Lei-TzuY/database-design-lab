@@ -95,5 +95,10 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
