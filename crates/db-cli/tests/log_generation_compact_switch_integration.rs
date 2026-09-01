@@ -1,17 +1,20 @@
 use std::fs;
 use std::path::Path;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use tempfile::tempdir;
-
-#[cfg(unix)]
+#[cfg(windows)]
+use db_cli::generation_directory::canonical_marker_name;
+#[cfg(windows)]
+use db_cli::generation_marker::{crc32_ieee, encode_commit_marker, CommittedPrefix};
+#[cfg(any(unix, windows))]
 use db_core::KvEngine;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use db_storage_log::LogEngine;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use serde_json::Value;
+use tempfile::tempdir;
 
 #[cfg(unix)]
 #[test]
@@ -85,6 +88,85 @@ fn unix_offline_switch_compacts_full_authoritative_live_state_and_advances_autho
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_offline_switch_uses_write_through_candidate_and_marker_publication() {
+    let root = tempdir().expect("temporary root");
+    let directory = root.path().join("世代-generations");
+    fs::create_dir(&directory).expect("create generation directory");
+    let source = generation_path(&directory, 1);
+    {
+        let mut engine = LogEngine::create_new(&source).expect("create source generation");
+        engine.put(b"a", b"one").expect("put a one");
+        engine.put(b"a", b"two").expect("overwrite a");
+        engine.put(b"deleted", b"value").expect("put deleted");
+        engine.delete(b"deleted").expect("delete key");
+        engine.put(b"binary\0key", &[0xff, 0, 0x7f]).expect("put binary");
+    }
+    write_fixture_marker(&directory, 1);
+
+    {
+        let mut engine = LogEngine::open(&source).expect("open fixture authority");
+        engine
+            .put(b"post-marker", b"durable")
+            .expect("append after fixture marker");
+    }
+    let source_before = LogEngine::inspect(&source, true).expect("inspect authoritative source");
+    assert_eq!(source_before.verification.record_count, 6);
+    assert_eq!(source_before.verification.live_keys, 3);
+
+    let switched = run_switch(&directory);
+    assert_success("Windows compact-switch generation directory", &switched);
+    let summary: Value = serde_json::from_slice(&switched.stdout).expect("decode switch summary");
+    assert_eq!(
+        summary["protocol"],
+        "append_log_offline_generation_compact_switch_windows_v1"
+    );
+    assert_eq!(summary["old_generation"], 1);
+    assert_eq!(summary["new_generation"], 2);
+    assert_eq!(
+        summary["reservation"]["protocol"],
+        "append_log_generation_reservation_windows_v1"
+    );
+    assert_eq!(summary["reservation"]["generation"], 2);
+    assert_eq!(summary["compaction"]["source_record_count"], 6);
+    assert_eq!(summary["compaction"]["live_keys"], 3);
+    assert_eq!(summary["compaction"]["compacted_record_count"], 3);
+    assert_eq!(
+        summary["publication"]["protocol"],
+        "append_log_generation_marker_publication_windows_v1"
+    );
+    assert_eq!(summary["publication"]["generation"], 2);
+    assert_eq!(summary["publication"]["staging_retained"], false);
+    assert_eq!(summary["final_generation"]["authoritative_generation"], 2);
+    assert_eq!(
+        summary["final_generation"]["reservation_generation_ids"],
+        serde_json::json!([2])
+    );
+
+    assert!(generation_path(&directory, 1).is_file());
+    assert!(marker_path(&directory, 1).is_file());
+    assert!(generation_path(&directory, 2).is_file());
+    assert!(marker_path(&directory, 2).is_file());
+    assert!(!staging_marker_path(&directory, 2).exists());
+
+    let compacted =
+        LogEngine::inspect(generation_path(&directory, 2), true).expect("inspect new generation");
+    assert_eq!(compacted.entries, source_before.entries);
+    assert_eq!(compacted.verification.record_count, 3);
+
+    let verified = run_verify(&directory);
+    assert_success("verify Windows switched directory", &verified);
+    let verified: Value =
+        serde_json::from_slice(&verified.stdout).expect("decode verifier summary");
+    assert_eq!(verified["authoritative_generation"], 2);
+    assert_eq!(verified["marker_generation_ids"], serde_json::json!([1, 2]));
+    assert_eq!(
+        verified["reservation_generation_ids"],
+        serde_json::json!([2])
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn unix_offline_switch_uses_a_fresh_durable_reservation_above_all_retained_frontier_evidence() {
@@ -138,7 +220,7 @@ fn unix_offline_switch_uses_a_fresh_durable_reservation_above_all_retained_front
     );
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn unsupported_platform_fails_before_touching_generation_directory() {
     let root = tempdir().expect("temporary root");
@@ -165,17 +247,36 @@ fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn write_fixture_marker(directory: &Path, id: u64) {
+    let generation = generation_path(directory, id);
+    let report = LogEngine::verify(&generation).expect("verify fixture generation");
+    assert!(report.recoverable_tail.is_none());
+    let bytes = fs::read(&generation).expect("read fixture generation");
+    let proof = CommittedPrefix {
+        bytes: report.file_bytes,
+        crc32: crc32_ieee(&bytes),
+        record_count: report.record_count,
+        next_sequence: report.next_sequence,
+    };
+    fs::write(
+        directory.join(canonical_marker_name(id)),
+        encode_commit_marker(id, proof).expect("encode fixture marker"),
+    )
+    .expect("write fixture marker");
+}
+
+#[cfg(any(unix, windows))]
 fn generation_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("generation-{id:020}.log"))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn marker_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("commit-{id:020}.marker"))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn staging_marker_path(directory: &Path, id: u64) -> PathBuf {
     directory.join(format!("staging-commit-{id:020}.marker"))
 }
@@ -208,7 +309,7 @@ fn run_reserve(directory: &Path) -> Output {
         .expect("run generation reservation")
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn run_verify(directory: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-verify"))
         .arg("--directory")
@@ -217,7 +318,7 @@ fn run_verify(directory: &Path) -> Output {
         .expect("run generation verifier")
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn assert_success(label: &str, output: &Output) {
     assert!(
         output.status.success(),
@@ -227,7 +328,7 @@ fn assert_success(label: &str, output: &Output) {
     );
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn assert_failure_contains(output: &Output, needle: &str) {
     assert!(!output.status.success(), "command unexpectedly succeeded");
     let stderr = String::from_utf8_lossy(&output.stderr);
