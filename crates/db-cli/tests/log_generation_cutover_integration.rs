@@ -158,7 +158,7 @@ fn unix_cutover_never_overwrites_retained_rollback_evidence() {
     assert!(LogEngine::inspect(&source, true).is_ok());
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn unsupported_platform_fails_before_filesystem_access() {
     let root = tempdir().expect("temporary root");
