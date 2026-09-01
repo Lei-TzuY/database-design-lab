@@ -14,7 +14,7 @@ The reservation command is:
 db-lab-log-generation-reserve --directory data/log-generations
 ```
 
-On supported Unix targets it reports protocol `append_log_generation_reservation_unix_v1`.
+Supported Unix targets report protocol `append_log_generation_reservation_unix_v1`. Windows reports `append_log_generation_reservation_windows_v1`.
 
 ## Why reservations exist
 
@@ -41,6 +41,24 @@ The operation reports success only after the directory durability barrier and re
 
 If the reservation becomes visible but the parent-directory sync fails, the operation returns a durability-uncertain error. Callers must not construct a candidate from that failed reservation result. If the visible reservation survives, later allocation conservatively skips it; if it does not survive a crash, no successful caller had been permitted to rely on it.
 
+## Windows durability order
+
+Windows uses the audited `MoveFileExW(MOVEFILE_WRITE_THROUGH)` namespace primitive rather than claiming an undocumented directory-flush equivalent:
+
+1. acquire the same cooperative generation writer lease;
+2. verify the current generation directory and allocate `highest_observed_generation + 1`;
+3. create a unique zero-byte staging file as a sibling of the generation directory, outside the strict retained namespace;
+4. `sync_all` the staging file and close its handle;
+5. move that staging file to the canonical `reserve-%020d.frontier` target using the no-overwrite write-through primitive;
+6. re-run the shared v3 verifier and require the reservation id to be retained in the frontier;
+7. release the writer lease.
+
+The move intentionally enables neither replacement nor cross-volume copy fallback. If the generation directory is itself mounted such that its parent sibling is on a different volume, reservation fails instead of silently weakening the contract.
+
+A crash before the write-through move may leave a uniquely named sibling staging file. That file is outside `append_log_generation_directory_v3`, is never authority or allocation evidence, and does not make a reservation successful. A successful move consumes the staging name, so normal success leaves no sibling staging residue.
+
+If the Win32 move reports failure but the canonical reservation target is visible or its state cannot be established, the operation returns durability-uncertain rather than pretending the reservation failed cleanly. If the canonical target is absent, the failed operation removes its own staging path best-effort and returns the I/O failure.
+
 ## Read-side validation
 
 The v3 generation-directory reader accepts reservation names in addition to the v2 generation/final-marker/staging-marker namespace. A reservation must:
@@ -51,36 +69,32 @@ The v3 generation-directory reader accepts reservation names in addition to the 
 
 Malformed, non-file, or nonempty reservation evidence fails directory verification closed.
 
-`highest_observed_generation` now considers generation logs, final markers, staging markers, and reservation ids. Successful JSON also includes `reservation_generation_ids`.
+`highest_observed_generation` considers generation logs, final markers, staging markers, and reservation ids. Successful JSON also includes `reservation_generation_ids`.
 
-Reservation contents carry no authority and are intentionally empty. The filename and its durably retained directory entry are the monotonic allocation evidence.
+Reservation contents carry no authority and are intentionally empty. The filename and its durably retained namespace entry are the monotonic allocation evidence.
 
 ## Compatibility and versioning
 
 Directory protocol v2 is the frozen predecessor that knew only generation logs, final markers, and staging markers. The v3 reader remains able to read a retained v2-shaped directory containing no reservations; it reports an empty reservation list. The protocol identifier is nevertheless v3 because accepting a new canonical namespace class and changing allocation-frontier semantics is a real retained-format contract change.
 
-Commit-marker format remains version 2 and append-log file format remains version 1.
-
-## Platform boundary
-
-Durable reservation publication is currently Unix-only because success depends on a parent-directory durability barrier. Non-Unix targets fail before filesystem access rather than claiming an unproven equivalent.
-
-Read-only v3 directory verification remains cross-platform.
+Commit-marker format remains version 2 and append-log file format remains version 1. Enabling the Windows reservation writer does not change retained reservation bytes or directory protocol semantics.
 
 ## Compact-switch integration
 
-`append_log_offline_generation_compact_switch_unix_v2` now calls the reservation primitive before candidate construction. The switch therefore has two deliberately separate lease windows:
+`append_log_offline_generation_compact_switch_unix_v2` calls the reservation primitive before candidate construction. The Unix switch therefore has two deliberately separate lease windows:
 
 1. reserve a fresh generation id durably under the shared writer lease, then release it;
 2. build the expensive compact candidate without monopolizing writers;
 3. reacquire the same lease for the final old-authority/live-state recheck through durable marker publication and final verification.
 
-A successful switch reports its `GenerationReservationSummary` in the JSON result. If candidate construction, source-drift detection, or marker publication later fails, the reservation remains retained and that generation id stays consumed. Retry allocates above it rather than reusing an identity whose candidate may have existed before the failure.
+Windows now has durable generation-id reservation, but the full compact switch remains unsupported there because canonical generation construction and final commit-marker publication still need complete Windows-safe retained-entry ordering. The reservation primitive by itself does not lift those boundaries.
+
+A successful Unix switch reports its `GenerationReservationSummary` in the JSON result. If candidate construction, source-drift detection, or marker publication later fails, the reservation remains retained and that generation id stays consumed. Retry allocates above it rather than reusing an identity whose candidate may have existed before the failure.
 
 If authority advances after reservation but before the switch snapshots its source and reaches or exceeds the reserved id, the switch fails early with `ReservedGenerationObsolete`; it does not build or publish a candidate under an id that is no longer newer than authority. A higher reservation alone does not invalidate an older still-uncommitted reservation, because reservations carry no authority.
 
 ## Lifecycle boundary
 
-Reservation-backed compact switching now makes abandoned candidate/staging identity independently reclaimable from allocation history: the reservation can preserve non-reuse even if those artifacts are later deleted.
+Reservation-backed compact switching makes abandoned candidate/staging identity independently reclaimable from allocation history: the reservation can preserve non-reuse even if those artifacts are later deleted.
 
-The remaining cleanup problem is therefore narrower. A future guarded orphan-cleanup protocol must still establish that a higher uncommitted candidate or staging artifact is actually abandoned before deleting it; reservation existence proves identity retirement, not process liveness or abandonment. Windows-equivalent durable reservation/marker publication and legacy single-file migration/coexistence also remain unresolved.
+Windows-equivalent final-marker publication, canonical compact-generation publication, cleanup/orphan retirement, migration, and cutover remain separate durability problems. Hosted Windows CI validates the implemented API/order semantics; it is not physical power-loss evidence.
