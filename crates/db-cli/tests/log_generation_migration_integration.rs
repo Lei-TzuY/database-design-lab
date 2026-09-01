@@ -60,7 +60,9 @@ fn migration_imports_live_state_and_leaves_legacy_source_untouched() {
     assert!(target.join("generation-00000000000000000001.log").is_file());
     assert!(target.join("commit-00000000000000000001.marker").is_file());
     #[cfg(windows)]
-    assert!(target.join("reserve-00000000000000000001.frontier").is_file());
+    assert!(target
+        .join("reserve-00000000000000000001.frontier")
+        .is_file());
 
     let mut routed =
         GenerationLogEngine::open(&target).expect("open migrated generation directory");
