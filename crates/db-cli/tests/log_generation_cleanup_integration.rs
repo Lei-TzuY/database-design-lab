@@ -197,8 +197,8 @@ fn create_and_publish(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
 
 #[cfg(unix)]
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }
