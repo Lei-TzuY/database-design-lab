@@ -36,8 +36,8 @@ fn unix_publisher_commits_clean_generation_and_reader_ignores_staging_residue() 
     assert!(!staging_marker_path(&directory, 1).exists());
 
     {
-        let mut engine =
-            LogEngine::open(generation_path(&directory, 1)).expect("open committed log");
+        let mut engine = LogEngine::open_managed_generation(generation_path(&directory, 1))
+            .expect("open committed log");
         engine.put(b"b", b"two").expect("post-commit append");
     }
 
@@ -139,8 +139,8 @@ fn unsupported_platform_fails_before_writing_any_marker() {
 
 #[cfg(unix)]
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }
