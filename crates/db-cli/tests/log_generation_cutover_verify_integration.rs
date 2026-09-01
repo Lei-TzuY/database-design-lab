@@ -105,15 +105,13 @@ fn run_cutover(source: &Path, target: &Path) -> Output {
 }
 
 fn run_verify(source: &Path, target: &Path) -> Output {
-    Command::new(env!(
-        "CARGO_BIN_EXE_db-lab-log-generation-cutover-verify"
-    ))
-    .arg("--legacy-source")
-    .arg(source)
-    .arg("--target-directory")
-    .arg(target)
-    .output()
-    .expect("run fresh cutover verifier")
+    Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-cutover-verify"))
+        .arg("--legacy-source")
+        .arg(source)
+        .arg("--target-directory")
+        .arg(target)
+        .output()
+        .expect("run fresh cutover verifier")
 }
 
 fn assert_success(label: &str, output: &Output) {
