@@ -330,7 +330,9 @@ fn require_exact_compact_generation(
     let _ = verify_committed_prefix(path, proof)?;
     let current = LogEngine::inspect(path, true)?;
     if &current != expected {
-        return invalid_publication("generation changed while commit marker publication was in progress");
+        return invalid_publication(
+            "generation changed while commit marker publication was in progress",
+        );
     }
     Ok(())
 }
@@ -412,8 +414,6 @@ fn publication_io_error(path: &Path, source: io::Error) -> GenerationPublication
 }
 
 #[cfg(windows)]
-fn invalid_publication<T>(
-    message: impl Into<String>,
-) -> Result<T, GenerationPublicationError> {
+fn invalid_publication<T>(message: impl Into<String>) -> Result<T, GenerationPublicationError> {
     Err(GenerationPublicationError::Invalid(message.into()))
 }
