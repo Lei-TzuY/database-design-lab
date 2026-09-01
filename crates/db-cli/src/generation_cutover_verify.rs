@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use db_core::DbError;
@@ -19,7 +19,6 @@ pub const LEGACY_CUTOVER_VERIFICATION_PROTOCOL: &str = "append_log_legacy_cutove
 const IMPORT_GENERATION: u64 = 1;
 const RETAINED_SUFFIX: &str = ".retired-append-log-v1";
 const MAX_SENTINEL_BYTES: usize = 16 * 1024;
-const COMPARE_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LegacyCutoverVerificationSummary {
@@ -64,7 +63,7 @@ pub enum LegacyCutoverVerificationError {
 /// cutover, before generation-aware writes or compaction advance the target. It proves that the
 /// legacy pathname contains the expected sentinel, that the sentinel names the supplied canonical
 /// target and derived retained sibling, that the retained source is a clean append log, and that the
-/// untouched generation-1 authority is byte-for-byte identical to that retained rollback evidence.
+/// untouched compacted generation-1 authority reproduces the retained legacy live state exactly.
 pub fn verify_fresh_legacy_cutover(
     legacy_source: &Path,
     target_directory: &Path,
@@ -98,8 +97,10 @@ pub fn verify_fresh_legacy_cutover(
         ));
     }
 
-    let retained = LogEngine::verify(&retained_path)?;
-    if retained.recoverable_tail.is_some() || retained.file_bytes != retained.valid_bytes {
+    let retained = LogEngine::inspect(&retained_path, true)?;
+    if retained.verification.recoverable_tail.is_some()
+        || retained.verification.file_bytes != retained.verification.valid_bytes
+    {
         return invalid("retained legacy source is not a complete clean append-log image");
     }
 
@@ -125,15 +126,15 @@ pub fn verify_fresh_legacy_cutover(
         );
     }
 
-    let authoritative_log = verified.authoritative_log_path();
-    if !files_equal(&retained_path, &authoritative_log)? {
+    let authoritative = LogEngine::inspect(verified.authoritative_log_path(), true)?;
+    if authoritative.verification != summary.log_verification {
         return invalid(
-            "retained legacy source and untouched generation-1 authority are not byte-for-byte identical",
+            "authoritative generation changed while fresh cutover verification was in progress",
         );
     }
-    if retained != summary.log_verification {
+    if authoritative.entries != retained.entries {
         return invalid(
-            "retained legacy verification differs from generation-1 verification despite byte comparison",
+            "untouched generation-1 authority does not reproduce the retained legacy live state",
         );
     }
 
@@ -143,7 +144,7 @@ pub fn verify_fresh_legacy_cutover(
         retained_legacy_path: retained_display,
         target_directory: target_display,
         target_generation: IMPORT_GENERATION,
-        retained_verification: retained,
+        retained_verification: retained.verification,
         final_generation: summary.clone(),
     })
 }
@@ -198,33 +199,6 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, LegacyCutoverVerif
         ));
     }
     Ok(bytes)
-}
-
-fn files_equal(left: &Path, right: &Path) -> Result<bool, LegacyCutoverVerificationError> {
-    let left_meta = fs::metadata(left).map_err(|source| io_error(left, source))?;
-    let right_meta = fs::metadata(right).map_err(|source| io_error(right, source))?;
-    if left_meta.len() != right_meta.len() {
-        return Ok(false);
-    }
-
-    let mut left_file = File::open(left).map_err(|source| io_error(left, source))?;
-    let mut right_file = File::open(right).map_err(|source| io_error(right, source))?;
-    let mut left_buffer = [0_u8; COMPARE_BUFFER_BYTES];
-    let mut right_buffer = [0_u8; COMPARE_BUFFER_BYTES];
-    loop {
-        let left_read = left_file
-            .read(&mut left_buffer)
-            .map_err(|source| io_error(left, source))?;
-        let right_read = right_file
-            .read(&mut right_buffer)
-            .map_err(|source| io_error(right, source))?;
-        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
-            return Ok(false);
-        }
-        if left_read == 0 {
-            return Ok(true);
-        }
-    }
 }
 
 fn io_error(path: &Path, source: io::Error) -> LegacyCutoverVerificationError {
