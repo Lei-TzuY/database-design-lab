@@ -10,7 +10,7 @@ use thiserror::Error;
 
 #[cfg(any(unix, windows))]
 use crate::generation_directory::{canonical_reservation_name, verify_generation_directory};
-use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
+use crate::generation_directory::GenerationDirectoryError;
 #[cfg(any(unix, windows))]
 use crate::generation_lock::acquire_generation_writer_lease;
 use crate::generation_lock::GenerationWriterLockError;
