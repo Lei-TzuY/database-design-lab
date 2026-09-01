@@ -4,6 +4,7 @@ pub mod generation_cleanup_windows;
 pub mod generation_compaction;
 pub mod generation_compaction_windows;
 pub mod generation_cutover;
+pub mod generation_cutover_windows;
 pub mod generation_directory;
 pub mod generation_engine;
 pub mod generation_lock;
