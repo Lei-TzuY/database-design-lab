@@ -11,20 +11,20 @@ use std::io::Read;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(windows)]
 use crate::generation_directory::{
     canonical_generation_name, canonical_reservation_name, canonical_staging_marker_name,
     scan_generation_namespace, verify_generation_directory,
 };
-use crate::generation_lock::GenerationWriterLockError;
+use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(windows)]
 use crate::generation_lock::acquire_generation_writer_lease;
+use crate::generation_lock::GenerationWriterLockError;
 #[cfg(windows)]
 use crate::generation_marker::Crc32Ieee;
-use crate::generation_orphan::{GenerationFileFingerprint, GenerationOrphanError};
 #[cfg(windows)]
 use crate::generation_orphan::inspect_generation_orphan;
+use crate::generation_orphan::{GenerationFileFingerprint, GenerationOrphanError};
 #[cfg(windows)]
 use crate::windows_durable::move_no_replace_write_through;
 
@@ -137,7 +137,9 @@ fn retire_windows(
         expected_staging_fingerprint,
     )?;
 
-    let orphan_path = lease.directory().join(canonical_generation_name(generation));
+    let orphan_path = lease
+        .directory()
+        .join(canonical_generation_name(generation));
     let staging_path = lease
         .directory()
         .join(canonical_staging_marker_name(generation));
@@ -178,7 +180,9 @@ fn retire_windows(
     let final_verified = require_authority(lease.directory(), expected_authority)?;
     let final_namespace = scan_generation_namespace(lease.directory())?;
     if final_namespace.generation_files.contains_key(&generation)
-        || final_namespace.staging_marker_files.contains_key(&generation)
+        || final_namespace
+            .staging_marker_files
+            .contains_key(&generation)
     {
         return invalid(format!(
             "retired generation {generation} still appears in the authoritative namespace"
@@ -229,8 +233,10 @@ fn require_expected_inspection(
 fn require_authority(
     directory: &Path,
     expected: u64,
-) -> Result<crate::generation_directory::VerifiedGenerationDirectory, WindowsGenerationOrphanRetirementError>
-{
+) -> Result<
+    crate::generation_directory::VerifiedGenerationDirectory,
+    WindowsGenerationOrphanRetirementError,
+> {
     let verified = verify_generation_directory(directory)?;
     let found = verified.summary().authoritative_generation;
     if found != expected {
@@ -276,22 +282,21 @@ fn move_checked(
             if source_exists && !target_exists {
                 Err(io_error(source_path, source))
             } else {
-                Err(WindowsGenerationOrphanRetirementError::RetirementUncertain {
-                    phase,
-                    source_path: source_path.to_path_buf(),
-                    target_path: target_path.to_path_buf(),
-                    source,
-                })
+                Err(
+                    WindowsGenerationOrphanRetirementError::RetirementUncertain {
+                        phase,
+                        source_path: source_path.to_path_buf(),
+                        target_path: target_path.to_path_buf(),
+                        source,
+                    },
+                )
             }
         }
     }
 }
 
 #[cfg(windows)]
-fn require_absent(
-    path: &Path,
-    label: &str,
-) -> Result<(), WindowsGenerationOrphanRetirementError> {
+fn require_absent(path: &Path, label: &str) -> Result<(), WindowsGenerationOrphanRetirementError> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(_) => invalid(format!("{label} already exists: {}", path.display())),
@@ -306,7 +311,9 @@ fn require_absent_source(
 ) -> Result<(), WindowsGenerationOrphanRetirementError> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => invalid(format!("{label} still exists after write-through retirement")),
+        Ok(_) => invalid(format!(
+            "{label} still exists after write-through retirement"
+        )),
         Err(source) => Err(io_error(path, source)),
     }
 }
@@ -370,9 +377,7 @@ fn io_error(path: &Path, source: io::Error) -> WindowsGenerationOrphanRetirement
 }
 
 #[cfg(windows)]
-fn invalid<T>(
-    message: impl Into<String>,
-) -> Result<T, WindowsGenerationOrphanRetirementError> {
+fn invalid<T>(message: impl Into<String>) -> Result<T, WindowsGenerationOrphanRetirementError> {
     Err(WindowsGenerationOrphanRetirementError::Invalid(
         message.into(),
     ))
