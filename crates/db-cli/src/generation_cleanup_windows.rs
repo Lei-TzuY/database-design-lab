@@ -9,19 +9,18 @@ use std::fs;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(windows)]
 use crate::generation_directory::{
     require_real_regular_file, scan_generation_namespace, verify_generation_directory,
 };
-use crate::generation_lock::GenerationWriterLockError;
+use crate::generation_directory::{GenerationDirectoryError, GenerationVerificationSummary};
 #[cfg(windows)]
 use crate::generation_lock::acquire_generation_writer_lease;
+use crate::generation_lock::GenerationWriterLockError;
 #[cfg(windows)]
 use crate::windows_durable::move_no_replace_write_through;
 
-pub const GENERATION_CLEANUP_WINDOWS_PROTOCOL: &str =
-    "append_log_generation_cleanup_windows_v1";
+pub const GENERATION_CLEANUP_WINDOWS_PROTOCOL: &str = "append_log_generation_cleanup_windows_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WindowsGenerationCleanupSummary {
