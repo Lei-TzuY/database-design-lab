@@ -8,7 +8,9 @@ It implements the common `KvEngine` contract and reports the same append-log log
 
 `GenerationLogEngine::open(directory)` acquires the cooperative generation-writer lease before running the shared `append_log_generation_directory_v3` verifier and mutable open. Only the highest final committed marker may select authority; reservation evidence affects generation-id allocation only. Missing/corrupt highest committed generations fail closed and the wrapper never falls back to an older committed generation.
 
-Only after the retained marker and committed-prefix proof succeed does the wrapper open the selected append-log file mutably. This preserves the existing rule for a canonical incomplete final append: `LogEngine::open` may repair it only after the generation verifier has proven that the marker-bound compact base prefix is intact and the tail begins after that prefix. The directory is verified again after mutable open/repair and authority must still name the same generation.
+Only after the retained marker and committed-prefix proof succeed does the wrapper open the selected append-log file mutably through `LogEngine::open_managed_generation`. This preserves the existing rule for a canonical incomplete final append: managed mutable open may repair it only after the generation verifier has proven that the marker-bound compact base prefix is intact and the tail begins after that prefix. The directory is verified again after mutable open/repair and authority must still name the same generation.
+
+Ordinary `LogEngine::open` and `LogEngine::create_new` now represent **standalone** ownership. They reject strict canonical `generation-{id:020}.log` paths before filesystem mutation. The explicit managed constructors require that canonical filename shape and preserve managed intent across `KvEngine::reopen`; read-only `LogEngine::verify` and `LogEngine::inspect` remain available for generation evidence.
 
 ## Per-operation routing and exclusion
 
@@ -43,7 +45,9 @@ This closes the previous cooperative scan-to-append / final-check-to-publication
 
 ## Boundary
 
-This is **cooperative** cross-process exclusion, not protection against arbitrary raw-file mutation. A process that directly opens `generation-%020d.log` with `LogEngine` bypasses the generation-directory lease and remains outside the contract. Such raw-path writers must still be quiesced during a compact switch.
+This is **cooperative** cross-process exclusion, not an OS sandbox. The ordinary standalone `LogEngine` constructors and repository CLI mutation paths fail closed on canonical generation filenames, so accidental raw-path mutation no longer bypasses the contract.
+
+The explicit `LogEngine::open_managed_generation` / `create_new_managed_generation` APIs remain available for the generation subsystem, fault-injection fixtures, and other callers that deliberately assert managed ownership. Those constructors validate the canonical filename but cannot themselves prove that the caller holds the generation writer lease or selected the current authority. A caller that invokes them without those checks—or mutates the file through unrelated filesystem APIs—still intentionally ignores the cooperative protocol.
 
 The standalone `db-lab-log-generation-publish` CLI acquires the same lease before invoking the lower-level marker publication primitive. The lower-level shared publisher remains a caller-serialized primitive so the compact switch can call it while already holding the lease without self-deadlock.
 
@@ -53,7 +57,7 @@ The project still does not claim Windows final-marker/reservation durability, au
 
 ## Tests
 
-Cross-platform integration proves routed CRUD/reopen behavior, no rollback after higher authority, malformed-higher-marker poisoning, and recovery after marker restoration. Writer-exclusion coverage additionally proves:
+Cross-platform integration proves routed CRUD/reopen behavior, no rollback after higher authority, malformed-higher-marker poisoning, and recovery after marker restoration. Storage-level ownership tests additionally prove standalone constructors reject canonical generation paths without creating/repairing them, managed intent survives reopen, read-only diagnostics remain allowed, and managed constructors do not accept arbitrary noncanonical raw paths. Writer-exclusion coverage additionally proves:
 
 - an externally held lease blocks a routed mutation before any bytes are appended;
 - stale lock evidence is not rewritten or automatically stolen;
