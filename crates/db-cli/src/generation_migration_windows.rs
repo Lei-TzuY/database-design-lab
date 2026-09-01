@@ -37,9 +37,8 @@ mod windows {
     use crate::generation_compaction_windows::publish_compacted_generation_marker_windows;
     use crate::generation_directory::{
         canonical_generation_name, canonical_reservation_name, verify_generation_directory,
-        GenerationDirectoryError,
     };
-    use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
+    use crate::generation_lock::acquire_generation_writer_lease;
     use crate::generation_reservation::{
         publish_generation_reservation_windows, GenerationReservationError,
     };
@@ -64,11 +63,9 @@ mod windows {
         publish_fresh_target_directory(&target_parent, &target_directory)?;
 
         let lease = acquire_generation_writer_lease(&target_directory)?;
-        let reservation = publish_generation_reservation_windows(
-            lease.directory(),
-            IMPORT_GENERATION,
-        )
-        .map_err(map_reservation_error)?;
+        let reservation =
+            publish_generation_reservation_windows(lease.directory(), IMPORT_GENERATION)
+                .map_err(map_reservation_error)?;
 
         let generation_log = canonical_generation_name(IMPORT_GENERATION);
         let generation_path = lease.directory().join(&generation_log);
@@ -349,7 +346,4 @@ mod windows {
     fn invalid<T>(message: impl Into<String>) -> Result<T, LegacyGenerationMigrationError> {
         Err(LegacyGenerationMigrationError::Invalid(message.into()))
     }
-
-    #[allow(dead_code)]
-    fn _type_assertions(_: GenerationDirectoryError, _: GenerationWriterLockError) {}
 }
