@@ -56,7 +56,10 @@ fn windows_cleanup_retires_only_obsolete_history_and_preserves_future_evidence()
         "append_log_generation_cleanup_windows_v1"
     );
     assert_eq!(summary["authoritative_generation"], 3);
-    assert_eq!(summary["retired_marker_generation_ids"], serde_json::json!([1, 2]));
+    assert_eq!(
+        summary["retired_marker_generation_ids"],
+        serde_json::json!([1, 2])
+    );
     assert_eq!(summary["retired_generation_ids"], serde_json::json!([1, 2]));
     assert_eq!(
         summary["retired_staging_marker_generation_ids"],
@@ -77,23 +80,19 @@ fn windows_cleanup_retires_only_obsolete_history_and_preserves_future_evidence()
     assert!(!marker_path(&directory, 2).exists());
     assert!(!obsolete_staging.exists());
     assert_eq!(
-        fs::read(quarantine_path(&directory, 1, "generation", "log"))
-            .expect("read retired gen1"),
+        fs::read(quarantine_path(&directory, 1, "generation", "log")).expect("read retired gen1"),
         old1_log
     );
     assert_eq!(
-        fs::read(quarantine_path(&directory, 1, "commit", "marker"))
-            .expect("read retired marker1"),
+        fs::read(quarantine_path(&directory, 1, "commit", "marker")).expect("read retired marker1"),
         old1_marker
     );
     assert_eq!(
-        fs::read(quarantine_path(&directory, 2, "generation", "log"))
-            .expect("read retired gen2"),
+        fs::read(quarantine_path(&directory, 2, "generation", "log")).expect("read retired gen2"),
         old2_log
     );
     assert_eq!(
-        fs::read(quarantine_path(&directory, 2, "commit", "marker"))
-            .expect("read retired marker2"),
+        fs::read(quarantine_path(&directory, 2, "commit", "marker")).expect("read retired marker2"),
         old2_marker
     );
     assert_eq!(
@@ -200,13 +199,11 @@ fn quarantine_path(directory: &Path, id: u64, kind: &str, extension: &str) -> Pa
 }
 
 fn run_cleanup(directory: &Path) -> Output {
-    Command::new(env!(
-        "CARGO_BIN_EXE_db-lab-log-generation-cleanup-windows"
-    ))
-    .arg("--directory")
-    .arg(directory)
-    .output()
-    .expect("run Windows generation cleanup")
+    Command::new(env!("CARGO_BIN_EXE_db-lab-log-generation-cleanup-windows"))
+        .arg("--directory")
+        .arg(directory)
+        .output()
+        .expect("run Windows generation cleanup")
 }
 
 #[cfg(windows)]
