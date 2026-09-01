@@ -35,9 +35,14 @@ mod windows {
 
     use super::*;
     use crate::generation_compaction_windows::publish_compacted_generation_marker_windows;
-    use crate::generation_directory::{canonical_generation_name, verify_generation_directory};
-    use crate::generation_lock::acquire_generation_writer_lease;
-    use crate::generation_reservation::publish_generation_reservation_windows;
+    use crate::generation_directory::{
+        canonical_generation_name, canonical_reservation_name, verify_generation_directory,
+        GenerationDirectoryError,
+    };
+    use crate::generation_lock::{acquire_generation_writer_lease, GenerationWriterLockError};
+    use crate::generation_reservation::{
+        publish_generation_reservation_windows, GenerationReservationError,
+    };
     use crate::log_compaction::compact_log_to_fresh_file;
     use crate::windows_durable::move_no_replace_write_through;
 
@@ -62,7 +67,8 @@ mod windows {
         let reservation = publish_generation_reservation_windows(
             lease.directory(),
             IMPORT_GENERATION,
-        )?;
+        )
+        .map_err(map_reservation_error)?;
 
         let generation_log = canonical_generation_name(IMPORT_GENERATION);
         let generation_path = lease.directory().join(&generation_log);
@@ -96,12 +102,8 @@ mod windows {
                 "Windows migration did not retain exactly the generation-1 durable reservation",
             );
         }
-        if reservation != final_verified.summary().reservation_generation_ids
-            .first()
-            .map(|id| format!("reserve-{id:020}.frontier"))
-            .unwrap_or_default()
-        {
-            return invalid("Windows migration reservation name disagrees with retained frontier");
+        if reservation != canonical_reservation_name(IMPORT_GENERATION) {
+            return invalid("Windows migration reservation name disagrees with canonical frontier");
         }
 
         let final_state = LogEngine::inspect(&generation_path, true)?;
@@ -311,6 +313,32 @@ mod windows {
         Ok(())
     }
 
+    fn map_reservation_error(error: GenerationReservationError) -> LegacyGenerationMigrationError {
+        match error {
+            GenerationReservationError::UnsupportedPlatform => {
+                LegacyGenerationMigrationError::UnsupportedPlatform
+            }
+            GenerationReservationError::Lock(error) => LegacyGenerationMigrationError::Lock(error),
+            GenerationReservationError::Directory(error) => {
+                LegacyGenerationMigrationError::Directory(error)
+            }
+            GenerationReservationError::Io { path, source } => {
+                LegacyGenerationMigrationError::Io { path, source }
+            }
+            GenerationReservationError::DurabilityUncertain {
+                directory, source, ..
+            } => LegacyGenerationMigrationError::TargetDirectoryDurabilityUncertain {
+                target: directory,
+                source,
+            },
+            GenerationReservationError::NotRetained { generation } => {
+                LegacyGenerationMigrationError::Invalid(format!(
+                    "Windows migration reservation {generation} was not retained"
+                ))
+            }
+        }
+    }
+
     fn io_error(path: &Path, source: io::Error) -> LegacyGenerationMigrationError {
         LegacyGenerationMigrationError::Io {
             path: path.to_path_buf(),
@@ -321,4 +349,7 @@ mod windows {
     fn invalid<T>(message: impl Into<String>) -> Result<T, LegacyGenerationMigrationError> {
         Err(LegacyGenerationMigrationError::Invalid(message.into()))
     }
+
+    #[allow(dead_code)]
+    fn _type_assertions(_: GenerationDirectoryError, _: GenerationWriterLockError) {}
 }
