@@ -92,6 +92,10 @@ name = "db-lab-log-generation-cutover-verify"
 path = "src/bin/db-lab-log-generation-cutover-verify.rs"
 
 [[bin]]
+name = "db-lab-log-generation-run"
+path = "src/bin/db-lab-log-generation-run.rs"
+
+[[bin]]
 name = "db-lab-shrink"
 path = "src/bin/db-lab-shrink.rs"
 
