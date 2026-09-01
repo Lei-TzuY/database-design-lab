@@ -23,7 +23,8 @@ fn unix_offline_switch_compacts_full_authoritative_live_state_and_advances_autho
     fs::create_dir(&directory).expect("create generation directory");
     let source = generation_path(&directory, 1);
     {
-        let mut engine = LogEngine::create_new(&source).expect("create source generation");
+        let mut engine =
+            LogEngine::create_new_managed_generation(&source).expect("create source generation");
         engine.put(b"a", b"one").expect("put a one");
         engine.put(b"a", b"two").expect("overwrite a");
         engine.put(b"b", b"three").expect("put b");
@@ -33,7 +34,8 @@ fn unix_offline_switch_compacts_full_authoritative_live_state_and_advances_autho
     assert_success("publish generation 1", &run_publish(&directory, 1));
 
     {
-        let mut engine = LogEngine::open(&source).expect("open authoritative generation");
+        let mut engine =
+            LogEngine::open_managed_generation(&source).expect("open authoritative generation");
         engine
             .put(b"post-marker", b"durable")
             .expect("append after marker publication");
@@ -160,8 +162,8 @@ fn unsupported_platform_fails_before_touching_generation_directory() {
 
 #[cfg(unix)]
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         engine.put(key, value).expect("put generation entry");
     }
