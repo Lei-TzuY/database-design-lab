@@ -72,6 +72,10 @@ name = "db-lab-log-generation-orphan"
 path = "src/bin/db-lab-log-generation-orphan.rs"
 
 [[bin]]
+name = "db-lab-log-generation-orphan-retire-windows"
+path = "src/bin/db-lab-log-generation-orphan-retire-windows.rs"
+
+[[bin]]
 name = "db-lab-log-generation-migrate"
 path = "src/bin/db-lab-log-generation-migrate.rs"
 
