@@ -1,26 +1,37 @@
+#[cfg(windows)]
 use std::fs::{self, File, OpenOptions};
+#[cfg(windows)]
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+#[cfg(windows)]
 use db_storage_log::{InspectionReport, LogEngine, VerificationReport};
 
 use crate::generation_compaction::{
     OfflineGenerationCompactSwitchError, OfflineGenerationCompactSwitchSummary,
 };
+#[cfg(windows)]
 use crate::generation_directory::{
     canonical_generation_name, canonical_marker_name, canonical_real_directory,
     canonical_staging_marker_name, require_real_regular_file, scan_generation_namespace,
     verify_generation_directory, GenerationDirectoryError, GenerationVerificationSummary,
 };
+#[cfg(windows)]
 use crate::generation_lock::acquire_generation_writer_lease;
+#[cfg(windows)]
 use crate::generation_marker::{
     decode_commit_marker, encode_commit_marker, CommitMarker, CommittedPrefix, Crc32Ieee,
     COMMIT_MARKER_LEN, COMMIT_MARKER_VERSION,
 };
+#[cfg(windows)]
 use crate::generation_prefix::verify_committed_prefix;
+#[cfg(windows)]
 use crate::generation_publication::{GenerationPublicationError, GenerationPublicationSummary};
+#[cfg(windows)]
 use crate::generation_reservation::reserve_next_generation;
+#[cfg(windows)]
 use crate::log_compaction::compact_log_to_fresh_file;
+#[cfg(windows)]
 use crate::windows_durable::move_no_replace_write_through;
 
 pub const OFFLINE_GENERATION_COMPACT_SWITCH_WINDOWS_PROTOCOL: &str =
@@ -28,6 +39,7 @@ pub const OFFLINE_GENERATION_COMPACT_SWITCH_WINDOWS_PROTOCOL: &str =
 pub const GENERATION_MARKER_PUBLICATION_WINDOWS_PROTOCOL: &str =
     "append_log_generation_marker_publication_windows_v1";
 
+#[cfg(windows)]
 const CRC_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Windows authoritative compact switch.
