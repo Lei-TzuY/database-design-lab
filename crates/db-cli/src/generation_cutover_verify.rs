@@ -14,8 +14,7 @@ use crate::generation_directory::{
     GenerationVerificationSummary,
 };
 
-pub const LEGACY_CUTOVER_VERIFICATION_PROTOCOL: &str =
-    "append_log_legacy_cutover_verification_v1";
+pub const LEGACY_CUTOVER_VERIFICATION_PROTOCOL: &str = "append_log_legacy_cutover_verification_v1";
 
 const IMPORT_GENERATION: u64 = 1;
 const RETAINED_SUFFIX: &str = ".retired-append-log-v1";
@@ -171,10 +170,7 @@ fn require_real_regular_file(
     Ok(())
 }
 
-fn sibling_path(
-    source: &Path,
-    suffix: &str,
-) -> Result<PathBuf, LegacyCutoverVerificationError> {
+fn sibling_path(source: &Path, suffix: &str) -> Result<PathBuf, LegacyCutoverVerificationError> {
     let name = source.file_name().ok_or_else(|| {
         LegacyCutoverVerificationError::Invalid(format!(
             "legacy cutover sentinel has no final path component: {}",
@@ -186,10 +182,7 @@ fn sibling_path(
     Ok(source.with_file_name(sibling))
 }
 
-fn read_bounded(
-    path: &Path,
-    limit: usize,
-) -> Result<Vec<u8>, LegacyCutoverVerificationError> {
+fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, LegacyCutoverVerificationError> {
     let metadata = fs::metadata(path).map_err(|source| io_error(path, source))?;
     if metadata.len() > limit as u64 {
         return invalid(format!(
@@ -207,10 +200,7 @@ fn read_bounded(
     Ok(bytes)
 }
 
-fn files_equal(
-    left: &Path,
-    right: &Path,
-) -> Result<bool, LegacyCutoverVerificationError> {
+fn files_equal(left: &Path, right: &Path) -> Result<bool, LegacyCutoverVerificationError> {
     let left_meta = fs::metadata(left).map_err(|source| io_error(left, source))?;
     let right_meta = fs::metadata(right).map_err(|source| io_error(right, source))?;
     if left_meta.len() != right_meta.len() {
