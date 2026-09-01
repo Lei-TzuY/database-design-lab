@@ -71,7 +71,8 @@ fn generation_runner_executes_workload_only_through_authoritative_generation() {
         record_count_before + 2,
         "only PUT and DELETE should append mutation records"
     );
-    let state = LogEngine::inspect(after.authoritative_log_path(), true).expect("inspect authority");
+    let state =
+        LogEngine::inspect(after.authoritative_log_path(), true).expect("inspect authority");
     assert!(state
         .entries
         .iter()
