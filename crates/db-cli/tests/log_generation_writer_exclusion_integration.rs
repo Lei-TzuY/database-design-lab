@@ -150,7 +150,8 @@ fn compact_switch_cannot_reserve_through_held_lease_and_starts_cleanly_after_rel
 }
 
 fn create_generation(directory: &Path, id: u64, entries: &[(&[u8], &[u8])]) {
-    let mut log = LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut log = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     for (key, value) in entries {
         log.put(key, value).expect("put generation entry");
     }
