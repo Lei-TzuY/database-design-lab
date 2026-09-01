@@ -78,6 +78,46 @@ fn compact_binary_publishes_only_complete_live_state_without_touching_source() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_compact_binary_publishes_unicode_output_through_write_through_move() {
+    let directory = tempdir().expect("temporary directory");
+    let source = directory.path().join("來源-歷史.db");
+    let output = directory.path().join("壓縮-正式.db");
+    {
+        let mut engine = LogEngine::create_new(&source).expect("create unicode source log");
+        engine.put(b"alpha", b"one").expect("put old alpha");
+        engine.put(b"alpha", b"two").expect("overwrite alpha");
+        engine.put(b"beta", b"three").expect("put beta");
+        engine.delete(b"beta").expect("delete beta");
+    }
+
+    let source_before = fs::read(&source).expect("read unicode source before compaction");
+    let output_result = run_compact(&source, &output);
+    assert_success("compact unicode Windows paths", &output_result);
+    assert_eq!(
+        fs::read(&source).expect("read unicode source after compaction"),
+        source_before,
+        "Windows durable compact publication must leave source bytes untouched"
+    );
+    assert!(output.is_file());
+    assert!(
+        !directory.path().join(".壓縮-正式.db.compacting").exists(),
+        "write-through move consumes the Windows staging name"
+    );
+    let inspection = LogEngine::inspect(&output, true).expect("inspect unicode compact output");
+    assert_eq!(inspection.verification.record_count, 1);
+    assert_eq!(inspection.verification.live_keys, 1);
+    assert_eq!(inspection.entries[0].key.as_slice(), b"alpha");
+    assert_eq!(
+        inspection.entries[0]
+            .value
+            .as_ref()
+            .map(|value| value.as_slice()),
+        Some(b"two".as_slice())
+    );
+}
+
 #[test]
 fn compact_binary_rejects_recoverable_tail_without_repairing_source() {
     let directory = tempdir().expect("temporary directory");

@@ -1,16 +1,10 @@
 # Append-log compact-copy publication
 
-`db-lab-log-compact` implements the first compaction primitive for the append-log engine without changing append-log on-disk format v1 and without replacing the authoritative source file.
+`db-lab-log-compact` builds a non-destructive compact copy of an append-log v1 file without changing the source bytes or the append-log file format.
 
-The protocol identifier reported by the command is `append_log_compact_copy_v1`.
+The protocol identifier reported by the command remains `append_log_compact_copy_v1`.
 
-This is deliberately a **non-destructive compact copy**, not an in-place generation switch. The Phase 1 roadmap compaction item therefore remains incomplete until the engine has a crash-safe way to select a compacted generation as its authoritative path.
-
-## Why the first primitive is non-destructive
-
-The current append-log engine is one authoritative v1 file. Replacing that file through a portable `rename(temp, live)` sequence is not a sufficient crash protocol: overwrite semantics differ across platforms, a partially published target must never be mistaken for a valid recovered log, and a durable generation switch needs its own explicit contract.
-
-Instead, the first primitive leaves the source untouched and publishes a **new path** only after a complete compact image has been produced and verified.
+This primitive is also reused by the generation-directory compact-switch implementation. It is intentionally separate from authority selection: producing a complete compact file does not by itself make that file authoritative.
 
 ## Command
 
@@ -20,7 +14,7 @@ db-lab-log-compact \
   --output data/history.compacted.db
 ```
 
-Both paths are file paths. The source must already be a clean, fully verifiable append-log v1 file. The output and the deterministic sibling staging path must not exist.
+Both paths are file paths. The source must already be a clean, fully verifiable append-log v1 file. The output and deterministic sibling staging path must not exist.
 
 For an output named `history.compacted.db`, the staging name is:
 
@@ -42,9 +36,9 @@ The compacted file is still an ordinary append-log v1 file:
 
 Sequence numbers are local to the new compacted file. The compact copy preserves current logical state, not historical mutation identity.
 
-## Fail-closed publication sequence
+## Fail-closed construction
 
-The command performs these steps:
+The command performs these common steps before platform-specific publication:
 
 1. require the source to be a real regular file rather than a symlink;
 2. require the output and deterministic staging paths not to exist;
@@ -54,24 +48,45 @@ The command performs these steps:
 6. create the staging file exclusively with `LogEngine::create_new`;
 7. append one live-state put per inspected entry through the normal durable engine API;
 8. inspect the staging file and require its complete live entries to equal the source live entries exactly, with no recoverable tail and exactly one record per live key;
-9. inspect the source again and require it to be unchanged at the semantic/verification level during construction;
-10. publish the complete staging inode to the fresh output path with `hard_link`, which fails rather than overwriting an existing target;
-11. inspect the published output and require it to equal the verified staging image;
-12. remove the staging name when possible and report whether an additional hard-link name had to be retained.
+9. inspect the source again and require it to be unchanged at the semantic/verification level during construction.
 
-The source is never opened through mutable `LogEngine::open`, so the compaction command does not perform append-tail repair as a side effect.
+The source is never opened through mutable `LogEngine::open`, so compact-copy construction does not perform append-tail repair as a side effect.
+
+## Publication by platform
+
+### Unix and other non-Windows targets
+
+The original publication contract remains unchanged: create the fresh output name with `hard_link(staging, output)`, verify the published image, then remove the extra staging name best-effort.
+
+This is a no-overwrite publication primitive, not by itself a claim that the output directory entry is durably persisted. The Unix generation-marker publisher supplies the later generation-file and parent-directory durability barriers before commit authority can be published.
+
+### Windows
+
+Windows uses the repository's audited `move_no_replace_write_through` primitive instead of hard-link publication:
+
+1. reopen the complete verified staging file and call `sync_all()`;
+2. close that handle;
+3. move the sibling staging name to the fresh output name using `MoveFileExW` with **only** `MOVEFILE_WRITE_THROUGH`;
+4. do not permit replacement and do not permit cross-volume copy/delete fallback;
+5. re-open and inspect the canonical output and require it to equal the previously verified staging image.
+
+Because staging and output are siblings, the move is same-volume by construction. Successful Windows publication consumes the staging name rather than leaving a second hard-link name.
+
+If the Win32 move returns an error and the canonical output is already visible, the operation returns `PublicationUncertain` and preserves the visible output as non-authoritative evidence. It does not guess whether the namespace transition was durably completed and does not delete that evidence. If the output is absent, the staging file is cleaned best-effort and the operation fails normally.
+
+Hosted Windows CI executes this API/order contract, including Unicode paths and no-overwrite behavior. It is not physical power-loss testing.
 
 ## Crash and failure properties
 
-The source remains authoritative throughout this protocol.
+The source remains authoritative throughout standalone compact-copy publication.
 
-Before publication, a crash can leave only the hidden staging file. The requested output path does not exist, so callers cannot confuse a partially constructed compact image with a successfully published target.
+Before publication, interruption can leave only the hidden staging file. The requested output path does not exist, so a partially constructed compact image cannot be confused with successful output.
 
-After `hard_link` succeeds, the output name refers to the same already-built file object as the verified staging name. A crash before staging cleanup can therefore leave two names for one complete compact file, not a partial output. The source remains intact in either case.
+After successful publication, the canonical output is a complete image that was already verified before its name became visible and is verified again afterward. Unix may temporarily retain both output and staging hard-link names; Windows write-through move leaves only the output name.
 
-If the filesystem does not support hard links for the requested sibling path, publication fails closed and the output is not created. General pre-publication failures perform best-effort staging cleanup. A pre-existing orphan staging path is never silently deleted because it may be evidence from an interrupted earlier attempt.
+A pre-existing output or staging path is never overwritten or silently reclaimed.
 
-The engine is already documented as single-process/single-writer. This compact-copy primitive detects source changes across its verification/replay boundary, but it is not a multi-process lock protocol.
+The compact-copy primitive detects source changes across its verification/replay boundary, but it is not itself the generation writer-exclusion protocol. Generation-aware maintenance composes it with durable reservations, the shared writer lease, marker publication, and recovery verification.
 
 ## Report
 
@@ -83,14 +98,12 @@ Successful stdout is JSON containing:
 - live-key count;
 - compacted byte and record counts;
 - bytes reclaimed in the compact copy;
-- `staging_retained`, which is true only when output publication succeeded but unlinking the extra staging name failed.
+- `staging_retained`, which can be true on the hard-link publication path if unlinking the extra staging name fails.
 
 `reclaimed_bytes` is descriptive physical-byte reduction between the clean source file and compact copy. It is not a performance claim.
 
-## What remains before in-place compaction is complete
+## Relationship to generation compaction
 
-This primitive intentionally does **not** repoint an existing `LogEngine` path to the compact copy and does not delete the historical source. `docs/append-log-generation-switch.md` now freezes the executable recovery law for that later transition: the highest durably committed generation is authoritative, higher uncommitted files are ignored, and damage to the highest committed generation fails closed rather than silently rolling back to an older generation.
+Unix generation compaction now has a retained generation-directory recovery contract, marker-bound prefix proof, durable reservations, cooperative writer exclusion, reservation-before-build compact switching, routed mutation adoption, composed fault tests, obsolete-history cleanup, guarded orphan retirement, and legacy migration/cutover tooling.
 
-The remaining implementation must still assign concrete generation/marker bytes and names, bind each marker to the verified complete compacted base prefix, make marker publication durable across Linux/macOS/Windows, route future mutations to the selected generation, and adversarially test every filesystem interruption point against that recovery law.
-
-Until that protocol exists and is tested adversarially, the roadmap's general append-log compaction milestone remains open.
+Windows now has the audited no-overwrite `MOVEFILE_WRITE_THROUGH` namespace primitive, durable generation reservations, and write-through compact-output publication. These pieces deliberately do not yet make Windows compact-switch authoritative: durable final commit-marker publication and the remaining Windows retained-entry lifecycle operations must be implemented before the broad Phase 1 compaction milestone can be considered complete.
