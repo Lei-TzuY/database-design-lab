@@ -140,8 +140,8 @@ fn non_windows_companion_fails_before_filesystem_access() {
 
 #[cfg(windows)]
 fn create_generation(directory: &Path, id: u64, value: &[u8]) {
-    let mut engine =
-        LogEngine::create_new(generation_path(directory, id)).expect("create generation");
+    let mut engine = LogEngine::create_new_managed_generation(generation_path(directory, id))
+        .expect("create generation");
     engine.put(b"key", value).expect("put value");
 }
 
