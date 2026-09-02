@@ -293,13 +293,13 @@ impl LogEngine {
             offset: 0,
             reason: "record sequence number exhausted".to_owned(),
         })?;
-        let following_record_count = self
-            .record_count
-            .checked_add(1)
-            .ok_or_else(|| DbError::Corruption {
-                offset: 0,
-                reason: "record counter exhausted".to_owned(),
-            })?;
+        let following_record_count =
+            self.record_count
+                .checked_add(1)
+                .ok_or_else(|| DbError::Corruption {
+                    offset: 0,
+                    reason: "record counter exhausted".to_owned(),
+                })?;
         let record = encode_record(kind, sequence, key, value)?;
 
         let append_result = (|| -> io::Result<()> {
