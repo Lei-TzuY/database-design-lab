@@ -159,13 +159,13 @@ fn failed_managed_reopen_poisoning_is_fail_closed_until_explicit_recovery() {
 fn managed_reopen_requires_existing_backing_file_and_never_recreates_it() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("generation-00000000000000000088.log");
+    let original = directory.path().join("generation-00000000000000000088.original.log");
 
     let mut engine =
         LogEngine::create_new_managed_generation(&path).expect("create managed generation");
     engine.put(b"stable", b"value").expect("initial put");
-    let clean = std::fs::read(&path).expect("read clean generation");
 
-    std::fs::remove_file(&path).expect("remove backing generation");
+    std::fs::rename(&path, &original).expect("move backing generation away");
     let reopen_error = engine
         .reopen()
         .expect_err("missing managed generation must fail reopen");
@@ -183,7 +183,7 @@ fn managed_reopen_requires_existing_backing_file_and_never_recreates_it() {
         Err(DbError::Poisoned)
     ));
 
-    std::fs::write(&path, &clean).expect("restore original generation bytes");
+    std::fs::rename(&original, &path).expect("restore exact backing generation identity");
     engine
         .reopen()
         .expect("explicit reopen must recover after backing file restoration");
@@ -197,12 +197,12 @@ fn managed_reopen_requires_existing_backing_file_and_never_recreates_it() {
 fn standalone_reopen_requires_existing_backing_file_and_never_recreates_it() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("ordinary.log");
+    let original = directory.path().join("ordinary.original.log");
 
     let mut engine = LogEngine::create_new(&path).expect("create standalone log");
     engine.put(b"stable", b"value").expect("initial put");
-    let clean = std::fs::read(&path).expect("read clean standalone log");
 
-    std::fs::remove_file(&path).expect("remove standalone backing file");
+    std::fs::rename(&path, &original).expect("move standalone backing file away");
     let reopen_error = engine
         .reopen()
         .expect_err("missing standalone backing file must fail reopen");
@@ -221,7 +221,7 @@ fn standalone_reopen_requires_existing_backing_file_and_never_recreates_it() {
     ));
     assert!(matches!(engine.delete(b"stable"), Err(DbError::Poisoned)));
 
-    std::fs::write(&path, &clean).expect("restore original standalone bytes");
+    std::fs::rename(&original, &path).expect("restore exact standalone backing-file identity");
     assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
     engine
         .reopen()
