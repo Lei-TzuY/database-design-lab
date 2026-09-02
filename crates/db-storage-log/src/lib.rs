@@ -380,7 +380,6 @@ impl KvEngine for LogEngine {
         let candidate = match OpenOptions::new().read(true).write(true).open(&self.path) {
             Ok(file) => file,
             Err(error) => {
-                self.file.take();
                 self.poisoned = true;
                 return Err(DbError::Io(error));
             }
