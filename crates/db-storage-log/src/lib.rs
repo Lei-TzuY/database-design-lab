@@ -756,7 +756,7 @@ fn parse_record_header(
     expected_sequence: u64,
 ) -> Result<RecordMetadata> {
     if header[..4] != RECORD_MAGIC {
-        return Err(corruption(offset, "file magic mismatch"));
+        return Err(corruption(offset, "record magic mismatch"));
     }
     let expected_header_crc = read_u32(&header[24..28]);
     let actual_header_crc = crc32fast::hash(&header[..24]);
