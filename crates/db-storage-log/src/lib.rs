@@ -372,7 +372,6 @@ impl KvEngine for LogEngine {
             return Err(error);
         }
         if let Err(error) = reject_symbolic_link(&self.path) {
-            self.file.take();
             self.poisoned = true;
             return Err(error);
         }

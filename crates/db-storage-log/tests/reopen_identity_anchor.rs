@@ -68,10 +68,9 @@ fn missing_path_reopen_preserves_identity_anchor_against_later_replacement() {
     let first_error = engine
         .reopen()
         .expect_err("missing pathname must fail reopen");
-    assert!(matches!(
-        first_error,
-        DbError::Io(ref error) if error.kind() == std::io::ErrorKind::NotFound
-    ));
+    assert!(
+        matches!(first_error, DbError::Io(ref error) if error.kind() == std::io::ErrorKind::NotFound)
+    );
     assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
 
     {
@@ -86,6 +85,55 @@ fn missing_path_reopen_preserves_identity_anchor_against_later_replacement() {
     let second_error = engine
         .reopen()
         .expect_err("missing-path failure must retain original identity anchor");
+    assert!(
+        second_error
+            .to_string()
+            .contains("backing file identity changed"),
+        "unexpected second reopen error: {second_error}"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert_eq!(
+        std::fs::read(&path).expect("read replacement after rejected reopen"),
+        replacement_bytes,
+        "identity rejection must not mutate the replacement file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_reopen_preserves_identity_anchor_against_later_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("ordinary.log");
+    let original = directory.path().join("ordinary.original.log");
+    let replacement = directory.path().join("replacement.log");
+
+    let mut engine = LogEngine::create_new(&path).expect("create original log");
+    engine
+        .put(b"stable", b"original")
+        .expect("write original value");
+    std::fs::rename(&path, &original).expect("move original aside");
+    symlink(&original, &path).expect("publish temporary symlink");
+
+    engine
+        .reopen()
+        .expect_err("symlink pathname must fail reopen");
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+
+    std::fs::remove_file(&path).expect("remove temporary symlink");
+    {
+        let mut other = LogEngine::create_new(&replacement).expect("create replacement log");
+        other
+            .put(b"stable", b"replacement")
+            .expect("write replacement value");
+    }
+    let replacement_bytes = std::fs::read(&replacement).expect("read replacement bytes");
+    std::fs::rename(&replacement, &path).expect("publish replacement at original pathname");
+
+    let second_error = engine
+        .reopen()
+        .expect_err("symlink failure must retain original identity anchor");
     assert!(
         second_error
             .to_string()
