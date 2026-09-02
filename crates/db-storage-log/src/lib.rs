@@ -174,12 +174,6 @@ impl LogEngine {
         Self::from_file(path, path_ownership, file, created)
     }
 
-    fn open_existing_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
-        reject_symbolic_link(&path)?;
-        let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        Self::from_file(path, path_ownership, file, false)
-    }
-
     /// Creates a new standalone engine and fails atomically if the path already exists.
     ///
     /// Canonical `generation-{id:020}.log` paths are reserved for the generation ownership layer
