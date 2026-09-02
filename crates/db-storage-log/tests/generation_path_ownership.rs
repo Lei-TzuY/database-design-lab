@@ -147,6 +147,45 @@ fn managed_reopen_requires_existing_backing_file_and_never_recreates_it() {
 }
 
 #[test]
+fn standalone_reopen_requires_existing_backing_file_and_never_recreates_it() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("ordinary.log");
+
+    let mut engine = LogEngine::create_new(&path).expect("create standalone log");
+    engine.put(b"stable", b"value").expect("initial put");
+    let clean = std::fs::read(&path).expect("read clean standalone log");
+
+    std::fs::remove_file(&path).expect("remove standalone backing file");
+    let reopen_error = engine
+        .reopen()
+        .expect_err("missing standalone backing file must fail reopen");
+    match reopen_error {
+        DbError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        other => panic!("expected missing-file I/O error, got {other:?}"),
+    }
+    assert!(
+        !path.exists(),
+        "standalone reopen must never synthesize a fresh empty log after backing-file loss"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert!(matches!(
+        engine.put(b"blocked", b"write"),
+        Err(DbError::Poisoned)
+    ));
+    assert!(matches!(engine.delete(b"stable"), Err(DbError::Poisoned)));
+
+    std::fs::write(&path, &clean).expect("restore original standalone bytes");
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    engine
+        .reopen()
+        .expect("explicit reopen must recover after standalone backing file restoration");
+    assert_eq!(
+        engine.get(b"stable").expect("get restored standalone value"),
+        Some(b"value".to_vec())
+    );
+}
+
+#[test]
 fn managed_generation_constructor_is_not_a_general_raw_bypass() {
     let directory = tempdir().expect("temporary directory");
     let ordinary = directory.path().join("ordinary.log");
