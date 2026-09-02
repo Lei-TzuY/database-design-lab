@@ -368,18 +368,18 @@ impl KvEngine for LogEngine {
     fn reopen(&mut self) -> Result<()> {
         self.file.take();
         let reopened = match self.path_ownership {
-            PathOwnership::Standalone => reject_standalone_generation_path(&self.path).and_then(|()| {
-                Self::open_existing_with_ownership(
-                    self.path.clone(),
-                    PathOwnership::Standalone,
-                )
-            }),
-            PathOwnership::GenerationManaged => require_managed_generation_path(&self.path).and_then(|()| {
-                Self::open_existing_with_ownership(
-                    self.path.clone(),
-                    PathOwnership::GenerationManaged,
-                )
-            }),
+            PathOwnership::Standalone => {
+                reject_standalone_generation_path(&self.path).and_then(|()| {
+                    Self::open_existing_with_ownership(self.path.clone(), PathOwnership::Standalone)
+                })
+            }
+            PathOwnership::GenerationManaged => require_managed_generation_path(&self.path)
+                .and_then(|()| {
+                    Self::open_existing_with_ownership(
+                        self.path.clone(),
+                        PathOwnership::GenerationManaged,
+                    )
+                }),
         };
         match reopened {
             Ok(reopened) => {
