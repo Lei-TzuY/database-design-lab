@@ -1,4 +1,4 @@
-use db_core::KvEngine;
+use db_core::{DbError, KvEngine};
 use db_storage_log::{is_canonical_generation_path, LogEngine};
 use tempfile::tempdir;
 
@@ -59,6 +59,51 @@ fn managed_generation_constructor_preserves_intent_across_reopen() {
     assert_eq!(verification.record_count, 2);
     let inspection = LogEngine::inspect(&path, true).expect("read-only inspect remains allowed");
     assert_eq!(inspection.entries.len(), 2);
+}
+
+#[test]
+fn failed_managed_reopen_poisoning_is_fail_closed_until_explicit_recovery() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("generation-00000000000000000077.log");
+
+    let mut engine =
+        LogEngine::create_new_managed_generation(&path).expect("create managed generation");
+    engine.put(b"stable", b"value").expect("initial put");
+    let clean = std::fs::read(&path).expect("read clean generation");
+
+    let mut corrupted = clean.clone();
+    corrupted[0] ^= 0xff;
+    std::fs::write(&path, &corrupted).expect("publish corruption fixture");
+
+    let reopen_error = engine
+        .reopen()
+        .expect_err("corrupt managed generation must fail reopen");
+    assert!(matches!(reopen_error, DbError::Corruption { .. }));
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert!(matches!(
+        engine.put(b"blocked", b"write"),
+        Err(DbError::Poisoned)
+    ));
+    assert!(matches!(engine.delete(b"stable"), Err(DbError::Poisoned)));
+    assert_eq!(
+        std::fs::read(&path).expect("read after poisoned operations"),
+        corrupted,
+        "poisoned operations must not mutate the failed-reopen image"
+    );
+
+    std::fs::write(&path, &clean).expect("restore clean generation");
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+
+    engine.reopen().expect("explicit reopen must recover after repair");
+    assert_eq!(
+        engine.get(b"stable").expect("get after explicit recovery"),
+        Some(b"value".to_vec())
+    );
+    engine
+        .put(b"after", b"recovery")
+        .expect("write after explicit recovery");
+    let verification = LogEngine::verify(&path).expect("verify recovered generation");
+    assert_eq!(verification.record_count, 2);
 }
 
 #[test]
