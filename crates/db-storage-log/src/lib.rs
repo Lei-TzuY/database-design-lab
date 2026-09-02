@@ -11,6 +11,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use crc32fast::Hasher;
 use db_core::{
     validate_key, validate_key_value, ByteString, ConcurrencyMode, CrashRecovery, DbError,
@@ -169,12 +172,6 @@ impl LogEngine {
     fn open_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
         let (file, created) = open_or_create(&path)?;
         Self::from_file(path, path_ownership, file, created)
-    }
-
-    fn open_existing_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
-        reject_symbolic_link(&path)?;
-        let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        Self::from_file(path, path_ownership, file, false)
     }
 
     /// Creates a new standalone engine and fails atomically if the path already exists.
@@ -367,21 +364,50 @@ impl KvEngine for LogEngine {
     }
 
     fn reopen(&mut self) -> Result<()> {
-        self.file.take();
-        let reopened = match self.path_ownership {
-            PathOwnership::Standalone => {
-                reject_standalone_generation_path(&self.path).and_then(|()| {
-                    Self::open_existing_with_ownership(self.path.clone(), PathOwnership::Standalone)
-                })
-            }
-            PathOwnership::GenerationManaged => require_managed_generation_path(&self.path)
-                .and_then(|()| {
-                    Self::open_existing_with_ownership(
-                        self.path.clone(),
-                        PathOwnership::GenerationManaged,
-                    )
-                }),
+        let ownership_check = match self.path_ownership {
+            PathOwnership::Standalone => reject_standalone_generation_path(&self.path),
+            PathOwnership::GenerationManaged => require_managed_generation_path(&self.path),
         };
+        if let Err(error) = ownership_check {
+            self.file.take();
+            self.poisoned = true;
+            return Err(error);
+        }
+        if let Err(error) = reject_symbolic_link(&self.path) {
+            self.file.take();
+            self.poisoned = true;
+            return Err(error);
+        }
+
+        let candidate = match OpenOptions::new().read(true).write(true).open(&self.path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.file.take();
+                self.poisoned = true;
+                return Err(DbError::Io(error));
+            }
+        };
+
+        if let Some(current) = self.file.as_ref() {
+            match same_file_identity(current, &candidate) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.poisoned = true;
+                    return Err(DbError::InvalidInput(format!(
+                        "append-log backing file identity changed before reopen: {}",
+                        self.path.display()
+                    )));
+                }
+                Err(error) => {
+                    self.file.take();
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            }
+        }
+
+        self.file.take();
+        let reopened = Self::from_file(self.path.clone(), self.path_ownership, candidate, false);
         match reopened {
             Ok(reopened) => {
                 *self = reopened;
@@ -483,6 +509,18 @@ fn reject_symbolic_link(path: &Path) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DbError::Io(error)),
     }
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &File, right: &File) -> Result<bool> {
+    let left = left.metadata()?;
+    let right = right.metadata()?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &File, _right: &File) -> Result<bool> {
+    Ok(true)
 }
 
 fn open_or_create(path: &Path) -> Result<(File, bool)> {

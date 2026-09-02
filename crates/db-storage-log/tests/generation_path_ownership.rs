@@ -234,6 +234,56 @@ fn standalone_reopen_requires_existing_backing_file_and_never_recreates_it() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn reopen_rejects_valid_replacement_file_and_recovers_only_original_identity() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("ordinary.log");
+    let original = directory.path().join("ordinary.original.log");
+    let replacement = directory.path().join("replacement.log");
+
+    let mut engine = LogEngine::create_new(&path).expect("create original standalone log");
+    engine
+        .put(b"stable", b"original")
+        .expect("write original value");
+    {
+        let mut other = LogEngine::create_new(&replacement).expect("create valid replacement log");
+        other
+            .put(b"stable", b"replacement")
+            .expect("write replacement value");
+    }
+    let replacement_bytes = std::fs::read(&replacement).expect("read replacement bytes");
+
+    std::fs::rename(&path, &original).expect("move original pathname aside without closing engine");
+    std::fs::rename(&replacement, &path).expect("publish valid replacement at original pathname");
+
+    let reopen_error = engine
+        .reopen()
+        .expect_err("reopen must reject a different physical backing file");
+    assert!(
+        reopen_error
+            .to_string()
+            .contains("backing file identity changed"),
+        "unexpected reopen error: {reopen_error}"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert_eq!(
+        std::fs::read(&path).expect("read replacement after rejected reopen"),
+        replacement_bytes,
+        "identity rejection must not mutate the replacement file"
+    );
+
+    std::fs::rename(&path, &replacement).expect("move replacement aside");
+    std::fs::rename(&original, &path).expect("restore exact original backing file identity");
+    engine
+        .reopen()
+        .expect("explicit reopen must recover once the original file identity is restored");
+    assert_eq!(
+        engine.get(b"stable").expect("read restored original"),
+        Some(b"original".to_vec())
+    );
+}
+
 #[test]
 fn managed_generation_constructor_is_not_a_general_raw_bypass() {
     let directory = tempdir().expect("temporary directory");
