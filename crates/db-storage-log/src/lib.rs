@@ -171,6 +171,11 @@ impl LogEngine {
         Self::from_file(path, path_ownership, file, created)
     }
 
+    fn open_existing_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        Self::from_file(path, path_ownership, file, false)
+    }
+
     /// Creates a new standalone engine and fails atomically if the path already exists.
     ///
     /// Canonical `generation-{id:020}.log` paths are reserved for the generation ownership layer
@@ -363,8 +368,18 @@ impl KvEngine for LogEngine {
     fn reopen(&mut self) -> Result<()> {
         self.file.take();
         let reopened = match self.path_ownership {
-            PathOwnership::Standalone => Self::open(&self.path),
-            PathOwnership::GenerationManaged => Self::open_managed_generation(&self.path),
+            PathOwnership::Standalone => reject_standalone_generation_path(&self.path).and_then(|()| {
+                Self::open_existing_with_ownership(
+                    self.path.clone(),
+                    PathOwnership::Standalone,
+                )
+            }),
+            PathOwnership::GenerationManaged => require_managed_generation_path(&self.path).and_then(|()| {
+                Self::open_existing_with_ownership(
+                    self.path.clone(),
+                    PathOwnership::GenerationManaged,
+                )
+            }),
         };
         match reopened {
             Ok(reopened) => {
