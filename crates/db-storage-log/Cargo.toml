@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 crc32fast.workspace = true
 db-core = { path = "../db-core" }
+same-file = "1.0.6"
 serde.workspace = true
 
 [dev-dependencies]
