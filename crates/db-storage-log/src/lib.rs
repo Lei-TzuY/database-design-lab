@@ -172,6 +172,7 @@ impl LogEngine {
     }
 
     fn open_existing_with_ownership(path: PathBuf, path_ownership: PathOwnership) -> Result<Self> {
+        reject_symbolic_link(&path)?;
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
         Self::from_file(path, path_ownership, file, false)
     }
@@ -472,10 +473,23 @@ fn require_managed_generation_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn reject_symbolic_link(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DbError::InvalidInput(format!(
+            "append-log ownership path must not be a symbolic link: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DbError::Io(error)),
+    }
+}
+
 fn open_or_create(path: &Path) -> Result<(File, bool)> {
     match create_new_file(path) {
         Ok(file) => Ok((file, true)),
         Err(DbError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {
+            reject_symbolic_link(path)?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
             Ok((file, false))
         }
