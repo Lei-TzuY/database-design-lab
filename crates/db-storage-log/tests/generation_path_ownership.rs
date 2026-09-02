@@ -159,7 +159,9 @@ fn failed_managed_reopen_poisoning_is_fail_closed_until_explicit_recovery() {
 fn managed_reopen_requires_existing_backing_file_and_never_recreates_it() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("generation-00000000000000000088.log");
-    let original = directory.path().join("generation-00000000000000000088.original.log");
+    let original = directory
+        .path()
+        .join("generation-00000000000000000088.original.log");
 
     let mut engine =
         LogEngine::create_new_managed_generation(&path).expect("create managed generation");
