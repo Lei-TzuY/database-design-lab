@@ -154,15 +154,11 @@ fn managed_symlink_reopen_preserves_identity_anchor_against_later_replacement() 
     use std::os::unix::fs::symlink;
 
     let directory = tempdir().expect("temporary directory");
-    let path = directory
-        .path()
-        .join("generation-00000000000000000101.log");
+    let path = directory.path().join("generation-00000000000000000101.log");
     let original = directory
         .path()
         .join("generation-00000000000000000101.original.log");
-    let replacement = directory
-        .path()
-        .join("generation-00000000000000000102.log");
+    let replacement = directory.path().join("generation-00000000000000000102.log");
 
     let mut engine =
         LogEngine::create_new_managed_generation(&path).expect("create original managed log");
