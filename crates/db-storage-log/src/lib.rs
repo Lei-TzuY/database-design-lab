@@ -376,7 +376,7 @@ impl KvEngine for LogEngine {
             return Err(error);
         }
 
-        let candidate = match OpenOptions::new().read(true).write(true).open(&self.path) {
+        let mut candidate = match OpenOptions::new().read(true).write(true).open(&self.path) {
             Ok(file) => file,
             Err(error) => {
                 self.poisoned = true;
@@ -400,6 +400,24 @@ impl KvEngine for LogEngine {
                     return Err(error);
                 }
             }
+        }
+
+        let observed = match scan_file(&mut candidate) {
+            Ok(scan) => scan,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
+        if observed.record_count < self.record_count {
+            self.poisoned = true;
+            return Err(corruption(
+                0,
+                format!(
+                    "append-log record count regressed across reopen: observed {}, previously acknowledged {}",
+                    observed.record_count, self.record_count
+                ),
+            ));
         }
 
         let reopened = Self::from_file(self.path.clone(), self.path_ownership, candidate, false);
@@ -738,7 +756,7 @@ fn parse_record_header(
     expected_sequence: u64,
 ) -> Result<RecordMetadata> {
     if header[..4] != RECORD_MAGIC {
-        return Err(corruption(offset, "record magic mismatch"));
+        return Err(corruption(offset, "file magic mismatch"));
     }
     let expected_header_crc = read_u32(&header[24..28]);
     let actual_header_crc = crc32fast::hash(&header[..24]);
