@@ -35,6 +35,53 @@ fn standalone_constructors_reject_canonical_generation_paths_before_mutation() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ownership_constructors_reject_symlink_indirection_before_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().expect("temporary directory");
+    let generation = directory
+        .path()
+        .join("generation-00000000000000000009.log");
+    let ordinary = directory.path().join("ordinary.log");
+
+    {
+        let mut managed = LogEngine::create_new_managed_generation(&generation)
+            .expect("create managed generation target");
+        managed.put(b"generation", b"owned").expect("managed put");
+    }
+    let generation_before = std::fs::read(&generation).expect("read generation target");
+    symlink(&generation, &ordinary).expect("create standalone-to-generation symlink");
+
+    let standalone_error = LogEngine::open(&ordinary)
+        .expect_err("standalone open must not follow a symlink into generation-owned storage");
+    assert!(standalone_error.to_string().contains("symbolic link"));
+    assert_eq!(
+        std::fs::read(&generation).expect("read generation after rejected symlink open"),
+        generation_before,
+        "rejected standalone symlink open must not mutate generation-owned bytes"
+    );
+
+    std::fs::remove_file(&ordinary).expect("remove first symlink");
+    {
+        let mut standalone = LogEngine::create_new(&ordinary).expect("create standalone target");
+        standalone.put(b"standalone", b"owned").expect("standalone put");
+    }
+    let standalone_before = std::fs::read(&ordinary).expect("read standalone target");
+    std::fs::remove_file(&generation).expect("remove generation pathname");
+    symlink(&ordinary, &generation).expect("create generation-to-standalone symlink");
+
+    let managed_error = LogEngine::open_managed_generation(&generation)
+        .expect_err("managed open must not follow a symlink into standalone storage");
+    assert!(managed_error.to_string().contains("symbolic link"));
+    assert_eq!(
+        std::fs::read(&ordinary).expect("read standalone after rejected managed symlink open"),
+        standalone_before,
+        "rejected managed symlink open must not mutate standalone-owned bytes"
+    );
+}
+
 #[test]
 fn managed_generation_constructor_preserves_intent_across_reopen() {
     let directory = tempdir().expect("temporary directory");
