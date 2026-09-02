@@ -68,7 +68,10 @@ fn missing_path_reopen_preserves_identity_anchor_against_later_replacement() {
     let first_error = engine
         .reopen()
         .expect_err("missing pathname must fail reopen");
-    assert!(matches!(first_error, DbError::Io(ref error) if error.kind() == std::io::ErrorKind::NotFound));
+    assert!(matches!(
+        first_error,
+        DbError::Io(ref error) if error.kind() == std::io::ErrorKind::NotFound
+    ));
     assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
 
     {
