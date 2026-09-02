@@ -234,7 +234,6 @@ fn standalone_reopen_requires_existing_backing_file_and_never_recreates_it() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn reopen_rejects_valid_replacement_file_and_recovers_only_original_identity() {
     let directory = tempdir().expect("temporary directory");
