@@ -109,6 +109,44 @@ fn failed_managed_reopen_poisoning_is_fail_closed_until_explicit_recovery() {
 }
 
 #[test]
+fn managed_reopen_requires_existing_backing_file_and_never_recreates_it() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("generation-00000000000000000088.log");
+
+    let mut engine =
+        LogEngine::create_new_managed_generation(&path).expect("create managed generation");
+    engine.put(b"stable", b"value").expect("initial put");
+    let clean = std::fs::read(&path).expect("read clean generation");
+
+    std::fs::remove_file(&path).expect("remove backing generation");
+    let reopen_error = engine
+        .reopen()
+        .expect_err("missing managed generation must fail reopen");
+    match reopen_error {
+        DbError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        other => panic!("expected missing-file I/O error, got {other:?}"),
+    }
+    assert!(
+        !path.exists(),
+        "reopen must never synthesize a fresh empty generation after backing-file loss"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert!(matches!(
+        engine.put(b"blocked", b"write"),
+        Err(DbError::Poisoned)
+    ));
+
+    std::fs::write(&path, &clean).expect("restore original generation bytes");
+    engine
+        .reopen()
+        .expect("explicit reopen must recover after backing file restoration");
+    assert_eq!(
+        engine.get(b"stable").expect("get restored value"),
+        Some(b"value".to_vec())
+    );
+}
+
+#[test]
 fn managed_generation_constructor_is_not_a_general_raw_bypass() {
     let directory = tempdir().expect("temporary directory");
     let ordinary = directory.path().join("ordinary.log");
