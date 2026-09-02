@@ -94,7 +94,9 @@ fn failed_managed_reopen_poisoning_is_fail_closed_until_explicit_recovery() {
     std::fs::write(&path, &clean).expect("restore clean generation");
     assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
 
-    engine.reopen().expect("explicit reopen must recover after repair");
+    engine
+        .reopen()
+        .expect("explicit reopen must recover after repair");
     assert_eq!(
         engine.get(b"stable").expect("get after explicit recovery"),
         Some(b"value".to_vec())
