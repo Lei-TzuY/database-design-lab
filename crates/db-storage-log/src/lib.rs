@@ -11,15 +11,13 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-
 use crc32fast::Hasher;
 use db_core::{
     validate_key, validate_key_value, ByteString, ConcurrencyMode, CrashRecovery, DbError,
     DistributionMode, EngineCapabilities, KvEngine, LogicalModel, Persistence, Result,
     StorageArchitecture, MAX_KEY_BYTES, MAX_VALUE_BYTES,
 };
+use same_file::Handle;
 use serde::Serialize;
 
 const FILE_MAGIC: [u8; 8] = *b"DBLABKV\0";
@@ -511,16 +509,10 @@ fn reject_symbolic_link(path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(unix)]
 fn same_file_identity(left: &File, right: &File) -> Result<bool> {
-    let left = left.metadata()?;
-    let right = right.metadata()?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_left: &File, _right: &File) -> Result<bool> {
-    Ok(true)
+    let left = Handle::from_file(left.try_clone()?)?;
+    let right = Handle::from_file(right.try_clone()?)?;
+    Ok(left == right)
 }
 
 fn open_or_create(path: &Path) -> Result<(File, bool)> {
