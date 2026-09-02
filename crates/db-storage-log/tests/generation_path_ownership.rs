@@ -243,7 +243,9 @@ fn reopen_rejects_valid_replacement_file_and_recovers_only_original_identity() {
     let replacement = directory.path().join("replacement.log");
 
     let mut engine = LogEngine::create_new(&path).expect("create original standalone log");
-    engine.put(b"stable", b"original").expect("write original value");
+    engine
+        .put(b"stable", b"original")
+        .expect("write original value");
     {
         let mut other = LogEngine::create_new(&replacement).expect("create valid replacement log");
         other
@@ -259,7 +261,9 @@ fn reopen_rejects_valid_replacement_file_and_recovers_only_original_identity() {
         .reopen()
         .expect_err("reopen must reject a different physical backing file");
     assert!(
-        reopen_error.to_string().contains("backing file identity changed"),
+        reopen_error
+            .to_string()
+            .contains("backing file identity changed"),
         "unexpected reopen error: {reopen_error}"
     );
     assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
