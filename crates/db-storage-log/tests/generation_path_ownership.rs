@@ -41,9 +41,7 @@ fn ownership_constructors_reject_symlink_indirection_before_mutation() {
     use std::os::unix::fs::symlink;
 
     let directory = tempdir().expect("temporary directory");
-    let generation = directory
-        .path()
-        .join("generation-00000000000000000009.log");
+    let generation = directory.path().join("generation-00000000000000000009.log");
     let ordinary = directory.path().join("ordinary.log");
 
     {
@@ -66,7 +64,9 @@ fn ownership_constructors_reject_symlink_indirection_before_mutation() {
     std::fs::remove_file(&ordinary).expect("remove first symlink");
     {
         let mut standalone = LogEngine::create_new(&ordinary).expect("create standalone target");
-        standalone.put(b"standalone", b"owned").expect("standalone put");
+        standalone
+            .put(b"standalone", b"owned")
+            .expect("standalone put");
     }
     let standalone_before = std::fs::read(&ordinary).expect("read standalone target");
     std::fs::remove_file(&generation).expect("remove generation pathname");
