@@ -404,7 +404,6 @@ impl KvEngine for LogEngine {
             }
         }
 
-        self.file.take();
         let reopened = Self::from_file(self.path.clone(), self.path_ownership, candidate, false);
         match reopened {
             Ok(reopened) => {
