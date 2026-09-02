@@ -180,7 +180,9 @@ fn standalone_reopen_requires_existing_backing_file_and_never_recreates_it() {
         .reopen()
         .expect("explicit reopen must recover after standalone backing file restoration");
     assert_eq!(
-        engine.get(b"stable").expect("get restored standalone value"),
+        engine
+            .get(b"stable")
+            .expect("get restored standalone value"),
         Some(b"value".to_vec())
     );
 }
