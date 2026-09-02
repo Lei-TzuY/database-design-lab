@@ -376,7 +376,7 @@ impl KvEngine for LogEngine {
             return Err(error);
         }
 
-        let candidate = match OpenOptions::new().read(true).write(true).open(&self.path) {
+        let mut candidate = match OpenOptions::new().read(true).write(true).open(&self.path) {
             Ok(file) => file,
             Err(error) => {
                 self.poisoned = true;
@@ -400,6 +400,24 @@ impl KvEngine for LogEngine {
                     return Err(error);
                 }
             }
+        }
+
+        let observed = match scan_file(&mut candidate) {
+            Ok(scan) => scan,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
+        if observed.record_count < self.record_count {
+            self.poisoned = true;
+            return Err(corruption(
+                0,
+                format!(
+                    "append-log record count regressed across reopen: observed {}, previously acknowledged {}",
+                    observed.record_count, self.record_count
+                ),
+            ));
         }
 
         let reopened = Self::from_file(self.path.clone(), self.path_ownership, candidate, false);
