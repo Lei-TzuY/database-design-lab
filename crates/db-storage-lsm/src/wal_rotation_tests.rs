@@ -218,7 +218,9 @@ fn live_lsm_rejects_external_append_before_next_mutation() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("engine");
     let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
-    engine.put(b"base", b"one").expect("persist baseline mutation");
+    engine
+        .put(b"base", b"one")
+        .expect("persist baseline mutation");
 
     let wal_path = path.join(wal_file_name(INITIAL_WAL_ID));
     let foreign = encode_record(MutationKind::Put, 2, b"foreign", b"two")
