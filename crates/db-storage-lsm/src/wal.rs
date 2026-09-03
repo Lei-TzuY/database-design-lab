@@ -245,6 +245,7 @@ impl Wal {
         self.file.write_all(&encoded)?;
         self.file.sync_data()?;
         post_sync_hook()?;
+        self.ensure_authoritative_path()?;
         self.acknowledged_prefix_hasher.update(&encoded);
         self.next_sequence = next_sequence;
         self.record_count = next_record_count;
