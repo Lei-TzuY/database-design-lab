@@ -120,3 +120,47 @@ fn mutation_rejects_valid_external_append_beyond_acknowledged_boundary() {
         "drift rejection must not append or otherwise mutate the backing file"
     );
 }
+
+#[test]
+fn mutation_rejects_same_length_substitution_of_acknowledged_prefix() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("live-substitution.log");
+    let replacement_path = directory.path().join("replacement.log");
+
+    let mut engine = LogEngine::create_new(&path).expect("create log");
+    engine
+        .put(b"stable", b"original")
+        .expect("persist acknowledged record");
+    let original_bytes = std::fs::read(&path).expect("read original acknowledged log");
+
+    let mut replacement = LogEngine::create_new(&replacement_path).expect("create replacement log");
+    replacement
+        .put(b"stable", b"replaced")
+        .expect("persist equal-length replacement record");
+    drop(replacement);
+    let replacement_bytes = std::fs::read(&replacement_path).expect("read replacement log");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "regression requires physical EOF to remain unchanged"
+    );
+
+    std::fs::write(&path, &replacement_bytes)
+        .expect("substitute acknowledged bytes on the same live backing file");
+    let substituted_bytes = std::fs::read(&path).expect("capture substituted backing file");
+
+    let error = engine
+        .put(b"local", b"next")
+        .expect_err("mutation must reject changed acknowledged prefix");
+    assert!(
+        matches!(error, DbError::Corruption { .. })
+            && error.to_string().contains("acknowledged record changed"),
+        "unexpected substitution error: {error}"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert_eq!(
+        std::fs::read(&path).expect("read backing file after rejected mutation"),
+        substituted_bytes,
+        "substitution rejection must not append or otherwise mutate the backing file"
+    );
+}
