@@ -1,0 +1,72 @@
+name: Temporary LSM WAL prefix patch
+
+on:
+  push:
+    branches:
+      - hardening/lsm-wal-prefix-fingerprint
+    paths:
+      - .github/workflows/tmp-lsm-wal-prefix-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening/lsm-wal-prefix-fingerprint
+          fetch-depth: 0
+      - name: Apply bounded WAL prefix fingerprint fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/db-storage-lsm/src/wal.rs')
+          text = path.read_text()
+
+          old = '''    record_count: u64,\n    acknowledged_valid_bytes: u64,\n    open_examined_bytes: u64,'''
+          new = '''    record_count: u64,\n    acknowledged_valid_bytes: u64,\n    acknowledged_prefix_hasher: Hasher,\n    open_examined_bytes: u64,'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        file.write_all(&encode_wal_header(wal_id, first_sequence))?;\n        file.sync_all()?;\n        Ok(Self {'''
+          new = '''        file.write_all(&encode_wal_header(wal_id, first_sequence))?;\n        file.sync_all()?;\n        let acknowledged_prefix_hasher = hash_file_prefix(&mut file, WAL_HEADER_LEN_U64)?;\n        Ok(Self {'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''            record_count: 0,\n            acknowledged_valid_bytes: WAL_HEADER_LEN_U64,\n            open_examined_bytes: WAL_HEADER_LEN_U64,'''
+          new = '''            record_count: 0,\n            acknowledged_valid_bytes: WAL_HEADER_LEN_U64,\n            acknowledged_prefix_hasher,\n            open_examined_bytes: WAL_HEADER_LEN_U64,'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        if scan.recoverable_tail.is_some() {\n            file.set_len(scan.valid_bytes)?;\n            file.sync_all()?;\n        }\n        file.seek(SeekFrom::End(0))?;'''
+          new = '''        if scan.recoverable_tail.is_some() {\n            file.set_len(scan.valid_bytes)?;\n            file.sync_all()?;\n        }\n        let acknowledged_prefix_hasher = hash_file_prefix(&mut file, scan.valid_bytes)?;\n        file.seek(SeekFrom::End(0))?;'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''            record_count: scan.record_count,\n            acknowledged_valid_bytes: scan.valid_bytes,\n            open_examined_bytes: scan.file_bytes,'''
+          new = '''            record_count: scan.record_count,\n            acknowledged_valid_bytes: scan.valid_bytes,\n            acknowledged_prefix_hasher,\n            open_examined_bytes: scan.file_bytes,'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        let observed_eof = self.file.seek(SeekFrom::End(0))?;\n        if observed_eof != self.acknowledged_valid_bytes {\n            return Err(corruption(\n                observed_eof,\n                format!(\n                    "active WAL physical EOF changed before mutation: observed {observed_eof}, previously acknowledged {}",\n                    self.acknowledged_valid_bytes\n                ),\n            ));\n        }\n        self.file.write_all(&encoded)?;\n        self.file.sync_data()?;\n        self.next_sequence = next_sequence;\n        self.record_count = next_record_count;\n        self.acknowledged_valid_bytes = next_acknowledged_valid_bytes;'''
+          new = '''        let observed_eof = self.file.seek(SeekFrom::End(0))?;\n        if observed_eof != self.acknowledged_valid_bytes {\n            return Err(corruption(\n                observed_eof,\n                format!(\n                    "active WAL physical EOF changed before mutation: observed {observed_eof}, previously acknowledged {}",\n                    self.acknowledged_valid_bytes\n                ),\n            ));\n        }\n        let observed_prefix_hasher =\n            hash_file_prefix(&mut self.file, self.acknowledged_valid_bytes)?;\n        if observed_prefix_hasher.finalize()\n            != self.acknowledged_prefix_hasher.clone().finalize()\n        {\n            return Err(corruption(\n                0,\n                "acknowledged WAL record changed before mutation: durable prefix fingerprint mismatch",\n            ));\n        }\n        let observed_eof_after_hash = self.file.seek(SeekFrom::End(0))?;\n        if observed_eof_after_hash != self.acknowledged_valid_bytes {\n            return Err(corruption(\n                observed_eof_after_hash,\n                format!(\n                    "active WAL physical EOF changed while validating mutation: observed {observed_eof_after_hash}, previously acknowledged {}",\n                    self.acknowledged_valid_bytes\n                ),\n            ));\n        }\n        self.file.write_all(&encoded)?;\n        self.file.sync_data()?;\n        self.acknowledged_prefix_hasher.update(&encoded);\n        self.next_sequence = next_sequence;\n        self.record_count = next_record_count;\n        self.acknowledged_valid_bytes = next_acknowledged_valid_bytes;'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          marker = '''fn encode_wal_header(wal_id: u64, first_sequence: u64) -> [u8; WAL_HEADER_LEN] {'''
+          helper = '''fn hash_file_prefix(file: &mut File, prefix_bytes: u64) -> Result<Hasher> {\n    file.seek(SeekFrom::Start(0))?;\n    let mut remaining = prefix_bytes;\n    let mut buffer = [0_u8; 8192];\n    let mut hasher = Hasher::new();\n    while remaining != 0 {\n        let chunk_u64 = remaining.min(buffer.len() as u64);\n        let chunk = usize::try_from(chunk_u64)\n            .map_err(|_| corruption(0, "WAL prefix hash chunk length does not fit usize"))?;\n        file.read_exact(&mut buffer[..chunk])?;\n        hasher.update(&buffer[..chunk]);\n        remaining -= chunk_u64;\n    }\n    Ok(hasher)\n}\n\n'''
+          assert marker in text
+          text = text.replace(marker, helper + marker, 1)
+
+          path.write_text(text)
+      - name: Remove temporary runner and commit implementation
+        run: |
+          git rm .github/workflows/tmp-lsm-wal-prefix-fix.yml
+          git add crates/db-storage-lsm/src/wal.rs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Verify acknowledged LSM WAL prefix before mutation"
+          git push origin HEAD:hardening/lsm-wal-prefix-fingerprint
