@@ -175,3 +175,25 @@ fn live_lsm_rejects_authoritative_wal_path_changed_to_symlink() {
     );
     assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
 }
+
+#[cfg(unix)]
+#[test]
+fn lsm_open_rejects_symlinked_engine_root() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().expect("temporary directory");
+    let real_path = directory.path().join("engine-real");
+    {
+        let mut engine = LsmEngine::create_new(&real_path).expect("create LSM engine");
+        engine
+            .put(b"base", b"one")
+            .expect("persist baseline mutation");
+    }
+
+    let alias_path = directory.path().join("engine-alias");
+    symlink(&real_path, &alias_path).expect("create symlinked engine root");
+
+    let error = LsmEngine::open(&alias_path)
+        .expect_err("opening through a symlinked authoritative engine root must fail closed");
+    assert!(matches!(error, DbError::Corruption { .. }));
+}
