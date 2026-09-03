@@ -329,6 +329,25 @@ impl LogEngine {
                     ),
                 ));
             }
+            let observed_prefix_hasher = hash_file_prefix(file, self.acknowledged_valid_bytes)?;
+            if observed_prefix_hasher.finalize()
+                != self.acknowledged_prefix_hasher.clone().finalize()
+            {
+                return Err(corruption(
+                    0,
+                    "acknowledged record changed before mutation: durable prefix fingerprint mismatch",
+                ));
+            }
+            let observed_eof_after_hash = file.seek(SeekFrom::End(0))?;
+            if observed_eof_after_hash != self.acknowledged_valid_bytes {
+                return Err(corruption(
+                    observed_eof_after_hash,
+                    format!(
+                        "append-log physical EOF changed while validating mutation: observed {observed_eof_after_hash}, previously acknowledged {}",
+                        self.acknowledged_valid_bytes
+                    ),
+                ));
+            }
             file.write_all(&record)?;
             file.sync_data()?;
             Ok(())
