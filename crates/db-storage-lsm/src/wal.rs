@@ -95,6 +95,7 @@ pub(super) struct Wal {
     next_sequence: u64,
     record_count: u64,
     acknowledged_valid_bytes: u64,
+    acknowledged_prefix_hasher: Hasher,
     open_examined_bytes: u64,
     recovered_tail: Option<RecoveredWalTail>,
 }
@@ -127,6 +128,7 @@ impl Wal {
             .open(path)?;
         file.write_all(&encode_wal_header(wal_id, first_sequence))?;
         file.sync_all()?;
+        let acknowledged_prefix_hasher = hash_file_prefix(&mut file, WAL_HEADER_LEN_U64)?;
         Ok(Self {
             file,
             wal_id,
@@ -134,6 +136,7 @@ impl Wal {
             next_sequence: first_sequence,
             record_count: 0,
             acknowledged_valid_bytes: WAL_HEADER_LEN_U64,
+            acknowledged_prefix_hasher,
             open_examined_bytes: WAL_HEADER_LEN_U64,
             recovered_tail: None,
         })
@@ -151,6 +154,7 @@ impl Wal {
             file.set_len(scan.valid_bytes)?;
             file.sync_all()?;
         }
+        let acknowledged_prefix_hasher = hash_file_prefix(&mut file, scan.valid_bytes)?;
         file.seek(SeekFrom::End(0))?;
         Ok(Self {
             file,
@@ -159,6 +163,7 @@ impl Wal {
             next_sequence: scan.next_sequence,
             record_count: scan.record_count,
             acknowledged_valid_bytes: scan.valid_bytes,
+            acknowledged_prefix_hasher,
             open_examined_bytes: scan.file_bytes,
             recovered_tail: scan.recoverable_tail,
         })
@@ -204,8 +209,27 @@ impl Wal {
                 ),
             ));
         }
+        let observed_prefix_hasher =
+            hash_file_prefix(&mut self.file, self.acknowledged_valid_bytes)?;
+        if observed_prefix_hasher.finalize() != self.acknowledged_prefix_hasher.clone().finalize() {
+            return Err(corruption(
+                0,
+                "acknowledged WAL record changed before mutation: durable prefix fingerprint mismatch",
+            ));
+        }
+        let observed_eof_after_hash = self.file.seek(SeekFrom::End(0))?;
+        if observed_eof_after_hash != self.acknowledged_valid_bytes {
+            return Err(corruption(
+                observed_eof_after_hash,
+                format!(
+                    "active WAL physical EOF changed while validating mutation: observed {observed_eof_after_hash}, previously acknowledged {}",
+                    self.acknowledged_valid_bytes
+                ),
+            ));
+        }
         self.file.write_all(&encoded)?;
         self.file.sync_data()?;
+        self.acknowledged_prefix_hasher.update(&encoded);
         self.next_sequence = next_sequence;
         self.record_count = next_record_count;
         self.acknowledged_valid_bytes = next_acknowledged_valid_bytes;
@@ -382,6 +406,22 @@ fn scan_file(
         next_sequence: expected_sequence,
         recoverable_tail: None,
     })
+}
+
+fn hash_file_prefix(file: &mut File, prefix_bytes: u64) -> Result<Hasher> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut remaining = prefix_bytes;
+    let mut buffer = [0_u8; 8192];
+    let mut hasher = Hasher::new();
+    while remaining != 0 {
+        let chunk_u64 = remaining.min(buffer.len() as u64);
+        let chunk = usize::try_from(chunk_u64)
+            .map_err(|_| corruption(0, "WAL prefix hash chunk length does not fit usize"))?;
+        file.read_exact(&mut buffer[..chunk])?;
+        hasher.update(&buffer[..chunk]);
+        remaining -= chunk_u64;
+    }
+    Ok(hasher)
 }
 
 fn encode_wal_header(wal_id: u64, first_sequence: u64) -> [u8; WAL_HEADER_LEN] {
