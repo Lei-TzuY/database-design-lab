@@ -94,6 +94,7 @@ pub(super) struct Wal {
     first_sequence: u64,
     next_sequence: u64,
     record_count: u64,
+    acknowledged_valid_bytes: u64,
     open_examined_bytes: u64,
     recovered_tail: Option<RecoveredWalTail>,
 }
@@ -132,6 +133,7 @@ impl Wal {
             first_sequence,
             next_sequence: first_sequence,
             record_count: 0,
+            acknowledged_valid_bytes: WAL_HEADER_LEN_U64,
             open_examined_bytes: WAL_HEADER_LEN_U64,
             recovered_tail: None,
         })
@@ -156,6 +158,7 @@ impl Wal {
             first_sequence: expected_first_sequence,
             next_sequence: scan.next_sequence,
             record_count: scan.record_count,
+            acknowledged_valid_bytes: scan.valid_bytes,
             open_examined_bytes: scan.file_bytes,
             recovered_tail: scan.recoverable_tail,
         })
@@ -184,12 +187,28 @@ impl Wal {
             .checked_add(1)
             .ok_or_else(|| corruption(0, "WAL record count overflowed u64"))?;
         let encoded = encode_record(kind, sequence, key, value)?;
+        let encoded_bytes = u64::try_from(encoded.len())
+            .map_err(|_| corruption(0, "encoded WAL record length does not fit u64"))?;
+        let next_acknowledged_valid_bytes = self
+            .acknowledged_valid_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| corruption(0, "acknowledged WAL byte boundary overflowed u64"))?;
 
-        self.file.seek(SeekFrom::End(0))?;
+        let observed_eof = self.file.seek(SeekFrom::End(0))?;
+        if observed_eof != self.acknowledged_valid_bytes {
+            return Err(corruption(
+                observed_eof,
+                format!(
+                    "active WAL physical EOF changed before mutation: observed {observed_eof}, previously acknowledged {}",
+                    self.acknowledged_valid_bytes
+                ),
+            ));
+        }
         self.file.write_all(&encoded)?;
         self.file.sync_data()?;
         self.next_sequence = next_sequence;
         self.record_count = next_record_count;
+        self.acknowledged_valid_bytes = next_acknowledged_valid_bytes;
         Ok(sequence)
     }
 
