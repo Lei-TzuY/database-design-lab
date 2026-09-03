@@ -1,3 +1,6 @@
+use std::fs::OpenOptions;
+use std::io::Write;
+
 use db_core::{DbError, KvEngine};
 use db_storage_log::LogEngine;
 use tempfile::tempdir;
@@ -66,5 +69,54 @@ fn reopen_rejects_same_count_substitution_of_acknowledged_record() {
         std::fs::read(&path).expect("read substituted file after rejected reopen"),
         replacement_bytes,
         "substitution rejection must not mutate the backing file"
+    );
+}
+
+#[test]
+fn mutation_rejects_valid_external_append_beyond_acknowledged_boundary() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("external-append.log");
+    let source_path = directory.path().join("source.log");
+
+    let mut engine = LogEngine::create_new(&path).expect("create log");
+    engine.put(b"stable", b"one").expect("persist local record");
+    let acknowledged_bytes = std::fs::read(&path).expect("read acknowledged prefix");
+
+    let mut source = LogEngine::create_new(&source_path).expect("create source log");
+    source
+        .put(b"stable", b"one")
+        .expect("persist matching first source record");
+    source
+        .put(b"foreign", b"two")
+        .expect("persist externally appended record");
+    drop(source);
+    let source_bytes = std::fs::read(&source_path).expect("read source log");
+    assert!(source_bytes.starts_with(&acknowledged_bytes));
+
+    let external_suffix = &source_bytes[acknowledged_bytes.len()..];
+    let mut backing = OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open backing file for external append");
+    backing
+        .write_all(external_suffix)
+        .expect("append valid foreign record");
+    backing.sync_data().expect("sync external append");
+    drop(backing);
+    let drifted_bytes = std::fs::read(&path).expect("capture externally drifted log");
+
+    let error = engine
+        .put(b"local", b"three")
+        .expect_err("mutation must reject external append drift");
+    assert!(
+        matches!(error, DbError::Corruption { .. })
+            && error.to_string().contains("physical EOF changed"),
+        "unexpected drift error: {error}"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert_eq!(
+        std::fs::read(&path).expect("read backing file after rejected mutation"),
+        drifted_bytes,
+        "drift rejection must not append or otherwise mutate the backing file"
     );
 }

@@ -314,19 +314,29 @@ impl LogEngine {
             .checked_add(record_bytes)
             .ok_or_else(|| corruption(0, "acknowledged prefix length overflowed u64"))?;
 
-        let append_result = (|| -> io::Result<()> {
+        let append_result = (|| -> Result<()> {
             let file = self
                 .file
                 .as_mut()
-                .ok_or_else(|| io::Error::other("append file is not open"))?;
-            file.seek(SeekFrom::End(0))?;
+                .ok_or_else(|| DbError::Io(io::Error::other("append file is not open")))?;
+            let observed_eof = file.seek(SeekFrom::End(0))?;
+            if observed_eof != self.acknowledged_valid_bytes {
+                return Err(corruption(
+                    observed_eof,
+                    format!(
+                        "append-log physical EOF changed before mutation: observed {observed_eof}, previously acknowledged {}",
+                        self.acknowledged_valid_bytes
+                    ),
+                ));
+            }
             file.write_all(&record)?;
-            file.sync_data()
+            file.sync_data()?;
+            Ok(())
         })();
 
         if let Err(error) = append_result {
             self.poisoned = true;
-            return Err(DbError::Io(error));
+            return Err(error);
         }
 
         self.acknowledged_prefix_hasher.update(&record);
