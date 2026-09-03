@@ -211,9 +211,7 @@ impl Wal {
         }
         let observed_prefix_hasher =
             hash_file_prefix(&mut self.file, self.acknowledged_valid_bytes)?;
-        if observed_prefix_hasher.finalize()
-            != self.acknowledged_prefix_hasher.clone().finalize()
-        {
+        if observed_prefix_hasher.finalize() != self.acknowledged_prefix_hasher.clone().finalize() {
             return Err(corruption(
                 0,
                 "acknowledged WAL record changed before mutation: durable prefix fingerprint mismatch",
