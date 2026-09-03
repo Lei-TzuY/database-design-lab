@@ -78,3 +78,42 @@ fn live_lsm_rejects_same_length_valid_substitution_before_next_mutation() {
     );
     assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
 }
+
+#[test]
+fn live_lsm_rejects_external_truncation_below_acknowledged_boundary() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    engine
+        .put(b"base", b"one")
+        .expect("persist baseline mutation");
+
+    let wal_path = path.join("wal-0000000000000001.log");
+    let acknowledged_len = fs::metadata(&wal_path).expect("stat active WAL").len();
+    assert!(
+        acknowledged_len > WAL_HEADER_LEN,
+        "baseline mutation must extend the WAL beyond its header"
+    );
+
+    let backing = fs::OpenOptions::new()
+        .write(true)
+        .open(&wal_path)
+        .expect("open active WAL externally");
+    backing
+        .set_len(WAL_HEADER_LEN)
+        .expect("truncate active WAL below acknowledged boundary");
+    backing.sync_data().expect("sync truncated WAL length");
+    drop(backing);
+    let drifted = fs::read(&wal_path).expect("capture truncated WAL");
+
+    let error = engine
+        .put(b"ours", b"two")
+        .expect_err("live engine must reject truncation below acknowledged boundary");
+    assert!(matches!(error, DbError::Corruption { .. }));
+    assert_eq!(
+        fs::read(&wal_path).expect("read WAL after rejected mutation"),
+        drifted,
+        "rejection must not repair or append to externally truncated WAL"
+    );
+    assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
+}
