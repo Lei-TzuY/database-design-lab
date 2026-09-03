@@ -197,3 +197,33 @@ fn lsm_open_rejects_symlinked_engine_root() {
         .expect_err("opening through a symlinked authoritative engine root must fail closed");
     assert!(matches!(error, DbError::Corruption { .. }));
 }
+
+#[cfg(unix)]
+#[test]
+fn live_lsm_rejects_engine_root_changed_to_symlink_before_next_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let moved_path = directory.path().join("engine-moved");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    engine
+        .put(b"base", b"one")
+        .expect("persist baseline mutation");
+
+    fs::rename(&path, &moved_path).expect("move authoritative engine directory");
+    symlink(&moved_path, &path).expect("replace engine root pathname with symlink");
+    let wal_path = moved_path.join("wal-0000000000000001.log");
+    let before = fs::read(&wal_path).expect("capture durable WAL before rejected mutation");
+
+    let error = engine
+        .put(b"ours", b"two")
+        .expect_err("live engine must reject authoritative root pathname becoming a symlink");
+    assert!(matches!(error, DbError::Corruption { .. }));
+    assert_eq!(
+        fs::read(&wal_path).expect("read WAL after rejected mutation"),
+        before,
+        "rejection must not append through a symlinked authoritative engine root"
+    );
+    assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
+}
