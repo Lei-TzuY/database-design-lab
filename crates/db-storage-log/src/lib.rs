@@ -124,6 +124,8 @@ pub struct LogEngine {
     values: BTreeMap<Vec<u8>, Vec<u8>>,
     next_sequence: u64,
     record_count: u64,
+    acknowledged_valid_bytes: u64,
+    acknowledged_prefix_hasher: Hasher,
     recovered_tail: Option<TruncatedTail>,
     poisoned: bool,
 }
@@ -214,6 +216,7 @@ impl LogEngine {
             file.set_len(scan.valid_bytes)?;
             file.sync_all()?;
         }
+        let acknowledged_prefix_hasher = hash_file_prefix(&mut file, scan.valid_bytes)?;
         file.seek(SeekFrom::End(0))?;
 
         Ok(Self {
@@ -223,6 +226,8 @@ impl LogEngine {
             values: scan.values,
             next_sequence: scan.next_sequence,
             record_count: scan.record_count,
+            acknowledged_valid_bytes: scan.valid_bytes,
+            acknowledged_prefix_hasher,
             recovered_tail: scan.recoverable_tail,
             poisoned: false,
         })
@@ -301,6 +306,13 @@ impl LogEngine {
                     reason: "record counter exhausted".to_owned(),
                 })?;
         let record = encode_record(kind, sequence, key, value)?;
+        let record_bytes = u64::try_from(record.len()).map_err(|_| {
+            DbError::InvalidInput("encoded record length does not fit u64".to_owned())
+        })?;
+        let following_acknowledged_valid_bytes = self
+            .acknowledged_valid_bytes
+            .checked_add(record_bytes)
+            .ok_or_else(|| corruption(0, "acknowledged prefix length overflowed u64"))?;
 
         let append_result = (|| -> io::Result<()> {
             let file = self
@@ -317,6 +329,8 @@ impl LogEngine {
             return Err(DbError::Io(error));
         }
 
+        self.acknowledged_prefix_hasher.update(&record);
+        self.acknowledged_valid_bytes = following_acknowledged_valid_bytes;
         self.next_sequence = following_sequence;
         self.record_count = following_record_count;
         Ok(())
@@ -417,6 +431,28 @@ impl KvEngine for LogEngine {
                     "append-log record count regressed across reopen: observed {}, previously acknowledged {}",
                     observed.record_count, self.record_count
                 ),
+            ));
+        }
+        if observed.valid_bytes < self.acknowledged_valid_bytes {
+            self.poisoned = true;
+            return Err(corruption(
+                observed.valid_bytes,
+                "acknowledged record changed before reopen: valid prefix became shorter",
+            ));
+        }
+        let observed_prefix_hasher =
+            match hash_file_prefix(&mut candidate, self.acknowledged_valid_bytes) {
+                Ok(hasher) => hasher,
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            };
+        if observed_prefix_hasher.finalize() != self.acknowledged_prefix_hasher.clone().finalize() {
+            self.poisoned = true;
+            return Err(corruption(
+                0,
+                "acknowledged record changed before reopen: durable prefix fingerprint mismatch",
             ));
         }
 
@@ -528,6 +564,24 @@ fn same_file_identity(left: &File, right: &File) -> Result<bool> {
     let left = Handle::from_file(left.try_clone()?)?;
     let right = Handle::from_file(right.try_clone()?)?;
     Ok(left == right)
+}
+
+fn hash_file_prefix(file: &mut File, prefix_bytes: u64) -> Result<Hasher> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut remaining = prefix_bytes;
+    let mut buffer = [0_u8; 8192];
+    let mut hasher = Hasher::new();
+
+    while remaining != 0 {
+        let chunk_bytes = remaining.min(buffer.len() as u64);
+        let chunk_len = usize::try_from(chunk_bytes)
+            .map_err(|_| corruption(0, "prefix hash chunk length does not fit usize"))?;
+        file.read_exact(&mut buffer[..chunk_len])?;
+        hasher.update(&buffer[..chunk_len]);
+        remaining -= chunk_bytes;
+    }
+
+    Ok(hasher)
 }
 
 fn open_or_create(path: &Path) -> Result<(File, bool)> {
