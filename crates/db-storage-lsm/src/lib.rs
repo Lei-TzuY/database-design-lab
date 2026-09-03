@@ -1158,9 +1158,9 @@ struct Layout {
 }
 
 fn validate_layout(path: &Path) -> Result<Layout> {
-    let metadata = fs::metadata(path)?;
+    let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
-        return Err(corruption("LSM engine path is not a directory"));
+        return Err(corruption("LSM engine path is not a direct directory"));
     }
     let current_name = OsStr::new(CURRENT_FILE_NAME);
     let mut wal_ids = BTreeSet::new();
