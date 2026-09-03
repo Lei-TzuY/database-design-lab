@@ -185,7 +185,9 @@ fn lsm_open_rejects_symlinked_engine_root() {
     let real_path = directory.path().join("engine-real");
     {
         let mut engine = LsmEngine::create_new(&real_path).expect("create LSM engine");
-        engine.put(b"base", b"one").expect("persist baseline mutation");
+        engine
+            .put(b"base", b"one")
+            .expect("persist baseline mutation");
     }
 
     let alias_path = directory.path().join("engine-alias");
