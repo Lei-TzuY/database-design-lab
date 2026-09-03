@@ -1,6 +1,6 @@
 # Legacy append-log pathname cutover
 
-`db-lab-log-generation-cutover` is the explicit Unix ownership step after a successful legacy migration. Migration itself remains non-destructive; cutover retires the old pathname only after the operator has accepted the freshly imported generation directory.
+`db-lab-log-generation-cutover` is the Unix ownership variant after a successful legacy migration. Migration itself remains non-destructive; cutover retires the old pathname only after the operator has accepted the freshly imported generation directory. Windows uses the companion protocol documented in [`append-log-generation-cutover-windows.md`](append-log-generation-cutover-windows.md).
 
 ```text
 db-lab-log-generation-cutover \
@@ -8,7 +8,7 @@ db-lab-log-generation-cutover \
   --target-directory data/log-generations
 ```
 
-The operation protocol is `append_log_legacy_cutover_sentinel_unix_v1`. The pathname sentinel written at the former legacy path carries protocol `append_log_legacy_cutover_sentinel_v1` plus informational target/retained-path fields.
+The Unix operation protocol is `append_log_legacy_cutover_sentinel_unix_v1`. The pathname sentinel written at the former legacy path carries protocol `append_log_legacy_cutover_sentinel_v1` plus informational target/retained-path fields.
 
 ## Preconditions
 
@@ -61,9 +61,9 @@ No automatic rollback rewrites the legacy pathname after atomic replacement. Onc
 
 ## Platform boundary
 
-The protocol is Unix-only. It relies on same-filesystem hard-link retention, replacement rename semantics, and parent-directory `sync_all` durability barriers that this repository tests on Linux and macOS.
+The protocol described in this file is Unix-only. It relies on same-filesystem hard-link retention, replacement rename semantics, and parent-directory `sync_all` durability barriers that this repository tests on Linux and macOS.
 
-Non-Unix targets fail before filesystem access. In particular, Windows is not enabled until the project has an explicit, tested equivalent for replacement and retained-entry durability; file flush alone is not treated as proof of directory-entry persistence.
+Windows uses a separate executable contract documented in [`append-log-generation-cutover-windows.md`](append-log-generation-cutover-windows.md): a synchronized retained byte-copy is published with no-overwrite `MoveFileExW(MOVEFILE_WRITE_THROUGH)`, then the legacy pathname is atomically replaced by the sentinel with `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`. The platform variants intentionally do not pretend that Unix hard-link/directory-sync semantics and Win32 write-through namespace semantics are interchangeable.
 
 ## Operational sequence
 
