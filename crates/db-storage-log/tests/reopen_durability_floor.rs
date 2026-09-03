@@ -164,3 +164,34 @@ fn mutation_rejects_same_length_substitution_of_acknowledged_prefix() {
         "substitution rejection must not append or otherwise mutate the backing file"
     );
 }
+
+#[test]
+fn mutation_rejects_external_truncation_below_acknowledged_boundary() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("external-truncation.log");
+
+    let mut engine = LogEngine::create_new(&path).expect("create log");
+    let empty_log = std::fs::read(&path).expect("capture empty valid log");
+    engine
+        .put(b"stable", b"acknowledged")
+        .expect("persist acknowledged record");
+
+    std::fs::write(&path, &empty_log)
+        .expect("truncate live backing file below acknowledged durable boundary");
+    let truncated_bytes = std::fs::read(&path).expect("capture externally truncated log");
+
+    let error = engine
+        .put(b"local", b"next")
+        .expect_err("mutation must reject external truncation");
+    assert!(
+        matches!(error, DbError::Corruption { .. })
+            && error.to_string().contains("physical EOF changed"),
+        "unexpected truncation error: {error}"
+    );
+    assert!(matches!(engine.get(b"stable"), Err(DbError::Poisoned)));
+    assert_eq!(
+        std::fs::read(&path).expect("read backing file after rejected mutation"),
+        truncated_bytes,
+        "truncation rejection must not append or otherwise mutate the backing file"
+    );
+}
