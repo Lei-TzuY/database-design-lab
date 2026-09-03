@@ -187,6 +187,16 @@ impl Wal {
     }
 
     pub(super) fn append(&mut self, kind: MutationKind, key: &[u8], value: &[u8]) -> Result<u64> {
+        self.append_with_post_sync_hook(kind, key, value, || Ok(()))
+    }
+
+    fn append_with_post_sync_hook(
+        &mut self,
+        kind: MutationKind,
+        key: &[u8],
+        value: &[u8],
+        post_sync_hook: impl FnOnce() -> Result<()>,
+    ) -> Result<u64> {
         let sequence = self.next_sequence;
         let next_sequence = sequence
             .checked_add(1)
@@ -234,6 +244,8 @@ impl Wal {
         }
         self.file.write_all(&encoded)?;
         self.file.sync_data()?;
+        post_sync_hook()?;
+        self.ensure_authoritative_path()?;
         self.acknowledged_prefix_hasher.update(&encoded);
         self.next_sequence = next_sequence;
         self.record_count = next_record_count;
@@ -642,16 +654,16 @@ fn parse_record_header(
     let key_len_u32 = read_u32(&header[16..20]);
     let value_len_u32 = read_u32(&header[20..24]);
     let key_len = usize::try_from(key_len_u32)
-        .map_err(|_| corruption(offset + 16, "LSM WAL key length does not fit usize"))?;
+        .map_err(|_| corruption(offset + 16, "WAL key length does not fit usize"))?;
     let value_len = usize::try_from(value_len_u32)
-        .map_err(|_| corruption(offset + 20, "LSM WAL value length does not fit usize"))?;
+        .map_err(|_| corruption(offset + 20, "WAL value length does not fit usize"))?;
     validate_record_lengths(kind, key_len, value_len, offset)?;
     let payload_len = u64::from(key_len_u32)
         .checked_add(u64::from(value_len_u32))
-        .ok_or_else(|| corruption(offset, "LSM WAL payload length overflowed u64"))?;
+        .ok_or_else(|| corruption(offset, "WAL payload length overflowed u64"))?;
     let total_len = RECORD_HEADER_LEN_U64
         .checked_add(payload_len)
-        .ok_or_else(|| corruption(offset, "LSM WAL record length overflowed u64"))?;
+        .ok_or_else(|| corruption(offset, "WAL record length overflowed u64"))?;
     Ok(RecordMetadata {
         kind,
         sequence,
@@ -791,5 +803,37 @@ fn corruption(offset: u64, reason: impl Into<String>) -> DbError {
     DbError::Corruption {
         offset,
         reason: reason.into(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn append_rejects_authoritative_path_replacement_after_sync_before_acknowledgement() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join(file_name(INITIAL_WAL_ID));
+        let detached = directory.path().join("detached-wal.log");
+        let mut wal =
+            Wal::create_new(&path, INITIAL_WAL_ID, INITIAL_FIRST_SEQUENCE).expect("create WAL");
+        let authoritative_before = std::fs::read(&path).expect("read initial WAL");
+
+        let result = wal.append_with_post_sync_hook(MutationKind::Put, b"key", b"value", || {
+            std::fs::rename(&path, &detached)?;
+            std::fs::write(&path, &authoritative_before)?;
+            Ok(())
+        });
+
+        assert!(
+            matches!(result, Err(DbError::Corruption { .. })),
+            "mutation must fail closed when authoritative WAL ownership changes after sync: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read replacement WAL"),
+            authoritative_before,
+            "replacement authoritative WAL must not contain the stale-handle mutation"
+        );
     }
 }
