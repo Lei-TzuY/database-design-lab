@@ -91,7 +91,7 @@ Verification rejects symlinks and oversized files, unknown JSON fields, unsuppor
 
 Without `--require-passed`, an internally consistent `passed=false` snapshot remains valid audit evidence: a failed preflight must not become unreadable merely because it correctly recorded a control failure. With `--require-passed`, such an artifact is rejected for later admission. `--expected-host-label` additionally binds the verifier call to one expected named host.
 
-The shared library entry points are `verify_host_preflight_snapshot`, `load_verified_host_preflight_snapshot`, and `validate_host_preflight_snapshot` in `db_cli::host_preflight`. Future publication-session binding should consume this verifier rather than implementing a second JSON interpretation.
+The shared library entry points are `verify_host_preflight_snapshot`, `load_verified_host_preflight_snapshot`, and `validate_host_preflight_snapshot` in `db_cli::host_preflight`. The publication-session implementation consumes this verifier rather than implementing a second JSON interpretation.
 
 This verifier establishes internal integrity of the repository-defined snapshot contract; it is not a cryptographic signature, proof of authorship, proof that an operator attestation was truthful, or proof that the retained observation still describes the machine at a later time.
 
@@ -108,10 +108,12 @@ A snapshot contains:
 - every hard-control violation;
 - explicit limitations.
 
-The snapshot is not yet embedded into repeated-batch archive formats. Doing that correctly requires a new versioned publication evidence format rather than silently changing v7/v11. Until such a format exists and a real named host is configured and reviewed, the roadmap item “Establish a controlled pinned performance host” remains incomplete.
+Host-control snapshots remain separate versioned artifacts rather than fields silently added to the frozen v7/v11 repeated-batch archive formats. `controlled_publication_session_v2` binds two passing snapshots—a preflight and postflight—to one publication-admitted v7/v11 archive by host label, repository revision, source format, and temporal enclosure. `scripts/run-controlled-publication.sh` orchestrates that binding on a real Linux collection host. This separation keeps batch evidence and host-control evidence independently re-verifiable.
+
+The roadmap item “Establish a controlled pinned performance host” remains incomplete until these controls are exercised on a real named and reviewed host and actual repeated publication evidence is collected there.
 
 ## Relationship to analysis bundles
 
-The repository can now preserve raw repeated evidence, fail-closed verify it, compute descriptive order-stratified timing summaries, and keep the summary beside re-verifiable raw evidence in an immutable analysis bundle. The host-preflight artifact addresses a different question: whether a real collection session started under the repository's first machine-observable host controls.
+The repository can now preserve raw repeated evidence, fail-closed verify it, compute descriptive order-stratified timing summaries, and keep the summary beside re-verifiable raw evidence in an immutable analysis bundle. The host-preflight artifact addresses a different question: whether a real collection session started and ended under the repository's machine-observable host controls. `controlled_publication_session_v2` preserves those two evidence classes together without redefining either one.
 
 Neither artifact makes hosted CI timing publishable. Real Phase 4 completion still requires actual controlled-host collection and review of the resulting denominator and distributions before any statistical regression threshold is proposed.
