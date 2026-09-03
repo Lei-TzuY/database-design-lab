@@ -622,11 +622,11 @@ fn parse_record_header(
     }
     let expected_header_crc = read_u32(&header[24..28]);
     let actual_header_crc = crc32fast::hash(&header[..24]);
-    if expected_header_crc != actual_crc {
+    if expected_header_crc != actual_header_crc {
         return Err(corruption(
             offset + 24,
             format!(
-                "LSM WAL record header checksum mismatch: expected {expected_header_crc:08x}, computed {actual_crc:08x}"
+                "LSM WAL record header checksum mismatch: expected {expected_header_crc:08x}, computed {actual_header_crc:08x}"
             ),
         ));
     }
@@ -806,19 +806,18 @@ fn corruption(offset: u64, reason: impl Into<String>) -> DbError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[cfg(unix)]
     #[test]
     fn append_rejects_authoritative_path_replacement_after_sync_before_acknowledgement() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join(file_name(INITIAL_WAL_ID));
         let detached = directory.path().join("detached-wal.log");
-        let mut wal = Wal::create_new(&path, INITIAL_WAL_ID, INITIAL_FIRST_SEQUENCE)
-            .expect("create WAL");
+        let mut wal =
+            Wal::create_new(&path, INITIAL_WAL_ID, INITIAL_FIRST_SEQUENCE).expect("create WAL");
         let authoritative_before = std::fs::read(&path).expect("read initial WAL");
 
         let result = wal.append_with_post_sync_hook(MutationKind::Put, b"key", b"value", || {
