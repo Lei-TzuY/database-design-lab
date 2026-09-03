@@ -33,15 +33,17 @@ because later work has begun.
   `db-core::minimize_failing_workload` performs chunk-removal delta debugging plus 1-minimal cleanup;
   `db-lab-shrink` replays every probe against a fresh persistent candidate, preserves the original
   differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
-- [ ] Compaction. Unix now has non-destructive compact-copy construction; a strict retained
+- [ ] Compaction. The repository has non-destructive compact-copy construction; a strict retained
   generation-directory recovery contract with marker-bound committed-prefix proof; durable final-marker
   publication and generation-id reservations; a reservation-before-build authoritative compact switch;
   generation-aware routed mutations; cooperative cross-process writer exclusion and guarded stale-lock
   recovery; deterministic composed switch fault coverage; durable cleanup of obsolete lower history;
-  reservation-backed guarded retirement of abandoned higher candidates/staging evidence; and an offline
-  legacy one-file migration that retains the source while handing the imported state to `GenerationLogEngine`.
-  The milestone remains open because Windows-equivalent retained-entry durability is still unsupported and
-  direct raw-path writers can deliberately bypass the generation-aware ownership contract.
+  reservation-backed guarded retirement of abandoned higher candidates/staging evidence; an offline
+  legacy one-file migration that retains the source while handing imported state to `GenerationLogEngine`;
+  and explicit Windows namespace-retirement/cutover protocols using audited write-through Win32 moves.
+  The milestone remains open because direct raw-path writers can deliberately bypass the generation-aware
+  ownership contract; the repository does not claim filesystem sandboxing against a process that
+  intentionally opens canonical generation or retained legacy files directly.
 
 ## Phase 2 — B+ tree engine
 
@@ -163,8 +165,11 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   failing ordered-run timing reports, the failed repetition index, and an already-completed first repetition.
   `db-lab-batch` retains every requested pair as included, failed, or explicitly excluded and publication mode
   enforces release-only `publication_warm_v1`, complete host/storage/filesystem/build/analysis/noise metadata,
-  and rejects unverified cold-cache claims. Remaining blockers are controlled-host data collection and reviewed
-  distribution analysis; repository/hosted-CI timing is not a performance baseline.
+  and rejects unverified cold-cache claims. `db-lab-batch-analyze` supplies verified order-stratified nearest-rank
+  p50/p95 descriptive summaries, while `db-lab-batch-analysis-bundle` retains them beside byte-stable raw
+  evidence. `controlled_publication_session_v2` temporally binds passing host pre/postflight snapshots to v7/v11
+  publication evidence. Remaining blockers are real controlled-host data collection and review of those retained
+  distributions; repository/hosted-CI timing is not a performance baseline.
 - [x] Archive raw data and environment manifests before any result is publishable. The archive family remains
   versioned rather than silently mutating old evidence: single-run lockstep v1; exploratory counterbalanced
   success v2 and failed/excluded v3; single-pair publication success v4 and failed/excluded v5; normal
@@ -174,9 +179,12 @@ Begin only after the B+ tree and common ordered semantics are trustworthy.
   failed repetition, any completed first repetition, stable failure identity, and both engine timing reports
   without changing v6/v7 success schemas. Every path rejects existing archive targets and removes partial
   multi-file archives on write failure.
-- [ ] Establish a controlled pinned performance host before adding regression gates. Publication admission
-  records complete host/filesystem/build/noise metadata but does not itself pin CPU affinity, thermals, turbo,
-  background load, or device/controller conditions; hosted CI remains correctness/build validation only.
+- [ ] Establish a controlled pinned performance host before adding regression gates. Linux
+  `db-lab-host-preflight` checks exact affinity, online CPUs, the `performance` governor, turbo/boost disablement,
+  and an explicit load budget; `controlled_publication_session_v2` encloses publication evidence between passing
+  pre/postflight snapshots; and `scripts/run-controlled-publication.sh` orchestrates the full collection path.
+  The item remains open until those controls are exercised on a real named and reviewed host and actual repeated
+  evidence is collected there; hosted CI remains correctness/build/orchestration validation only.
 
 ## Phase 5+ — selected extensions
 
