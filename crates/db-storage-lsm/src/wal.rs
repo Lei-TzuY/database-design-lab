@@ -243,10 +243,7 @@ impl Wal {
 
     fn ensure_authoritative_path(&self) -> Result<()> {
         let root = self.path.parent().ok_or_else(|| {
-            corruption(
-                0,
-                "active WAL authoritative path has no engine root parent",
-            )
+            corruption(0, "active WAL authoritative path has no engine root parent")
         })?;
         let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
             corruption(
