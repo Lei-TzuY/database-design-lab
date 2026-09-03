@@ -1,11 +1,13 @@
 use std::fs;
+use std::io::Write;
 
-use db_core::KvEngine;
+use db_core::{DbError, KvEngine};
 use tempfile::tempdir;
 
 use super::manifest::{CURRENT_FILE_NAME, CURRENT_SLOT_BYTES};
 use super::wal::{
-    file_name as wal_file_name, MutationKind, Wal, INITIAL_FIRST_SEQUENCE, INITIAL_WAL_ID,
+    encode_record, file_name as wal_file_name, MutationKind, Wal, INITIAL_FIRST_SEQUENCE,
+    INITIAL_WAL_ID,
 };
 use super::{LsmEngine, MUTABLE_MEMTABLE_BYTES_LIMIT};
 
@@ -209,4 +211,37 @@ fn canonical_orphan_wal_is_ignored_then_reclaimed_and_next_id_skips_it() {
     reopened.reopen().expect("reopen WAL 100");
     assert_eq!(reopened.get(b"a").expect("get a"), Some(large_value(0x51)));
     assert_eq!(reopened.get(b"b").expect("get b"), Some(large_value(0x52)));
+}
+
+#[test]
+fn live_lsm_rejects_external_append_before_next_mutation() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    engine.put(b"base", b"one").expect("persist baseline mutation");
+
+    let wal_path = path.join(wal_file_name(INITIAL_WAL_ID));
+    let foreign = encode_record(MutationKind::Put, 2, b"foreign", b"two")
+        .expect("encode valid external WAL record");
+    let mut backing = fs::OpenOptions::new()
+        .append(true)
+        .open(&wal_path)
+        .expect("open active WAL externally");
+    backing
+        .write_all(&foreign)
+        .expect("append valid external WAL record");
+    backing.sync_data().expect("sync external WAL append");
+    drop(backing);
+    let drifted = fs::read(&wal_path).expect("capture externally drifted WAL");
+
+    let error = engine
+        .put(b"ours", b"three")
+        .expect_err("live engine must reject external WAL append drift");
+    assert!(matches!(error, DbError::Corruption { .. }));
+    assert_eq!(
+        fs::read(&wal_path).expect("read WAL after rejected mutation"),
+        drifted,
+        "rejection must not mutate externally drifted WAL"
+    );
+    assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
 }
