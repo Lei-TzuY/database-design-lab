@@ -117,3 +117,31 @@ fn live_lsm_rejects_external_truncation_below_acknowledged_boundary() {
     );
     assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
 }
+
+#[cfg(unix)]
+#[test]
+fn live_lsm_rejects_path_replacement_before_next_mutation() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    engine
+        .put(b"base", b"one")
+        .expect("persist baseline mutation");
+
+    let wal_path = path.join("wal-0000000000000001.log");
+    let replacement_path = path.join("replacement.log");
+    fs::copy(&wal_path, &replacement_path).expect("copy WAL into replacement inode");
+    fs::rename(&replacement_path, &wal_path).expect("atomically replace active WAL path");
+    let replacement = fs::read(&wal_path).expect("capture replacement WAL");
+
+    let error = engine
+        .put(b"ours", b"two")
+        .expect_err("live engine must reject replacement of its active WAL path");
+    assert!(matches!(error, DbError::Corruption { .. }));
+    assert_eq!(
+        fs::read(&wal_path).expect("read replacement WAL after rejected mutation"),
+        replacement,
+        "rejection must not append through an unlinked stale WAL handle"
+    );
+    assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
+}

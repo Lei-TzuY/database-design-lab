@@ -1,9 +1,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crc32fast::Hasher;
 use db_core::{validate_key_value, DbError, Result, MAX_KEY_BYTES, MAX_VALUE_BYTES};
+use same_file::Handle;
 use serde::Serialize;
 
 pub(super) const INITIAL_WAL_ID: u64 = 1;
@@ -89,6 +90,7 @@ pub(super) struct Mutation {
 }
 
 pub(super) struct Wal {
+    path: PathBuf,
     file: File,
     wal_id: u64,
     first_sequence: u64,
@@ -130,6 +132,7 @@ impl Wal {
         file.sync_all()?;
         let acknowledged_prefix_hasher = hash_file_prefix(&mut file, WAL_HEADER_LEN_U64)?;
         Ok(Self {
+            path: path.to_path_buf(),
             file,
             wal_id,
             first_sequence,
@@ -157,6 +160,7 @@ impl Wal {
         let acknowledged_prefix_hasher = hash_file_prefix(&mut file, scan.valid_bytes)?;
         file.seek(SeekFrom::End(0))?;
         Ok(Self {
+            path: path.to_path_buf(),
             file,
             wal_id: expected_wal_id,
             first_sequence: expected_first_sequence,
@@ -199,6 +203,7 @@ impl Wal {
             .checked_add(encoded_bytes)
             .ok_or_else(|| corruption(0, "acknowledged WAL byte boundary overflowed u64"))?;
 
+        self.ensure_authoritative_path()?;
         let observed_eof = self.file.seek(SeekFrom::End(0))?;
         if observed_eof != self.acknowledged_valid_bytes {
             return Err(corruption(
@@ -234,6 +239,24 @@ impl Wal {
         self.record_count = next_record_count;
         self.acknowledged_valid_bytes = next_acknowledged_valid_bytes;
         Ok(sequence)
+    }
+
+    fn ensure_authoritative_path(&self) -> Result<()> {
+        let authoritative = File::open(&self.path).map_err(|error| {
+            corruption(
+                0,
+                format!("active WAL authoritative path unavailable before mutation: {error}"),
+            )
+        })?;
+        let live_handle = Handle::from_file(self.file.try_clone()?)?;
+        let authoritative_handle = Handle::from_file(authoritative)?;
+        if live_handle != authoritative_handle {
+            return Err(corruption(
+                0,
+                "active WAL path now resolves to a different file object",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn recovered_tail(&self) -> Option<&RecoveredWalTail> {
