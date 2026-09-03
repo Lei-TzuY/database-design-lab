@@ -242,6 +242,18 @@ impl Wal {
     }
 
     fn ensure_authoritative_path(&self) -> Result<()> {
+        let metadata = std::fs::symlink_metadata(&self.path).map_err(|error| {
+            corruption(
+                0,
+                format!("active WAL authoritative path unavailable before mutation: {error}"),
+            )
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(corruption(
+                0,
+                "active WAL authoritative path is not a direct regular file",
+            ));
+        }
         let authoritative = File::open(&self.path).map_err(|error| {
             corruption(
                 0,

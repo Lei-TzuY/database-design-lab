@@ -145,3 +145,33 @@ fn live_lsm_rejects_path_replacement_before_next_mutation() {
     );
     assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
 }
+
+#[cfg(unix)]
+#[test]
+fn live_lsm_rejects_authoritative_wal_path_changed_to_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("engine");
+    let mut engine = LsmEngine::create_new(&path).expect("create LSM engine");
+    engine
+        .put(b"base", b"one")
+        .expect("persist baseline mutation");
+
+    let wal_path = path.join("wal-0000000000000001.log");
+    let backing_path = path.join("wal-backing.log");
+    fs::rename(&wal_path, &backing_path).expect("move authoritative WAL to backing pathname");
+    symlink(&backing_path, &wal_path).expect("replace authoritative WAL pathname with symlink");
+    let before = fs::read(&backing_path).expect("capture durable WAL before rejected mutation");
+
+    let error = engine
+        .put(b"ours", b"two")
+        .expect_err("live engine must reject authoritative WAL pathname becoming a symlink");
+    assert!(matches!(error, DbError::Corruption { .. }));
+    assert_eq!(
+        fs::read(&backing_path).expect("read backing WAL after rejected mutation"),
+        before,
+        "rejection must not append through a symlinked authoritative WAL pathname"
+    );
+    assert!(matches!(engine.get(b"base"), Err(DbError::Poisoned)));
+}
