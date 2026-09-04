@@ -136,6 +136,13 @@ impl<'a> ReadWriteTransaction<'a> {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "DELETE is part of the transaction surface and is exercised by regression transactions, while the CLI counter demo only needs PUT"
+        )
+    )]
     fn delete(&mut self, key: &[u8]) -> Result<()> {
         validate_key(key)?;
         self.overlay.insert(key.to_vec(), None);
