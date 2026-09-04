@@ -147,7 +147,9 @@ fn parse_tx_key(key: &[u8]) -> Result<Option<u64>> {
         return Ok(None);
     };
     if suffix.len() != 8 {
-        return Err(corruption("incremental transaction key has invalid id width"));
+        return Err(corruption(
+            "incremental transaction key has invalid id width",
+        ));
     }
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(suffix);
