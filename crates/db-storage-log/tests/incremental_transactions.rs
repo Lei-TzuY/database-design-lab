@@ -161,5 +161,8 @@ fn incremental_cli_rejects_legacy_snapshot_database_without_mutating_it() {
         "unexpected stderr: {}",
         String::from_utf8_lossy(&v2.stderr)
     );
-    assert_eq!(std::fs::read(&path_buf).expect("bytes after rejection"), before);
+    assert_eq!(
+        std::fs::read(&path_buf).expect("bytes after rejection"),
+        before
+    );
 }
