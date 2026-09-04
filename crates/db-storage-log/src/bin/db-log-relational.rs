@@ -73,7 +73,11 @@ fn run() -> Result<()> {
         }
         "catalog" if args.len() == 3 => {
             for (name, schema) in engine.catalog() {
-                println!("{name}\tcolumns={}\tprimary_key={}", schema.columns.len(), schema.primary_key);
+                println!(
+                    "{name}\tcolumns={}\tprimary_key={}",
+                    schema.columns.len(),
+                    schema.primary_key
+                );
             }
         }
         _ => return Err(usage()),
