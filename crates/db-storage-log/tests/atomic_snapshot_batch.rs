@@ -100,7 +100,9 @@ fn incomplete_final_transaction_record_recovers_all_or_none() {
     assert_eq!(stdout(&c), "null");
 
     assert_eq!(
-        std::fs::metadata(&path_buf).expect("repaired metadata").len(),
+        std::fs::metadata(&path_buf)
+            .expect("repaired metadata")
+            .len(),
         committed_len,
         "reopen must discard the incomplete final transaction record as one unit"
     );
@@ -119,7 +121,9 @@ fn malformed_batch_is_rejected_before_durable_state_changes() {
     let invalid = run(&[path, "batch", "put:not-hex:32"]);
     assert!(!invalid.status.success());
     assert_eq!(
-        std::fs::metadata(&path_buf).expect("metadata after rejection").len(),
+        std::fs::metadata(&path_buf)
+            .expect("metadata after rejection")
+            .len(),
         committed_len
     );
 
