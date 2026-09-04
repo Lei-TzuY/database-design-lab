@@ -109,8 +109,9 @@ fn encode_snapshot(values: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<Vec<u8>> {
 
     for (key, value) in values {
         validate_key_value(key, value)?;
-        let key_len = u32::try_from(key.len())
-            .map_err(|_| DbError::InvalidInput("snapshot key length does not fit u32".to_owned()))?;
+        let key_len = u32::try_from(key.len()).map_err(|_| {
+            DbError::InvalidInput("snapshot key length does not fit u32".to_owned())
+        })?;
         let value_len = u32::try_from(value.len()).map_err(|_| {
             DbError::InvalidInput("snapshot value length does not fit u32".to_owned())
         })?;
@@ -151,7 +152,9 @@ fn decode_snapshot(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         });
     }
     if read_u16(&bytes[10..12]) != 0 {
-        return Err(corruption("atomic snapshot reserved header bits are nonzero"));
+        return Err(corruption(
+            "atomic snapshot reserved header bits are nonzero",
+        ));
     }
     let trailer_start = bytes
         .len()
@@ -204,7 +207,10 @@ fn decode_snapshot(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         validate_key_value(&key, &value).map_err(|error| {
             corruption(format!("atomic snapshot entry violates KV bounds: {error}"))
         })?;
-        if previous_key.as_ref().is_some_and(|previous| previous >= &key) {
+        if previous_key
+            .as_ref()
+            .is_some_and(|previous| previous >= &key)
+        {
             return Err(corruption(
                 "atomic snapshot keys are not strictly increasing",
             ));
@@ -214,7 +220,9 @@ fn decode_snapshot(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         cursor = value_end;
     }
     if cursor != trailer_start {
-        return Err(corruption("atomic snapshot has unexplained trailing payload"));
+        return Err(corruption(
+            "atomic snapshot has unexplained trailing payload",
+        ));
     }
     Ok(values)
 }
@@ -311,7 +319,8 @@ fn run() -> std::result::Result<(), String> {
                 return Err("get accepts exactly one hex key".to_owned());
             }
             let key = decode_hex(&key)?;
-            let engine = SnapshotTransactionEngine::open(&path).map_err(|error| error.to_string())?;
+            let engine =
+                SnapshotTransactionEngine::open(&path).map_err(|error| error.to_string())?;
             match engine.get(&key).map_err(|error| error.to_string())? {
                 Some(value) => println!("{}", encode_hex(&value)),
                 None => println!("null"),
@@ -325,13 +334,18 @@ fn run() -> std::result::Result<(), String> {
                 return Err("batch requires at least one mutation".to_owned());
             }
             validate_mutations(&mutations).map_err(|error| error.to_string())?;
-            let mut engine = SnapshotTransactionEngine::open(&path).map_err(|error| error.to_string())?;
+            let mut engine =
+                SnapshotTransactionEngine::open(&path).map_err(|error| error.to_string())?;
             engine
                 .commit_batch(&mutations)
                 .map_err(|error| error.to_string())?;
             println!("committed {}", mutations.len());
         }
-        _ => return Err(format!("unknown command {command:?}; expected get or batch")),
+        _ => {
+            return Err(format!(
+                "unknown command {command:?}; expected get or batch"
+            ))
+        }
     }
     Ok(())
 }
