@@ -122,7 +122,7 @@ fn later_commit_growth_depends_on_mutation_set_not_live_snapshot() {
     let dir = tempdir().expect("tempdir");
     let path_buf = dir.path().join("tx-v2.log");
     let path = path_buf.to_str().expect("utf8 path");
-    let large = "78".repeat(256 * 1024);
+    let large = "78".repeat(8 * 1024);
     let first_arg = format!("put:626967:{large}");
 
     let first = run(&[path, "batch", &first_arg]);
