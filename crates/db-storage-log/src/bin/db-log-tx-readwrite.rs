@@ -229,7 +229,9 @@ fn parse_tx_key(key: &[u8]) -> Result<Option<u64>> {
         return Ok(None);
     };
     if suffix.len() != 8 {
-        return Err(corruption("incremental transaction key has invalid id width"));
+        return Err(corruption(
+            "incremental transaction key has invalid id width",
+        ));
     }
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(suffix);
@@ -301,7 +303,9 @@ fn decode_transaction(bytes: &[u8], expected_tx_id: u64) -> Result<Vec<Mutation>
         });
     }
     if read_u16(&bytes[10..12]) != 0 {
-        return Err(corruption("incremental transaction reserved header bits are nonzero"));
+        return Err(corruption(
+            "incremental transaction reserved header bits are nonzero",
+        ));
     }
     let tx_id = read_u64(&bytes[12..20]);
     if tx_id != expected_tx_id {
@@ -334,7 +338,9 @@ fn decode_transaction(bytes: &[u8], expected_tx_id: u64) -> Result<Vec<Mutation>
         .and_then(|payload| payload.checked_add(TX_HEADER_LEN + TX_TRAILER_LEN))
         .ok_or_else(|| corruption("transaction mutation count overflow"))?;
     if minimum > bytes.len() {
-        return Err(corruption("transaction mutation count exceeds available payload"));
+        return Err(corruption(
+            "transaction mutation count exceeds available payload",
+        ));
     }
 
     let mut cursor = TX_HEADER_LEN;
@@ -348,7 +354,9 @@ fn decode_transaction(bytes: &[u8], expected_tx_id: u64) -> Result<Vec<Mutation>
         }
         let kind = bytes[cursor];
         if bytes[cursor + 1..cursor + 4] != [0_u8; 3] {
-            return Err(corruption("transaction mutation reserved header bits are nonzero"));
+            return Err(corruption(
+                "transaction mutation reserved header bits are nonzero",
+            ));
         }
         let key_len = usize::try_from(read_u32(&bytes[cursor + 4..cursor + 8]))
             .map_err(|_| corruption("transaction key length does not fit usize"))?;
@@ -375,20 +383,28 @@ fn decode_transaction(bytes: &[u8], expected_tx_id: u64) -> Result<Vec<Mutation>
             }
             KIND_DELETE => {
                 if value_len != 0 {
-                    return Err(corruption("transaction DELETE unexpectedly contains a value"));
+                    return Err(corruption(
+                        "transaction DELETE unexpectedly contains a value",
+                    ));
                 }
                 validate_key(&key).map_err(|error| {
                     corruption(format!("transaction DELETE violates KV bounds: {error}"))
                 })?;
                 Mutation::Delete { key }
             }
-            other => return Err(corruption(format!("unknown transaction mutation kind {other}"))),
+            other => {
+                return Err(corruption(format!(
+                    "unknown transaction mutation kind {other}"
+                )))
+            }
         };
         mutations.push(mutation);
         cursor = value_end;
     }
     if cursor != trailer_start {
-        return Err(corruption("incremental transaction has unexplained trailing payload"));
+        return Err(corruption(
+            "incremental transaction has unexplained trailing payload",
+        ));
     }
     Ok(mutations)
 }
@@ -458,9 +474,7 @@ fn run_demo(path: &str, workers: usize) -> Result<u64> {
         }));
     }
     for handle in handles {
-        handle
-            .join()
-            .map_err(|_| DbError::Poisoned)??;
+        handle.join().map_err(|_| DbError::Poisoned)??;
     }
     counter_value(engine.get(b"counter")?)
 }
@@ -583,7 +597,12 @@ mod tests {
 
         let mut ids = handles
             .into_iter()
-            .map(|handle| handle.join().expect("worker join").expect("worker transaction"))
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("worker join")
+                    .expect("worker transaction")
+            })
             .collect::<Vec<_>>();
         ids.sort_unstable();
         assert_eq!(ids, (2..=workers + 1).collect::<Vec<_>>());
@@ -623,8 +642,14 @@ mod tests {
                 let b = tx.get(b"b")?.expect("b exists");
                 let sum = format!(
                     "{}",
-                    std::str::from_utf8(&a).expect("utf8 a").parse::<u64>().expect("parse a")
-                        + std::str::from_utf8(&b).expect("utf8 b").parse::<u64>().expect("parse b")
+                    std::str::from_utf8(&a)
+                        .expect("utf8 a")
+                        .parse::<u64>()
+                        .expect("parse a")
+                        + std::str::from_utf8(&b)
+                            .expect("utf8 b")
+                            .parse::<u64>()
+                            .expect("parse b")
                 );
                 tx.put(b"sum", sum.as_bytes())?;
                 tx.delete(b"a")?;
