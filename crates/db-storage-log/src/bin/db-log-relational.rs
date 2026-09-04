@@ -275,7 +275,9 @@ fn parse_tx_key(key: &[u8]) -> Result<Option<u64>> {
         return Ok(None);
     };
     if suffix.len() != 8 {
-        return Err(corruption("relational transaction key has invalid id width"));
+        return Err(corruption(
+            "relational transaction key has invalid id width",
+        ));
     }
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(suffix);
@@ -287,8 +289,9 @@ fn parse_tx_key(key: &[u8]) -> Result<Option<u64>> {
 }
 
 fn encode_transaction(tx_id: u64, ops: &[RelOp]) -> Result<Vec<u8>> {
-    let count = u32::try_from(ops.len())
-        .map_err(|_| DbError::InvalidInput("relational operation count does not fit u32".to_owned()))?;
+    let count = u32::try_from(ops.len()).map_err(|_| {
+        DbError::InvalidInput("relational operation count does not fit u32".to_owned())
+    })?;
     let mut out = Vec::new();
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -352,7 +355,9 @@ fn decode_transaction(bytes: &[u8], expected_tx_id: u64) -> Result<Vec<RelOp>> {
         });
     }
     if read_u16(bytes, 10)? != 0 {
-        return Err(corruption("relational transaction reserved header bits are nonzero"));
+        return Err(corruption(
+            "relational transaction reserved header bits are nonzero",
+        ));
     }
     let tx_id = read_u64(bytes, 12)?;
     if tx_id != expected_tx_id {
@@ -420,12 +425,18 @@ fn decode_transaction(bytes: &[u8], expected_tx_id: u64) -> Result<Vec<RelOp>> {
                 table: take_string(bytes, &mut cursor, trailer)?,
                 key: decode_cell(bytes, &mut cursor, trailer)?,
             },
-            _ => return Err(corruption("relational transaction contains unknown operation")),
+            _ => {
+                return Err(corruption(
+                    "relational transaction contains unknown operation",
+                ))
+            }
         };
         ops.push(op);
     }
     if cursor != trailer {
-        return Err(corruption("relational transaction has trailing payload bytes"));
+        return Err(corruption(
+            "relational transaction has trailing payload bytes",
+        ));
     }
     Ok(ops)
 }
@@ -693,7 +704,10 @@ mod tests {
                 },
                 RelOp::UpsertRow {
                     table: "users".to_owned(),
-                    row: vec![Cell::Text("wrong-key-type".to_owned()), Cell::Text("bad".to_owned())],
+                    row: vec![
+                        Cell::Text("wrong-key-type".to_owned()),
+                        Cell::Text("bad".to_owned()),
+                    ],
                 },
             ])
             .expect_err("mixed valid/invalid relational transaction must fail atomically");
