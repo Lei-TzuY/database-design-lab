@@ -493,7 +493,7 @@ mod tests {
         let path = dir.path().join("incremental.log");
         let path = path.to_str().expect("utf8 path");
         let mut oracle = MemoryEngine::new();
-        let batches = vec![
+        let batches = [
             vec![
                 Mutation::Put {
                     key: b"a".to_vec(),
