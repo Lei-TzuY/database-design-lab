@@ -75,7 +75,7 @@ fn durable_transaction_replays_after_post_sync_pre_publication_crash_model() {
     // state without applying the mutation anywhere else.
     {
         let mut backing = LogEngine::open(path).expect("open backing log");
-        let encoded = encode_single_put(2, b"counter", b"1");
+        let encoded = encode_single_put(2, b"counter", &1_u64.to_le_bytes());
         backing
             .put(&tx_key(2), &encoded)
             .expect("durably append tx=2");
