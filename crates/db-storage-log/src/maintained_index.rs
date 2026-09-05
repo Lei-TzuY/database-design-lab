@@ -35,10 +35,17 @@ impl MaterializedIndex {
             .position(|candidate| candidate.name == spec.column)
             .ok_or_else(|| DbError::InvalidInput(format!("unknown column {}", spec.column)))?;
         let key_type = schema.columns[column_index].ty.clone();
-        let columns = schema.columns.iter().map(|column| column.name.clone()).collect();
+        let columns = schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
         let mut entries: BTreeMap<Cell, Vec<Vec<Cell>>> = BTreeMap::new();
         for (_, row) in engine.rows(&spec.table)? {
-            entries.entry(row[column_index].clone()).or_default().push(row.to_vec());
+            entries
+                .entry(row[column_index].clone())
+                .or_default()
+                .push(row.to_vec());
         }
         Ok(Self {
             key_type,
@@ -64,7 +71,10 @@ impl MaterializedIndex {
             ));
         }
         let projection = self.resolve_projection(projection)?;
-        let columns = projection.iter().map(|index| self.columns[*index].clone()).collect();
+        let columns = projection
+            .iter()
+            .map(|index| self.columns[*index].clone())
+            .collect();
         let mut matching = self
             .entries
             .iter()
@@ -124,12 +134,18 @@ pub struct MaintainedIndexEngine {
 impl MaintainedIndexEngine {
     /// Opens or creates a durable relational database with no registered process-local indexes.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self { engine: RelationalEngine::open(path)?, indexes: BTreeMap::new() })
+        Ok(Self {
+            engine: RelationalEngine::open(path)?,
+            indexes: BTreeMap::new(),
+        })
     }
 
     /// Registers and materializes one catalog-validated secondary index.
     pub fn register_index(&mut self, table: &str, column: &str) -> Result<()> {
-        let spec = IndexSpec { table: table.to_owned(), column: column.to_owned() };
+        let spec = IndexSpec {
+            table: table.to_owned(),
+            column: column.to_owned(),
+        };
         if self.indexes.contains_key(&spec) {
             return Err(DbError::InvalidInput(format!(
                 "secondary index already registered for {table}.{column}"
@@ -189,9 +205,18 @@ mod tests {
     fn users_schema() -> Schema {
         Schema {
             columns: vec![
-                Column { name: "id".to_owned(), ty: ColumnType::Int64 },
-                Column { name: "team".to_owned(), ty: ColumnType::Text },
-                Column { name: "name".to_owned(), ty: ColumnType::Text },
+                Column {
+                    name: "id".to_owned(),
+                    ty: ColumnType::Int64,
+                },
+                Column {
+                    name: "team".to_owned(),
+                    ty: ColumnType::Text,
+                },
+                Column {
+                    name: "name".to_owned(),
+                    ty: ColumnType::Text,
+                },
             ],
             primary_key: 0,
         }
@@ -199,11 +224,42 @@ mod tests {
 
     fn seed(engine: &mut MaintainedIndexEngine) -> Result<()> {
         engine.commit(&[
-            RelOp::CreateTable { name: "users".to_owned(), schema: users_schema() },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(1), Cell::Text("languages".to_owned()), Cell::Text("Ada".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(2), Cell::Text("systems".to_owned()), Cell::Text("Grace".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(3), Cell::Text("systems".to_owned()), Cell::Text("Edsger".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(4), Cell::Text("theory".to_owned()), Cell::Text("Donald".to_owned())] },
+            RelOp::CreateTable {
+                name: "users".to_owned(),
+                schema: users_schema(),
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(1),
+                    Cell::Text("languages".to_owned()),
+                    Cell::Text("Ada".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(2),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Grace".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(3),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Edsger".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(4),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Donald".to_owned()),
+                ],
+            },
         ])?;
         engine.register_index("users", "team")?;
         Ok(())
@@ -228,13 +284,39 @@ mod tests {
         let mut engine = MaintainedIndexEngine::open(&path)?;
         seed(&mut engine)?;
         engine.commit(&[
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(2), Cell::Text("theory".to_owned()), Cell::Text("Grace".to_owned())] },
-            RelOp::DeleteRow { table: "users".to_owned(), key: Cell::Int64(1) },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(0), Cell::Text("systems".to_owned()), Cell::Text("Barbara".to_owned())] },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(2),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Grace".to_owned()),
+                ],
+            },
+            RelOp::DeleteRow {
+                table: "users".to_owned(),
+                key: Cell::Int64(1),
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(0),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Barbara".to_owned()),
+                ],
+            },
         ])?;
-        for op in [CompareOp::Eq, CompareOp::Lt, CompareOp::Le, CompareOp::Gt, CompareOp::Ge] {
+        for op in [
+            CompareOp::Eq,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ] {
             let query = team_query(op);
-            assert_eq!(engine.execute(&query)?, query::execute(engine.relational(), &query)?);
+            assert_eq!(
+                engine.execute(&query)?,
+                query::execute(engine.relational(), &query)?
+            );
         }
         Ok(())
     }
@@ -248,7 +330,14 @@ mod tests {
         let query = team_query(CompareOp::Ge);
         let before = engine.execute(&query)?;
         let next_tx = engine.relational().next_transaction_id();
-        assert!(engine.commit(&[RelOp::UpsertRow { table: "missing".to_owned(), row: vec![Cell::Int64(9)] }]).is_err());
+        assert!(
+            engine
+                .commit(&[RelOp::UpsertRow {
+                    table: "missing".to_owned(),
+                    row: vec![Cell::Int64(9)],
+                }])
+                .is_err()
+        );
         assert_eq!(engine.relational().next_transaction_id(), next_tx);
         assert_eq!(engine.execute(&query)?, before);
         Ok(())
@@ -260,12 +349,22 @@ mod tests {
         let path = dir.path().join("reopen-range.log");
         let mut engine = MaintainedIndexEngine::open(&path)?;
         seed(&mut engine)?;
-        engine.commit(&[RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(5), Cell::Text("theory".to_owned()), Cell::Text("Barbara".to_owned())] }])?;
+        engine.commit(&[RelOp::UpsertRow {
+            table: "users".to_owned(),
+            row: vec![
+                Cell::Int64(5),
+                Cell::Text("theory".to_owned()),
+                Cell::Text("Barbara".to_owned()),
+            ],
+        }])?;
         drop(engine);
         let mut reopened = MaintainedIndexEngine::open(&path)?;
         reopened.register_index("users", "team")?;
         let query = team_query(CompareOp::Ge);
-        assert_eq!(reopened.execute(&query)?, query::execute(reopened.relational(), &query)?);
+        assert_eq!(
+            reopened.execute(&query)?,
+            query::execute(reopened.relational(), &query)?
+        );
         Ok(())
     }
 }
