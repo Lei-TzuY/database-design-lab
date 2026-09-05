@@ -54,9 +54,18 @@ mod tests {
     fn users_schema() -> Schema {
         Schema {
             columns: vec![
-                Column { name: "id".to_owned(), ty: ColumnType::Int64 },
-                Column { name: "team".to_owned(), ty: ColumnType::Text },
-                Column { name: "name".to_owned(), ty: ColumnType::Text },
+                Column {
+                    name: "id".to_owned(),
+                    ty: ColumnType::Int64,
+                },
+                Column {
+                    name: "team".to_owned(),
+                    ty: ColumnType::Text,
+                },
+                Column {
+                    name: "name".to_owned(),
+                    ty: ColumnType::Text,
+                },
             ],
             primary_key: 0,
         }
@@ -64,11 +73,42 @@ mod tests {
 
     fn seed(engine: &mut RelationalEngine) -> Result<()> {
         engine.commit(&[
-            RelOp::CreateTable { name: "users".to_owned(), schema: users_schema() },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(3), Cell::Text("systems".to_owned()), Cell::Text("Edsger".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(1), Cell::Text("languages".to_owned()), Cell::Text("Ada".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(2), Cell::Text("systems".to_owned()), Cell::Text("Grace".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(4), Cell::Text("theory".to_owned()), Cell::Text("Donald".to_owned())] },
+            RelOp::CreateTable {
+                name: "users".to_owned(),
+                schema: users_schema(),
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(3),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Edsger".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(1),
+                    Cell::Text("languages".to_owned()),
+                    Cell::Text("Ada".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(2),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Grace".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(4),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Donald".to_owned()),
+                ],
+            },
         ])?;
         Ok(())
     }
@@ -80,7 +120,13 @@ mod tests {
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
         let executor = IndexedQueryExecutor::build(&engine, "users", "team")?;
-        for op in [CompareOp::Eq, CompareOp::Lt, CompareOp::Le, CompareOp::Gt, CompareOp::Ge] {
+        for op in [
+            CompareOp::Eq,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ] {
             let query = Query {
                 table: "users".to_owned(),
                 predicate: Some(Predicate {
@@ -90,7 +136,10 @@ mod tests {
                 }),
                 projection: Projection::Columns(vec!["id".to_owned(), "name".to_owned()]),
             };
-            assert_eq!(executor.execute(&query)?, query::execute(&engine, &query)?);
+            assert_eq!(
+                executor.execute(&query)?,
+                query::execute(&engine, &query)?
+            );
         }
         Ok(())
     }
@@ -111,7 +160,10 @@ mod tests {
             }),
             projection: Projection::Columns(vec!["name".to_owned()]),
         };
-        assert_eq!(executor.execute(&query)?, query::execute(&engine, &query)?);
+        assert_eq!(
+            executor.execute(&query)?,
+            query::execute(&engine, &query)?
+        );
         Ok(())
     }
 
@@ -122,8 +174,18 @@ mod tests {
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
         engine.commit(&[
-            RelOp::DeleteRow { table: "users".to_owned(), key: Cell::Int64(3) },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(5), Cell::Text("theory".to_owned()), Cell::Text("Barbara".to_owned())] },
+            RelOp::DeleteRow {
+                table: "users".to_owned(),
+                key: Cell::Int64(3),
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(5),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Barbara".to_owned()),
+                ],
+            },
         ])?;
         drop(engine);
         let engine = RelationalEngine::open(&path)?;
@@ -137,7 +199,10 @@ mod tests {
             }),
             projection: Projection::All,
         };
-        assert_eq!(executor.execute(&query)?, query::execute(&engine, &query)?);
+        assert_eq!(
+            executor.execute(&query)?,
+            query::execute(&engine, &query)?
+        );
         Ok(())
     }
 }
