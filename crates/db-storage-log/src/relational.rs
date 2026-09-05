@@ -201,7 +201,9 @@ fn apply_ops(tables: &mut BTreeMap<String, TableState>, ops: &[RelOp]) -> Result
                 validate_name(name, "table")?;
                 validate_schema(schema)?;
                 if tables.contains_key(name) {
-                    return Err(DbError::InvalidInput(format!("table {name} already exists")));
+                    return Err(DbError::InvalidInput(format!(
+                        "table {name} already exists"
+                    )));
                 }
                 tables.insert(
                     name.clone(),
@@ -313,7 +315,9 @@ fn parse_tx_key(key: &[u8]) -> Result<Option<u64>> {
         return Ok(None);
     };
     if suffix.len() != 8 {
-        return Err(corruption("relational transaction key has invalid id width"));
+        return Err(corruption(
+            "relational transaction key has invalid id width",
+        ));
     }
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(suffix);
@@ -631,7 +635,10 @@ mod tests {
         drop(engine);
 
         let engine = RelationalEngine::open(&path)?;
-        assert_eq!(engine.catalog().collect::<Vec<_>>(), vec![("users", &users_schema())]);
+        assert_eq!(
+            engine.catalog().collect::<Vec<_>>(),
+            vec![("users", &users_schema())]
+        );
         assert_eq!(engine.schema("users")?, &users_schema());
         assert_eq!(
             engine.row("users", &Cell::Int64(1))?,
