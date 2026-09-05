@@ -4,6 +4,7 @@ use std::env;
 use std::process::ExitCode;
 
 use db_core::{DbError, Result};
+use db_storage_log::query::{self, CompareOp, Predicate, Projection, Query};
 use db_storage_log::relational::{Cell, Column, ColumnType, RelOp, RelationalEngine, Schema};
 
 fn users_schema() -> Schema {
@@ -26,6 +27,57 @@ fn parse_id(value: &str) -> Result<i64> {
     value
         .parse::<i64>()
         .map_err(|_| DbError::InvalidInput(format!("invalid i64 primary key {value}")))
+}
+
+fn parse_compare_op(value: &str) -> Result<CompareOp> {
+    match value {
+        "eq" => Ok(CompareOp::Eq),
+        "lt" => Ok(CompareOp::Lt),
+        "le" => Ok(CompareOp::Le),
+        "gt" => Ok(CompareOp::Gt),
+        "ge" => Ok(CompareOp::Ge),
+        _ => Err(DbError::InvalidInput(format!(
+            "unknown comparison operator {value}; expected eq|lt|le|gt|ge"
+        ))),
+    }
+}
+
+fn parse_query_literal(
+    engine: &RelationalEngine,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> Result<Cell> {
+    let schema = engine.schema(table)?;
+    let column = schema
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .ok_or_else(|| DbError::InvalidInput(format!("unknown column {column}")))?;
+    match column.ty {
+        ColumnType::Int64 => Ok(Cell::Int64(parse_id(value)?)),
+        ColumnType::Text => Ok(Cell::Text(value.to_owned())),
+    }
+}
+
+fn parse_projection(value: Option<&String>) -> Result<Projection> {
+    match value {
+        None => Ok(Projection::All),
+        Some(value) => {
+            let columns = value
+                .split(',')
+                .map(str::trim)
+                .filter(|column| !column.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                return Err(DbError::InvalidInput(
+                    "query projection must contain at least one column".to_owned(),
+                ));
+            }
+            Ok(Projection::Columns(columns))
+        }
+    }
 }
 
 fn run() -> Result<()> {
@@ -80,6 +132,29 @@ fn run() -> Result<()> {
                 );
             }
         }
+        "query" if args.len() == 6 || args.len() == 7 => {
+            let table = "users";
+            let literal = parse_query_literal(&engine, table, &args[3], &args[5])?;
+            let result = query::execute(
+                &engine,
+                &Query {
+                    table: table.to_owned(),
+                    predicate: Some(Predicate {
+                        column: args[3].clone(),
+                        op: parse_compare_op(&args[4])?,
+                        value: literal,
+                    }),
+                    projection: parse_projection(args.get(6))?,
+                },
+            )?;
+            println!("{}", result.columns.join("\t"));
+            for row in result.rows {
+                println!(
+                    "{}",
+                    row.iter().map(display_cell).collect::<Vec<_>>().join("\t")
+                );
+            }
+        }
         _ => return Err(usage()),
     }
     Ok(())
@@ -87,7 +162,8 @@ fn run() -> Result<()> {
 
 fn usage() -> DbError {
     DbError::InvalidInput(
-        "usage: db-log-relational <path> <init|put|get|delete|list|catalog> [args]".to_owned(),
+        "usage: db-log-relational <path> <init|put|get|delete|list|catalog|query> [args]; query <column> <eq|lt|le|gt|ge> <value> [comma-separated-projection]"
+            .to_owned(),
     )
 }
 
