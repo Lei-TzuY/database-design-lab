@@ -119,7 +119,12 @@ impl<'a> SecondaryIndex<'a> {
             .get(value)
             .into_iter()
             .flatten()
-            .map(|row| projection.iter().map(|index| row[*index].clone()).collect())
+            .map(|row| {
+                projection
+                    .iter()
+                    .map(|index| row[*index].clone())
+                    .collect()
+            })
             .collect();
         Ok(QueryResult { columns, rows })
     }
