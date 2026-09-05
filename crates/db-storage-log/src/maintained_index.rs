@@ -22,7 +22,6 @@ struct IndexSpec {
 
 #[derive(Debug, Clone)]
 struct MaterializedIndex {
-    spec: IndexSpec,
     key_type: ColumnType,
     columns: Vec<String>,
     entries: BTreeMap<Cell, Vec<Vec<Cell>>>,
@@ -50,7 +49,6 @@ impl MaterializedIndex {
                 .push(row.to_vec());
         }
         Ok(Self {
-            spec,
             key_type,
             columns,
             entries,
