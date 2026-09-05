@@ -120,7 +120,10 @@ fn resolve_projection(schema: &Schema, projection: &Projection) -> Result<Vec<us
     }
 }
 
-fn resolve_predicate<'a>(schema: &Schema, predicate: &'a Predicate) -> Result<(usize, &'a Predicate)> {
+fn resolve_predicate<'a>(
+    schema: &Schema,
+    predicate: &'a Predicate,
+) -> Result<(usize, &'a Predicate)> {
     let index = column_index(schema, &predicate.column)?;
     validate_literal_type(&predicate.value, &schema.columns[index].ty)?;
     Ok((index, predicate))
