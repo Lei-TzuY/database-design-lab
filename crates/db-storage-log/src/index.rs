@@ -185,9 +185,18 @@ mod tests {
     fn users_schema() -> Schema {
         Schema {
             columns: vec![
-                Column { name: "id".to_owned(), ty: ColumnType::Int64 },
-                Column { name: "team".to_owned(), ty: ColumnType::Text },
-                Column { name: "name".to_owned(), ty: ColumnType::Text },
+                Column {
+                    name: "id".to_owned(),
+                    ty: ColumnType::Int64,
+                },
+                Column {
+                    name: "team".to_owned(),
+                    ty: ColumnType::Text,
+                },
+                Column {
+                    name: "name".to_owned(),
+                    ty: ColumnType::Text,
+                },
             ],
             primary_key: 0,
         }
@@ -195,11 +204,42 @@ mod tests {
 
     fn seed(engine: &mut RelationalEngine) -> Result<()> {
         engine.commit(&[
-            RelOp::CreateTable { name: "users".to_owned(), schema: users_schema() },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(3), Cell::Text("systems".to_owned()), Cell::Text("Edsger".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(1), Cell::Text("languages".to_owned()), Cell::Text("Ada".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(2), Cell::Text("systems".to_owned()), Cell::Text("Grace".to_owned())] },
-            RelOp::UpsertRow { table: "users".to_owned(), row: vec![Cell::Int64(4), Cell::Text("theory".to_owned()), Cell::Text("Donald".to_owned())] },
+            RelOp::CreateTable {
+                name: "users".to_owned(),
+                schema: users_schema(),
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(3),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Edsger".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(1),
+                    Cell::Text("languages".to_owned()),
+                    Cell::Text("Ada".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(2),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Grace".to_owned()),
+                ],
+            },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(4),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Donald".to_owned()),
+                ],
+            },
         ])?;
         Ok(())
     }
@@ -211,15 +251,28 @@ mod tests {
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
         let index = SecondaryIndex::build(&engine, "users", "team")?;
-        for op in [CompareOp::Eq, CompareOp::Lt, CompareOp::Le, CompareOp::Gt, CompareOp::Ge] {
+        for op in [
+            CompareOp::Eq,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ] {
             let value = Cell::Text("systems".to_owned());
             let projection = Projection::Columns(vec!["id".to_owned(), "name".to_owned()]);
             let indexed = index.execute_compare(op, &value, &projection)?;
-            let scanned = query::execute(&engine, &Query {
-                table: "users".to_owned(),
-                predicate: Some(Predicate { column: "team".to_owned(), op, value: value.clone() }),
-                projection,
-            })?;
+            let scanned = query::execute(
+                &engine,
+                &Query {
+                    table: "users".to_owned(),
+                    predicate: Some(Predicate {
+                        column: "team".to_owned(),
+                        op,
+                        value: value.clone(),
+                    }),
+                    projection,
+                },
+            )?;
             assert_eq!(indexed, scanned);
         }
         Ok(())
@@ -231,17 +284,27 @@ mod tests {
         let path = dir.path().join("range-reopen.log");
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
-        engine.commit(&[RelOp::DeleteRow { table: "users".to_owned(), key: Cell::Int64(3) }])?;
+        engine.commit(&[RelOp::DeleteRow {
+            table: "users".to_owned(),
+            key: Cell::Int64(3),
+        }])?;
         drop(engine);
         let engine = RelationalEngine::open(&path)?;
         let index = SecondaryIndex::build(&engine, "users", "team")?;
         let value = Cell::Text("systems".to_owned());
         let query = Query {
             table: "users".to_owned(),
-            predicate: Some(Predicate { column: "team".to_owned(), op: CompareOp::Ge, value: value.clone() }),
+            predicate: Some(Predicate {
+                column: "team".to_owned(),
+                op: CompareOp::Ge,
+                value: value.clone(),
+            }),
             projection: Projection::All,
         };
-        assert_eq!(index.execute_compare(CompareOp::Ge, &value, &Projection::All)?, query::execute(&engine, &query)?);
+        assert_eq!(
+            index.execute_compare(CompareOp::Ge, &value, &Projection::All)?,
+            query::execute(&engine, &query)?
+        );
         Ok(())
     }
 
@@ -252,8 +315,19 @@ mod tests {
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
         let index = SecondaryIndex::build(&engine, "users", "team")?;
-        assert!(index.execute_compare(CompareOp::Gt, &Cell::Int64(7), &Projection::All).is_err());
-        assert!(index.execute_eq(&Cell::Text("systems".to_owned()), &Projection::Columns(vec!["missing".to_owned()])).is_err());
+        assert!(
+            index
+                .execute_compare(CompareOp::Gt, &Cell::Int64(7), &Projection::All)
+                .is_err()
+        );
+        assert!(
+            index
+                .execute_eq(
+                    &Cell::Text("systems".to_owned()),
+                    &Projection::Columns(vec!["missing".to_owned()]),
+                )
+                .is_err()
+        );
         Ok(())
     }
 }
