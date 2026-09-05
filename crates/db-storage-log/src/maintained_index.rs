@@ -35,17 +35,10 @@ impl MaterializedIndex {
             .position(|candidate| candidate.name == spec.column)
             .ok_or_else(|| DbError::InvalidInput(format!("unknown column {}", spec.column)))?;
         let key_type = schema.columns[column_index].ty.clone();
-        let columns = schema
-            .columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect();
+        let columns = schema.columns.iter().map(|column| column.name.clone()).collect();
         let mut entries: BTreeMap<Cell, Vec<Vec<Cell>>> = BTreeMap::new();
         for (_, row) in engine.rows(&spec.table)? {
-            entries
-                .entry(row[column_index].clone())
-                .or_default()
-                .push(row.to_vec());
+            entries.entry(row[column_index].clone()).or_default().push(row.to_vec());
         }
         Ok(Self {
             key_type,
@@ -71,10 +64,7 @@ impl MaterializedIndex {
             ));
         }
         let projection = self.resolve_projection(projection)?;
-        let columns = projection
-            .iter()
-            .map(|index| self.columns[*index].clone())
-            .collect();
+        let columns = projection.iter().map(|index| self.columns[*index].clone()).collect();
         let mut matching = self
             .entries
             .iter()
@@ -134,18 +124,12 @@ pub struct MaintainedIndexEngine {
 impl MaintainedIndexEngine {
     /// Opens or creates a durable relational database with no registered process-local indexes.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self {
-            engine: RelationalEngine::open(path)?,
-            indexes: BTreeMap::new(),
-        })
+        Ok(Self { engine: RelationalEngine::open(path)?, indexes: BTreeMap::new() })
     }
 
     /// Registers and materializes one catalog-validated secondary index.
     pub fn register_index(&mut self, table: &str, column: &str) -> Result<()> {
-        let spec = IndexSpec {
-            table: table.to_owned(),
-            column: column.to_owned(),
-        };
+        let spec = IndexSpec { table: table.to_owned(), column: column.to_owned() };
         if self.indexes.contains_key(&spec) {
             return Err(DbError::InvalidInput(format!(
                 "secondary index already registered for {table}.{column}"
@@ -205,18 +189,9 @@ mod tests {
     fn users_schema() -> Schema {
         Schema {
             columns: vec![
-                Column {
-                    name: "id".to_owned(),
-                    ty: ColumnType::Int64,
-                },
-                Column {
-                    name: "team".to_owned(),
-                    ty: ColumnType::Text,
-                },
-                Column {
-                    name: "name".to_owned(),
-                    ty: ColumnType::Text,
-                },
+                Column { name: "id".to_owned(), ty: ColumnType::Int64 },
+                Column { name: "team".to_owned(), ty: ColumnType::Text },
+                Column { name: "name".to_owned(), ty: ColumnType::Text },
             ],
             primary_key: 0,
         }
@@ -224,10 +199,7 @@ mod tests {
 
     fn seed(engine: &mut MaintainedIndexEngine) -> Result<()> {
         engine.commit(&[
-            RelOp::CreateTable {
-                name: "users".to_owned(),
-                schema: users_schema(),
-            },
+            RelOp::CreateTable { name: "users".to_owned(), schema: users_schema() },
             RelOp::UpsertRow {
                 table: "users".to_owned(),
                 row: vec![
@@ -292,10 +264,7 @@ mod tests {
                     Cell::Text("Grace".to_owned()),
                 ],
             },
-            RelOp::DeleteRow {
-                table: "users".to_owned(),
-                key: Cell::Int64(1),
-            },
+            RelOp::DeleteRow { table: "users".to_owned(), key: Cell::Int64(1) },
             RelOp::UpsertRow {
                 table: "users".to_owned(),
                 row: vec![
@@ -313,10 +282,7 @@ mod tests {
             CompareOp::Ge,
         ] {
             let query = team_query(op);
-            assert_eq!(
-                engine.execute(&query)?,
-                query::execute(engine.relational(), &query)?
-            );
+            assert_eq!(engine.execute(&query)?, query::execute(engine.relational(), &query)?);
         }
         Ok(())
     }
@@ -361,10 +327,7 @@ mod tests {
         let mut reopened = MaintainedIndexEngine::open(&path)?;
         reopened.register_index("users", "team")?;
         let query = team_query(CompareOp::Ge);
-        assert_eq!(
-            reopened.execute(&query)?,
-            query::execute(reopened.relational(), &query)?
-        );
+        assert_eq!(reopened.execute(&query)?, query::execute(reopened.relational(), &query)?);
         Ok(())
     }
 }
