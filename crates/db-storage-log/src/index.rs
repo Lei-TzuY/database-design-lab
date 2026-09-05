@@ -119,12 +119,7 @@ impl<'a> SecondaryIndex<'a> {
             .get(value)
             .into_iter()
             .flatten()
-            .map(|row| {
-                projection
-                    .iter()
-                    .map(|index| row[*index].clone())
-                    .collect()
-            })
+            .map(|row| projection.iter().map(|index| row[*index].clone()).collect())
             .collect();
         Ok(QueryResult { columns, rows })
     }
@@ -293,7 +288,8 @@ mod tests {
         )?;
         assert_eq!(indexed, scanned);
         assert_eq!(
-            indexed.rows
+            indexed
+                .rows
                 .iter()
                 .map(|row| row[0].clone())
                 .collect::<Vec<_>>(),
