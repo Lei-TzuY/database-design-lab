@@ -4,5 +4,6 @@
 mod append_log;
 
 pub use append_log::*;
+pub mod index;
 pub mod query;
 pub mod relational;
