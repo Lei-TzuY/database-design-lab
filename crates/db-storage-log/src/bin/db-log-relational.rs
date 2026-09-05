@@ -42,7 +42,12 @@ fn parse_compare_op(value: &str) -> Result<CompareOp> {
     }
 }
 
-fn parse_query_literal(engine: &RelationalEngine, table: &str, column: &str, value: &str) -> Result<Cell> {
+fn parse_query_literal(
+    engine: &RelationalEngine,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> Result<Cell> {
     let schema = engine.schema(table)?;
     let column = schema
         .columns
