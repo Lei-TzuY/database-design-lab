@@ -282,7 +282,10 @@ mod tests {
         ])?;
 
         for query in [query_team("systems"), query_team("languages")] {
-            assert_eq!(engine.execute(&query)?, query::execute(engine.relational(), &query)?);
+            assert_eq!(
+                engine.execute(&query)?,
+                query::execute(engine.relational(), &query)?
+            );
         }
         assert_eq!(
             engine.execute(&query_team("systems"))?.rows,
