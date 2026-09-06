@@ -4,8 +4,7 @@ use db_storage_log::LogEngine;
 use tempfile::tempdir;
 
 #[test]
-fn cooperative_writer_lease_excludes_coordinated_writers_without_claiming_filesystem_sandboxing(
-) {
+fn cooperative_writer_lease_excludes_coordinated_writers_without_claiming_filesystem_sandboxing() {
     let root = tempdir().expect("temporary root");
     let directory = root.path().join("generations");
     std::fs::create_dir(&directory).expect("create generation directory");
