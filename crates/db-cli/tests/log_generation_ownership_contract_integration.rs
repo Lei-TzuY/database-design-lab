@@ -9,7 +9,8 @@ fn cooperative_writer_lease_excludes_coordinated_writers_without_claiming_filesy
     let directory = root.path().join("generations");
     std::fs::create_dir(&directory).expect("create generation directory");
 
-    let lease = acquire_generation_writer_lease(&directory).expect("acquire coordinated writer lease");
+    let lease = acquire_generation_writer_lease(&directory)
+        .expect("acquire coordinated writer lease");
     assert!(matches!(
         acquire_generation_writer_lease(&directory),
         Err(GenerationWriterLockError::Busy { .. })
