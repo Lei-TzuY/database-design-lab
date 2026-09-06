@@ -17,8 +17,9 @@ fn cooperative_writer_lease_excludes_coordinated_writers_without_claiming_filesy
     ));
 
     let raw_generation = directory.join("generation-00000000000000000001.log");
-    let mut deliberately_uncoordinated = LogEngine::create_new_managed_generation(&raw_generation)
-        .expect("explicit managed raw-path API is outside the cooperative lease contract");
+    let mut deliberately_uncoordinated =
+        LogEngine::create_new_managed_generation(&raw_generation)
+            .expect("explicit managed raw-path API is outside the cooperative lease contract");
     deliberately_uncoordinated
         .put(b"outside-contract", b"visible")
         .expect("deliberate raw-path mutation");
