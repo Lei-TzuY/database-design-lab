@@ -330,14 +330,12 @@ mod tests {
         let query = team_query(CompareOp::Ge);
         let before = engine.execute(&query)?;
         let next_tx = engine.relational().next_transaction_id();
-        assert!(
-            engine
-                .commit(&[RelOp::UpsertRow {
-                    table: "missing".to_owned(),
-                    row: vec![Cell::Int64(9)],
-                }])
-                .is_err()
-        );
+        assert!(engine
+            .commit(&[RelOp::UpsertRow {
+                table: "missing".to_owned(),
+                row: vec![Cell::Int64(9)],
+            }])
+            .is_err());
         assert_eq!(engine.relational().next_transaction_id(), next_tx);
         assert_eq!(engine.execute(&query)?, before);
         Ok(())
