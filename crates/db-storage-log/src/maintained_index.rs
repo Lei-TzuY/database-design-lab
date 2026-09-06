@@ -188,11 +188,8 @@ impl MaintainedIndexEngine {
     /// execution falls back to the scan oracle.
     pub fn execute_conjunctive(&self, conjunctive: &ConjunctiveQuery) -> Result<QueryResult> {
         let schema = self.engine.schema(&conjunctive.table)?;
-        let (projection, predicates) = query::prepare_conjunctive(
-            schema,
-            &conjunctive.predicates,
-            &conjunctive.projection,
-        )?;
+        let (projection, predicates) =
+            query::prepare_conjunctive(schema, &conjunctive.predicates, &conjunctive.projection)?;
         let driver = predicates.iter().find_map(|(_, predicate)| {
             let spec = IndexSpec {
                 table: conjunctive.table.clone(),
