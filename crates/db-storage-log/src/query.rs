@@ -56,6 +56,17 @@ pub struct Query {
     pub projection: Projection,
 }
 
+/// Read-only query whose predicates are combined by logical AND.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConjunctiveQuery {
+    /// Table to scan.
+    pub table: String,
+    /// One or more typed predicates, all of which must match.
+    pub predicates: Vec<Predicate>,
+    /// Output projection.
+    pub projection: Projection,
+}
+
 /// Materialized deterministic query result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {
@@ -64,6 +75,9 @@ pub struct QueryResult {
     /// Matching rows in primary-key order.
     pub rows: Vec<Vec<Cell>>,
 }
+
+type ResolvedPredicate<'a> = (usize, &'a Predicate);
+type PreparedConjunction<'a> = (Vec<usize>, Vec<ResolvedPredicate<'a>>);
 
 /// Executes a validated table scan over the durable relational state.
 ///
@@ -90,9 +104,52 @@ pub fn execute(engine: &RelationalEngine, query: &Query) -> Result<QueryResult> 
                 continue;
             }
         }
-        rows.push(projection.iter().map(|index| row[*index].clone()).collect());
+        rows.push(project_row(row, &projection));
     }
     Ok(QueryResult { columns, rows })
+}
+
+/// Executes a validated conjunctive table scan used as the correctness oracle for index-assisted
+/// execution.
+pub fn execute_conjunctive(
+    engine: &RelationalEngine,
+    query: &ConjunctiveQuery,
+) -> Result<QueryResult> {
+    let schema = engine.schema(&query.table)?;
+    let (projection, predicates) =
+        prepare_conjunctive(schema, &query.predicates, &query.projection)?;
+    let columns = projection
+        .iter()
+        .map(|index| schema.columns[*index].name.clone())
+        .collect();
+    let mut rows = Vec::new();
+    for (_, row) in engine.rows(&query.table)? {
+        if predicates
+            .iter()
+            .all(|(index, predicate)| matches_predicate(&row[*index], predicate))
+        {
+            rows.push(project_row(row, &projection));
+        }
+    }
+    Ok(QueryResult { columns, rows })
+}
+
+pub(crate) fn prepare_conjunctive<'a>(
+    schema: &Schema,
+    predicates: &'a [Predicate],
+    projection: &Projection,
+) -> Result<PreparedConjunction<'a>> {
+    if predicates.is_empty() {
+        return Err(DbError::InvalidInput(
+            "conjunctive query must contain at least one predicate".to_owned(),
+        ));
+    }
+    let projection = resolve_projection(schema, projection)?;
+    let predicates = predicates
+        .iter()
+        .map(|predicate| resolve_predicate(schema, predicate))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((projection, predicates))
 }
 
 fn resolve_projection(schema: &Schema, projection: &Projection) -> Result<Vec<usize>> {
@@ -123,7 +180,7 @@ fn resolve_projection(schema: &Schema, projection: &Projection) -> Result<Vec<us
 fn resolve_predicate<'a>(
     schema: &Schema,
     predicate: &'a Predicate,
-) -> Result<(usize, &'a Predicate)> {
+) -> Result<ResolvedPredicate<'a>> {
     let index = column_index(schema, &predicate.column)?;
     validate_literal_type(&predicate.value, &schema.columns[index].ty)?;
     Ok((index, predicate))
@@ -146,7 +203,7 @@ fn validate_literal_type(value: &Cell, ty: &ColumnType) -> Result<()> {
     }
 }
 
-fn matches_predicate(value: &Cell, predicate: &Predicate) -> bool {
+pub(crate) fn matches_predicate(value: &Cell, predicate: &Predicate) -> bool {
     match predicate.op {
         CompareOp::Eq => value == &predicate.value,
         CompareOp::Lt => value < &predicate.value,
@@ -154,6 +211,10 @@ fn matches_predicate(value: &Cell, predicate: &Predicate) -> bool {
         CompareOp::Gt => value > &predicate.value,
         CompareOp::Ge => value >= &predicate.value,
     }
+}
+
+pub(crate) fn project_row(row: &[Cell], projection: &[usize]) -> Vec<Cell> {
+    projection.iter().map(|index| row[*index].clone()).collect()
 }
 
 #[cfg(test)]
@@ -231,6 +292,87 @@ mod tests {
                 vec![Cell::Text("Edsger".to_owned())],
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn conjunctive_scan_filters_all_predicates_after_reopen() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("conjunctive.log");
+        let mut engine = RelationalEngine::open(&path)?;
+        seed(&mut engine)?;
+        drop(engine);
+        let engine = RelationalEngine::open(&path)?;
+        let result = execute_conjunctive(
+            &engine,
+            &ConjunctiveQuery {
+                table: "users".to_owned(),
+                predicates: vec![
+                    Predicate {
+                        column: "id".to_owned(),
+                        op: CompareOp::Ge,
+                        value: Cell::Int64(2),
+                    },
+                    Predicate {
+                        column: "name".to_owned(),
+                        op: CompareOp::Lt,
+                        value: Cell::Text("Grace".to_owned()),
+                    },
+                ],
+                projection: Projection::Columns(vec!["id".to_owned(), "name".to_owned()]),
+            },
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![Cell::Int64(3), Cell::Text("Edsger".to_owned())]]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn conjunctive_validation_rejects_empty_unknown_and_wrong_type_predicates() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("conjunctive-validation.log");
+        let mut engine = RelationalEngine::open(&path)?;
+        seed(&mut engine)?;
+        let empty = execute_conjunctive(
+            &engine,
+            &ConjunctiveQuery {
+                table: "users".to_owned(),
+                predicates: vec![],
+                projection: Projection::All,
+            },
+        )
+        .expect_err("empty conjunction must fail");
+        assert!(matches!(empty, DbError::InvalidInput(_)));
+        let unknown = execute_conjunctive(
+            &engine,
+            &ConjunctiveQuery {
+                table: "users".to_owned(),
+                predicates: vec![Predicate {
+                    column: "missing".to_owned(),
+                    op: CompareOp::Eq,
+                    value: Cell::Int64(1),
+                }],
+                projection: Projection::All,
+            },
+        )
+        .expect_err("unknown predicate column must fail");
+        assert!(matches!(unknown, DbError::InvalidInput(_)));
+        let wrong_type = execute_conjunctive(
+            &engine,
+            &ConjunctiveQuery {
+                table: "users".to_owned(),
+                predicates: vec![Predicate {
+                    column: "id".to_owned(),
+                    op: CompareOp::Eq,
+                    value: Cell::Text("1".to_owned()),
+                }],
+                projection: Projection::All,
+            },
+        )
+        .expect_err("wrong predicate type must fail");
+        assert!(matches!(wrong_type, DbError::InvalidInput(_)));
         Ok(())
     }
 
