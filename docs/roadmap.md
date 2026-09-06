@@ -33,17 +33,18 @@ because later work has begun.
   `db-core::minimize_failing_workload` performs chunk-removal delta debugging plus 1-minimal cleanup;
   `db-lab-shrink` replays every probe against a fresh persistent candidate, preserves the original
   differential failure signature and workload provenance, and writes a create-new minimized JSON regression.
-- [ ] Compaction. The repository has non-destructive compact-copy construction; a strict retained
-  generation-directory recovery contract with marker-bound committed-prefix proof; durable final-marker
-  publication and generation-id reservations; a reservation-before-build authoritative compact switch;
-  generation-aware routed mutations; cooperative cross-process writer exclusion and guarded stale-lock
-  recovery; deterministic composed switch fault coverage; durable cleanup of obsolete lower history;
-  reservation-backed guarded retirement of abandoned higher candidates/staging evidence; an offline
-  legacy one-file migration that retains the source while handing imported state to `GenerationLogEngine`;
-  and explicit Windows namespace-retirement/cutover protocols using audited write-through Win32 moves.
-  The milestone remains open because direct raw-path writers can deliberately bypass the generation-aware
-  ownership contract; the repository does not claim filesystem sandboxing against a process that
-  intentionally opens canonical generation or retained legacy files directly.
+- [x] Compaction and retained-generation ownership. The repository has non-destructive compact-copy
+  construction; a strict retained generation-directory recovery contract with marker-bound committed-prefix
+  proof; durable final-marker publication and generation-id reservations; a reservation-before-build
+  authoritative compact switch; generation-aware routed mutations; cooperative cross-process writer
+  exclusion and guarded stale-lock recovery; deterministic composed switch fault coverage; durable cleanup
+  of obsolete lower history; reservation-backed guarded retirement of abandoned higher candidates/staging
+  evidence; an offline legacy one-file migration that retains the source while handing imported state to
+  `GenerationLogEngine`; and explicit Windows namespace-retirement/cutover protocols using audited
+  write-through Win32 moves. The correctness boundary is explicitly cooperative: coordinated writers must
+  respect the writer lease, while hostile same-user direct filesystem mutation through deliberate managed
+  raw-path access is outside the laboratory's sandboxing claims (`docs/append-log-ownership-boundary.md`,
+  `log_generation_ownership_contract_integration`).
 
 ## Phase 2 — B+ tree engine
 
