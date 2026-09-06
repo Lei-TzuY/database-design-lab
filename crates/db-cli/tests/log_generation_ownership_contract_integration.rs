@@ -9,17 +9,16 @@ fn cooperative_writer_lease_excludes_coordinated_writers_without_claiming_filesy
     let directory = root.path().join("generations");
     std::fs::create_dir(&directory).expect("create generation directory");
 
-    let lease = acquire_generation_writer_lease(&directory)
-        .expect("acquire coordinated writer lease");
+    let lease =
+        acquire_generation_writer_lease(&directory).expect("acquire coordinated writer lease");
     assert!(matches!(
         acquire_generation_writer_lease(&directory),
         Err(GenerationWriterLockError::Busy { .. })
     ));
 
     let raw_generation = directory.join("generation-00000000000000000001.log");
-    let mut deliberately_uncoordinated =
-        LogEngine::create_new_managed_generation(&raw_generation)
-            .expect("explicit managed raw-path API is outside the cooperative lease contract");
+    let mut deliberately_uncoordinated = LogEngine::create_new_managed_generation(&raw_generation)
+        .expect("explicit managed raw-path API is outside the cooperative lease contract");
     deliberately_uncoordinated
         .put(b"outside-contract", b"visible")
         .expect("deliberate raw-path mutation");
@@ -28,7 +27,9 @@ fn cooperative_writer_lease_excludes_coordinated_writers_without_claiming_filesy
     let mut reopened = LogEngine::open_managed_generation(&raw_generation)
         .expect("raw managed generation remains a valid append-log image");
     assert_eq!(
-        reopened.get(b"outside-contract").expect("read raw mutation"),
+        reopened
+            .get(b"outside-contract")
+            .expect("read raw mutation"),
         Some(b"visible".to_vec())
     );
     drop(reopened);
