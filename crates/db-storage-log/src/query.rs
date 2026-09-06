@@ -113,7 +113,8 @@ pub fn execute_conjunctive(
     query: &ConjunctiveQuery,
 ) -> Result<QueryResult> {
     let schema = engine.schema(&query.table)?;
-    let (projection, predicates) = prepare_conjunctive(schema, &query.predicates, &query.projection)?;
+    let (projection, predicates) =
+        prepare_conjunctive(schema, &query.predicates, &query.projection)?;
     let columns = projection
         .iter()
         .map(|index| schema.columns[*index].name.clone())
