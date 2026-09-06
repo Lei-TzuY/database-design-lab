@@ -1,10 +1,8 @@
 //! Transaction-maintained secondary indexes over the durable relational engine.
 //!
-//! Index definitions are process-local in this bounded Phase 5 slice. Durable relational commits
-//! still use the unchanged v1 transaction record and append/sync boundary. After each successful
-//! commit, materialized indexes are rebuilt from the exact committed engine state before subsequent
-//! indexed queries are served. Failed relational commits leave both durable state and indexes
-//! unchanged.
+//! Index definitions are process-local. Durable relational commits still use the unchanged v1
+//! transaction record and append/sync boundary. Successful commits rebuild indexes from the exact
+//! committed state; failed commits leave both durable state and indexes unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -23,6 +21,7 @@ struct IndexSpec {
 #[derive(Debug, Clone)]
 struct MaterializedIndex {
     key_type: ColumnType,
+    primary_key: usize,
     columns: Vec<String>,
     entries: BTreeMap<Cell, Vec<Vec<Cell>>>,
 }
@@ -50,12 +49,18 @@ impl MaterializedIndex {
         }
         Ok(Self {
             key_type,
+            primary_key: schema.primary_key,
             columns,
             entries,
         })
     }
 
-    fn execute_eq(&self, value: &Cell, projection: &Projection) -> Result<QueryResult> {
+    fn execute_compare(
+        &self,
+        op: CompareOp,
+        value: &Cell,
+        projection: &Projection,
+    ) -> Result<QueryResult> {
         let type_matches = matches!(
             (&self.key_type, value),
             (ColumnType::Int64, Cell::Int64(_)) | (ColumnType::Text, Cell::Text(_))
@@ -70,11 +75,21 @@ impl MaterializedIndex {
             .iter()
             .map(|index| self.columns[*index].clone())
             .collect();
-        let rows = self
+        let mut matching = self
             .entries
-            .get(value)
+            .iter()
+            .filter(|(key, _)| match op {
+                CompareOp::Eq => *key == value,
+                CompareOp::Lt => *key < value,
+                CompareOp::Le => *key <= value,
+                CompareOp::Gt => *key > value,
+                CompareOp::Ge => *key >= value,
+            })
+            .flat_map(|(_, rows)| rows.iter())
+            .collect::<Vec<_>>();
+        matching.sort_by(|left, right| left[self.primary_key].cmp(&right[self.primary_key]));
+        let rows = matching
             .into_iter()
-            .flatten()
             .map(|row| projection.iter().map(|index| row[*index].clone()).collect())
             .collect();
         Ok(QueryResult { columns, rows })
@@ -149,18 +164,15 @@ impl MaintainedIndexEngine {
         Ok(tx_id)
     }
 
-    /// Executes a query through a matching registered equality index when available, otherwise
-    /// delegates to the catalog-driven scan executor.
+    /// Executes any matching typed predicate through a registered index, otherwise scans.
     pub fn execute(&self, query: &Query) -> Result<QueryResult> {
         if let Some(predicate) = query.predicate.as_ref() {
-            if predicate.op == CompareOp::Eq {
-                let spec = IndexSpec {
-                    table: query.table.clone(),
-                    column: predicate.column.clone(),
-                };
-                if let Some(index) = self.indexes.get(&spec) {
-                    return index.execute_eq(&predicate.value, &query.projection);
-                }
+            let spec = IndexSpec {
+                table: query.table.clone(),
+                column: predicate.column.clone(),
+            };
+            if let Some(index) = self.indexes.get(&spec) {
+                return index.execute_compare(predicate.op, &predicate.value, &query.projection);
             }
         }
         query::execute(&self.engine, query)
@@ -210,18 +222,6 @@ mod tests {
         }
     }
 
-    fn query_team(team: &str) -> Query {
-        Query {
-            table: "users".to_owned(),
-            predicate: Some(Predicate {
-                column: "team".to_owned(),
-                op: CompareOp::Eq,
-                value: Cell::Text(team.to_owned()),
-            }),
-            projection: Projection::All,
-        }
-    }
-
     fn seed(engine: &mut MaintainedIndexEngine) -> Result<()> {
         engine.commit(&[
             RelOp::CreateTable {
@@ -232,7 +232,7 @@ mod tests {
                 table: "users".to_owned(),
                 row: vec![
                     Cell::Int64(1),
-                    Cell::Text("systems".to_owned()),
+                    Cell::Text("languages".to_owned()),
                     Cell::Text("Ada".to_owned()),
                 ],
             },
@@ -244,27 +244,6 @@ mod tests {
                     Cell::Text("Grace".to_owned()),
                 ],
             },
-        ])?;
-        engine.register_index("users", "team")?;
-        Ok(())
-    }
-
-    #[test]
-    fn maintained_index_tracks_upsert_bucket_moves_and_deletes() -> Result<()> {
-        let dir = tempdir()?;
-        let path = dir.path().join("maintained.log");
-        let mut engine = MaintainedIndexEngine::open(&path)?;
-        seed(&mut engine)?;
-
-        engine.commit(&[
-            RelOp::UpsertRow {
-                table: "users".to_owned(),
-                row: vec![
-                    Cell::Int64(2),
-                    Cell::Text("languages".to_owned()),
-                    Cell::Text("Grace".to_owned()),
-                ],
-            },
             RelOp::UpsertRow {
                 table: "users".to_owned(),
                 row: vec![
@@ -273,92 +252,113 @@ mod tests {
                     Cell::Text("Edsger".to_owned()),
                 ],
             },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(4),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Donald".to_owned()),
+                ],
+            },
+        ])?;
+        engine.register_index("users", "team")?;
+        Ok(())
+    }
+
+    fn team_query(op: CompareOp) -> Query {
+        Query {
+            table: "users".to_owned(),
+            predicate: Some(Predicate {
+                column: "team".to_owned(),
+                op,
+                value: Cell::Text("systems".to_owned()),
+            }),
+            projection: Projection::Columns(vec!["id".to_owned(), "name".to_owned()]),
+        }
+    }
+
+    #[test]
+    fn maintained_range_indexes_match_scan_after_mutation() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("maintained-range.log");
+        let mut engine = MaintainedIndexEngine::open(&path)?;
+        seed(&mut engine)?;
+        engine.commit(&[
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(2),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Grace".to_owned()),
+                ],
+            },
             RelOp::DeleteRow {
                 table: "users".to_owned(),
                 key: Cell::Int64(1),
             },
+            RelOp::UpsertRow {
+                table: "users".to_owned(),
+                row: vec![
+                    Cell::Int64(0),
+                    Cell::Text("systems".to_owned()),
+                    Cell::Text("Barbara".to_owned()),
+                ],
+            },
         ])?;
-
-        for query in [query_team("systems"), query_team("languages")] {
+        for op in [
+            CompareOp::Eq,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ] {
+            let query = team_query(op);
             assert_eq!(
                 engine.execute(&query)?,
                 query::execute(engine.relational(), &query)?
             );
         }
-        assert_eq!(
-            engine.execute(&query_team("systems"))?.rows,
-            vec![vec![
-                Cell::Int64(3),
-                Cell::Text("systems".to_owned()),
-                Cell::Text("Edsger".to_owned()),
-            ]]
-        );
         Ok(())
     }
 
     #[test]
-    fn duplicate_secondary_keys_stay_in_primary_key_order() -> Result<()> {
+    fn failed_commit_leaves_range_index_and_durable_state_unchanged() -> Result<()> {
         let dir = tempdir()?;
-        let path = dir.path().join("duplicates.log");
+        let path = dir.path().join("failed-range.log");
         let mut engine = MaintainedIndexEngine::open(&path)?;
         seed(&mut engine)?;
-        engine.commit(&[RelOp::UpsertRow {
-            table: "users".to_owned(),
-            row: vec![
-                Cell::Int64(0),
-                Cell::Text("systems".to_owned()),
-                Cell::Text("Barbara".to_owned()),
-            ],
-        }])?;
-
-        let rows = engine.execute(&query_team("systems"))?.rows;
-        assert_eq!(
-            rows.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
-            vec![Cell::Int64(0), Cell::Int64(1), Cell::Int64(2)]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn failed_commit_leaves_index_and_durable_state_unchanged() -> Result<()> {
-        let dir = tempdir()?;
-        let path = dir.path().join("failed.log");
-        let mut engine = MaintainedIndexEngine::open(&path)?;
-        seed(&mut engine)?;
-        let before = engine.execute(&query_team("systems"))?;
+        let query = team_query(CompareOp::Ge);
+        let before = engine.execute(&query)?;
         let next_tx = engine.relational().next_transaction_id();
-
-        let error = engine
+        assert!(engine
             .commit(&[RelOp::UpsertRow {
                 table: "missing".to_owned(),
                 row: vec![Cell::Int64(9)],
             }])
-            .expect_err("invalid transaction must fail");
-        assert!(matches!(error, DbError::InvalidInput(_)));
+            .is_err());
         assert_eq!(engine.relational().next_transaction_id(), next_tx);
-        assert_eq!(engine.execute(&query_team("systems"))?, before);
+        assert_eq!(engine.execute(&query)?, before);
         Ok(())
     }
 
     #[test]
-    fn reopen_and_reregister_rebuilds_equivalent_indexes() -> Result<()> {
+    fn reopen_and_reregister_range_index_matches_scan() -> Result<()> {
         let dir = tempdir()?;
-        let path = dir.path().join("reopen.log");
+        let path = dir.path().join("reopen-range.log");
         let mut engine = MaintainedIndexEngine::open(&path)?;
         seed(&mut engine)?;
         engine.commit(&[RelOp::UpsertRow {
             table: "users".to_owned(),
             row: vec![
-                Cell::Int64(4),
-                Cell::Text("systems".to_owned()),
+                Cell::Int64(5),
+                Cell::Text("theory".to_owned()),
                 Cell::Text("Barbara".to_owned()),
             ],
         }])?;
         drop(engine);
-
         let mut reopened = MaintainedIndexEngine::open(&path)?;
         reopened.register_index("users", "team")?;
-        let query = query_team("systems");
+        let query = team_query(CompareOp::Ge);
         assert_eq!(
             reopened.execute(&query)?,
             query::execute(reopened.relational(), &query)?

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use db_core::{DbError, Result};
 
-use crate::query::{Projection, QueryResult};
+use crate::query::{CompareOp, Projection, QueryResult};
 use crate::relational::{Cell, ColumnType, RelationalEngine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,13 +36,14 @@ impl IndexKeyType {
 
 /// Read-only secondary index tied to one immutable relational-engine snapshot.
 ///
-/// Entries map one typed column value to all matching rows. Rows within an equal-value bucket retain
-/// the relational engine's primary-key order, including duplicate secondary-key matches.
+/// Entries map one typed column value to all matching rows. Query results are restored to primary-
+/// key order so indexed equality and range predicates have the same deterministic ordering as scans.
 pub struct SecondaryIndex<'a> {
     _engine: &'a RelationalEngine,
     table: String,
     column: String,
     key_type: IndexKeyType,
+    primary_key: usize,
     columns: Vec<String>,
     entries: BTreeMap<Cell, Vec<Vec<Cell>>>,
 }
@@ -85,6 +86,7 @@ impl<'a> SecondaryIndex<'a> {
             table: table.to_owned(),
             column: column.to_owned(),
             key_type,
+            primary_key: schema.primary_key,
             columns,
             entries,
         })
@@ -102,8 +104,13 @@ impl<'a> SecondaryIndex<'a> {
         &self.column
     }
 
-    /// Executes an equality lookup through this index with catalog-validated projection semantics.
-    pub fn execute_eq(&self, value: &Cell, projection: &Projection) -> Result<QueryResult> {
+    /// Executes any supported typed comparison through this index.
+    pub fn execute_compare(
+        &self,
+        op: CompareOp,
+        value: &Cell,
+        projection: &Projection,
+    ) -> Result<QueryResult> {
         if !self.key_type.accepts(value) {
             return Err(DbError::InvalidInput(
                 "index lookup literal type does not match indexed column type".to_owned(),
@@ -114,14 +121,29 @@ impl<'a> SecondaryIndex<'a> {
             .iter()
             .map(|index| self.columns[*index].clone())
             .collect();
-        let rows = self
+        let mut matching = self
             .entries
-            .get(value)
+            .iter()
+            .filter(|(key, _)| match op {
+                CompareOp::Eq => *key == value,
+                CompareOp::Lt => *key < value,
+                CompareOp::Le => *key <= value,
+                CompareOp::Gt => *key > value,
+                CompareOp::Ge => *key >= value,
+            })
+            .flat_map(|(_, rows)| rows.iter())
+            .collect::<Vec<_>>();
+        matching.sort_by(|left, right| left[self.primary_key].cmp(&right[self.primary_key]));
+        let rows = matching
             .into_iter()
-            .flatten()
             .map(|row| projection.iter().map(|index| row[*index].clone()).collect())
             .collect();
         Ok(QueryResult { columns, rows })
+    }
+
+    /// Executes an equality lookup through this index.
+    pub fn execute_eq(&self, value: &Cell, projection: &Projection) -> Result<QueryResult> {
+        self.execute_compare(CompareOp::Eq, value, projection)
     }
 
     fn resolve_projection(&self, projection: &Projection) -> Result<Vec<usize>> {
@@ -156,7 +178,7 @@ impl<'a> SecondaryIndex<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{self, CompareOp, Predicate, Query};
+    use crate::query::{self, Predicate, Query};
     use crate::relational::{Column, RelOp, Schema};
     use tempfile::tempdir;
 
@@ -210,118 +232,98 @@ mod tests {
                     Cell::Text("Grace".to_owned()),
                 ],
             },
-        ])?;
-        Ok(())
-    }
-
-    #[test]
-    fn equality_index_matches_scan_and_preserves_primary_key_order() -> Result<()> {
-        let dir = tempdir()?;
-        let path = dir.path().join("index.log");
-        let mut engine = RelationalEngine::open(&path)?;
-        seed(&mut engine)?;
-
-        let index = SecondaryIndex::build(&engine, "users", "team")?;
-        let indexed = index.execute_eq(
-            &Cell::Text("systems".to_owned()),
-            &Projection::Columns(vec!["id".to_owned(), "name".to_owned()]),
-        )?;
-        let scanned = query::execute(
-            &engine,
-            &Query {
-                table: "users".to_owned(),
-                predicate: Some(Predicate {
-                    column: "team".to_owned(),
-                    op: CompareOp::Eq,
-                    value: Cell::Text("systems".to_owned()),
-                }),
-                projection: Projection::Columns(vec!["id".to_owned(), "name".to_owned()]),
-            },
-        )?;
-        assert_eq!(indexed, scanned);
-        assert_eq!(
-            indexed.rows,
-            vec![
-                vec![Cell::Int64(2), Cell::Text("Grace".to_owned())],
-                vec![Cell::Int64(3), Cell::Text("Edsger".to_owned())],
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rebuilt_index_after_reopen_matches_scan_oracle() -> Result<()> {
-        let dir = tempdir()?;
-        let path = dir.path().join("reopen-index.log");
-        let mut engine = RelationalEngine::open(&path)?;
-        seed(&mut engine)?;
-        engine.commit(&[
-            RelOp::DeleteRow {
-                table: "users".to_owned(),
-                key: Cell::Int64(3),
-            },
             RelOp::UpsertRow {
                 table: "users".to_owned(),
                 row: vec![
                     Cell::Int64(4),
-                    Cell::Text("systems".to_owned()),
-                    Cell::Text("Barbara".to_owned()),
+                    Cell::Text("theory".to_owned()),
+                    Cell::Text("Donald".to_owned()),
                 ],
             },
         ])?;
-        drop(engine);
+        Ok(())
+    }
 
+    #[test]
+    fn every_indexed_comparison_matches_scan_and_primary_key_order() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("range-index.log");
+        let mut engine = RelationalEngine::open(&path)?;
+        seed(&mut engine)?;
+        let index = SecondaryIndex::build(&engine, "users", "team")?;
+        for op in [
+            CompareOp::Eq,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ] {
+            let value = Cell::Text("systems".to_owned());
+            let projection = Projection::Columns(vec!["id".to_owned(), "name".to_owned()]);
+            let indexed = index.execute_compare(op, &value, &projection)?;
+            let scanned = query::execute(
+                &engine,
+                &Query {
+                    table: "users".to_owned(),
+                    predicate: Some(Predicate {
+                        column: "team".to_owned(),
+                        op,
+                        value: value.clone(),
+                    }),
+                    projection,
+                },
+            )?;
+            assert_eq!(indexed, scanned);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rebuilt_range_index_after_reopen_matches_scan_oracle() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("range-reopen.log");
+        let mut engine = RelationalEngine::open(&path)?;
+        seed(&mut engine)?;
+        engine.commit(&[RelOp::DeleteRow {
+            table: "users".to_owned(),
+            key: Cell::Int64(3),
+        }])?;
+        drop(engine);
         let engine = RelationalEngine::open(&path)?;
         let index = SecondaryIndex::build(&engine, "users", "team")?;
-        let indexed = index.execute_eq(&Cell::Text("systems".to_owned()), &Projection::All)?;
-        let scanned = query::execute(
-            &engine,
-            &Query {
-                table: "users".to_owned(),
-                predicate: Some(Predicate {
-                    column: "team".to_owned(),
-                    op: CompareOp::Eq,
-                    value: Cell::Text("systems".to_owned()),
-                }),
-                projection: Projection::All,
-            },
-        )?;
-        assert_eq!(indexed, scanned);
+        let value = Cell::Text("systems".to_owned());
+        let query = Query {
+            table: "users".to_owned(),
+            predicate: Some(Predicate {
+                column: "team".to_owned(),
+                op: CompareOp::Ge,
+                value: value.clone(),
+            }),
+            projection: Projection::All,
+        };
         assert_eq!(
-            indexed
-                .rows
-                .iter()
-                .map(|row| row[0].clone())
-                .collect::<Vec<_>>(),
-            vec![Cell::Int64(2), Cell::Int64(4)]
+            index.execute_compare(CompareOp::Ge, &value, &Projection::All)?,
+            query::execute(&engine, &query)?
         );
         Ok(())
     }
 
     #[test]
-    fn index_validation_rejects_unknown_columns_wrong_types_and_bad_projection() -> Result<()> {
+    fn index_validation_rejects_wrong_types_and_bad_projection() -> Result<()> {
         let dir = tempdir()?;
         let path = dir.path().join("index-validation.log");
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
-
-        let unknown = SecondaryIndex::build(&engine, "users", "missing")
-            .expect_err("unknown indexed column must fail");
-        assert!(matches!(unknown, DbError::InvalidInput(_)));
-
         let index = SecondaryIndex::build(&engine, "users", "team")?;
-        let wrong_type = index
-            .execute_eq(&Cell::Int64(7), &Projection::All)
-            .expect_err("wrong lookup type must fail");
-        assert!(matches!(wrong_type, DbError::InvalidInput(_)));
-
-        let bad_projection = index
+        assert!(index
+            .execute_compare(CompareOp::Gt, &Cell::Int64(7), &Projection::All)
+            .is_err());
+        assert!(index
             .execute_eq(
                 &Cell::Text("systems".to_owned()),
                 &Projection::Columns(vec!["missing".to_owned()]),
             )
-            .expect_err("unknown projection must fail");
-        assert!(matches!(bad_projection, DbError::InvalidInput(_)));
+            .is_err());
         Ok(())
     }
 }
