@@ -4,6 +4,7 @@
 mod append_log;
 
 pub use append_log::*;
+pub mod disjunctive_query;
 pub mod index;
 pub mod indexed_query;
 pub mod maintained_index;
