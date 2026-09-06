@@ -54,9 +54,18 @@ mod tests {
     fn users_schema() -> Schema {
         Schema {
             columns: vec![
-                Column { name: "id".to_owned(), ty: ColumnType::Int64 },
-                Column { name: "team".to_owned(), ty: ColumnType::Text },
-                Column { name: "name".to_owned(), ty: ColumnType::Text },
+                Column {
+                    name: "id".to_owned(),
+                    ty: ColumnType::Int64,
+                },
+                Column {
+                    name: "team".to_owned(),
+                    ty: ColumnType::Text,
+                },
+                Column {
+                    name: "name".to_owned(),
+                    ty: ColumnType::Text,
+                },
             ],
             primary_key: 0,
         }
@@ -64,7 +73,10 @@ mod tests {
 
     fn seed(engine: &mut RelationalEngine) -> Result<()> {
         engine.commit(&[
-            RelOp::CreateTable { name: "users".to_owned(), schema: users_schema() },
+            RelOp::CreateTable {
+                name: "users".to_owned(),
+                schema: users_schema(),
+            },
             RelOp::UpsertRow {
                 table: "users".to_owned(),
                 row: vec![
@@ -156,7 +168,10 @@ mod tests {
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
         engine.commit(&[
-            RelOp::DeleteRow { table: "users".to_owned(), key: Cell::Int64(3) },
+            RelOp::DeleteRow {
+                table: "users".to_owned(),
+                key: Cell::Int64(3),
+            },
             RelOp::UpsertRow {
                 table: "users".to_owned(),
                 row: vec![
