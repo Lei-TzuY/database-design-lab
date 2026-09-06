@@ -143,7 +143,10 @@ impl OptimisticRelationalEngine {
                     read.table
                 )));
             }
-            let row = state.engine.row(&read.table, &read.key)?.map(<[Cell]>::to_vec);
+            let row = state
+                .engine
+                .row(&read.table, &read.key)?
+                .map(<[Cell]>::to_vec);
             let version = state.row_versions.get(read).copied().unwrap_or(0);
             rows.insert(read.clone(), ObservedRow { row, version });
         }
