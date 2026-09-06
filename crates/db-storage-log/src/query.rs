@@ -76,6 +76,9 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Cell>>,
 }
 
+type ResolvedPredicate<'a> = (usize, &'a Predicate);
+type PreparedConjunction<'a> = (Vec<usize>, Vec<ResolvedPredicate<'a>>);
+
 /// Executes a validated table scan over the durable relational state.
 ///
 /// Column names and literal types are resolved from the catalog before the first row is evaluated.
@@ -135,7 +138,7 @@ pub(crate) fn prepare_conjunctive<'a>(
     schema: &Schema,
     predicates: &'a [Predicate],
     projection: &Projection,
-) -> Result<(Vec<usize>, Vec<(usize, &'a Predicate)>)> {
+) -> Result<PreparedConjunction<'a>> {
     if predicates.is_empty() {
         return Err(DbError::InvalidInput(
             "conjunctive query must contain at least one predicate".to_owned(),
@@ -177,7 +180,7 @@ fn resolve_projection(schema: &Schema, projection: &Projection) -> Result<Vec<us
 fn resolve_predicate<'a>(
     schema: &Schema,
     predicate: &'a Predicate,
-) -> Result<(usize, &'a Predicate)> {
+) -> Result<ResolvedPredicate<'a>> {
     let index = column_index(schema, &predicate.column)?;
     validate_literal_type(&predicate.value, &schema.columns[index].ty)?;
     Ok((index, predicate))
