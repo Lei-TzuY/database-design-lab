@@ -315,19 +315,15 @@ mod tests {
         let mut engine = RelationalEngine::open(&path)?;
         seed(&mut engine)?;
         let index = SecondaryIndex::build(&engine, "users", "team")?;
-        assert!(
-            index
-                .execute_compare(CompareOp::Gt, &Cell::Int64(7), &Projection::All)
-                .is_err()
-        );
-        assert!(
-            index
-                .execute_eq(
-                    &Cell::Text("systems".to_owned()),
-                    &Projection::Columns(vec!["missing".to_owned()]),
-                )
-                .is_err()
-        );
+        assert!(index
+            .execute_compare(CompareOp::Gt, &Cell::Int64(7), &Projection::All)
+            .is_err());
+        assert!(index
+            .execute_eq(
+                &Cell::Text("systems".to_owned()),
+                &Projection::Columns(vec!["missing".to_owned()]),
+            )
+            .is_err());
         Ok(())
     }
 }
