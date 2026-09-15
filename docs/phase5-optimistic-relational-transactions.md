@@ -6,6 +6,8 @@ This slice adds a second single-process concurrency-control experiment above the
 
 Callers declare every row the transaction body may read with `RowRead`. Snapshot capture clones those rows from one mutex-protected relational state. Access to an undeclared row through `OptimisticSnapshot::row` is rejected, so the validator has a complete row read set for this experiment.
 
+Independently calling `OptimisticRelationalEngine::open` for the same canonical database path reuses one process-local state through a weak registry. Cloning a particular wrapper is therefore not a hidden correctness precondition; all live handles to that path share the commit mutex and row-version map.
+
 Each observed row carries both its value and a process-local row version. Rows present when the wrapper opens start at version zero. After a successful durable relational commit, every upserted/deleted row receives that durable transaction id as its new version. Commit validates both value and version, so an A -> B -> A change during the process lifetime is still detected as a conflict.
 
 The transaction body executes without the durable commit mutex. When it returns, commit reacquires the mutex and validates every observed row before calling `RelationalEngine::commit`. If any observed row changed, the operation returns an `InvalidInput` whose message begins with `optimistic transaction conflict`; no relational transaction record is appended, no transaction id is consumed, and nothing is published in memory. Read-only transactions are also revalidated before they return.
@@ -16,7 +18,9 @@ Successful writes still use exactly one existing relational transaction record a
 
 Deterministic contention tests place two transaction bodies behind a barrier after both snapshots exist. When both read the same account and attempt a read-modify-write increment, exactly one commit succeeds and the other conflicts before append; `next_transaction_id` proves the rejected transaction consumed no durable slot. Reopen proves the single committed increment is the only durable state.
 
-A second barrier test uses disjoint rows. Both bodies overlap outside the mutex, both commits succeed with contiguous durable transaction ids, and reopen reproduces both results. An undeclared-read regression proves the explicit read-set contract fails before commit.
+A second same-row barrier test opens the same durable path twice instead of cloning one handle. Exactly one increment commits, proving the public single-process boundary includes independent opens and not only clones.
+
+A third barrier test uses disjoint rows. Both bodies overlap outside the mutex, both commits succeed with contiguous durable transaction ids, and reopen reproduces both results. An undeclared-read regression proves the explicit read-set contract fails before commit.
 
 ## Deliberate limits
 
