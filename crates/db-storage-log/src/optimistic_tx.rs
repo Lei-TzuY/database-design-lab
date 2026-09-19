@@ -6,8 +6,10 @@
 //! durability boundary is unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use db_core::{DbError, Result};
 
@@ -69,6 +71,11 @@ struct VersionedRelationalState {
     row_versions: BTreeMap<RowRead, u64>,
 }
 
+type SharedRelationalState = Arc<Mutex<VersionedRelationalState>>;
+type OpenStateRegistry = Mutex<BTreeMap<PathBuf, Weak<Mutex<VersionedRelationalState>>>>;
+
+static OPEN_STATES: OnceLock<OpenStateRegistry> = OnceLock::new();
+
 /// Cloneable single-process optimistic concurrency wrapper around [`RelationalEngine`].
 ///
 /// Existing rows at open form version zero. Every successful wrapper commit stamps each touched row
@@ -76,18 +83,32 @@ struct VersionedRelationalState {
 /// during the lifetime of this process.
 #[derive(Debug, Clone)]
 pub struct OptimisticRelationalEngine {
-    inner: Arc<Mutex<VersionedRelationalState>>,
+    inner: SharedRelationalState,
 }
 
 impl OptimisticRelationalEngine {
     /// Opens or creates the underlying durable relational database.
+    ///
+    /// Independently opened wrappers for the same canonical path share one
+    /// process-local commit mutex and row-version map. This is required for the
+    /// advertised single-process isolation boundary; cloning one wrapper is not
+    /// a hidden precondition.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(Mutex::new(VersionedRelationalState {
-                engine: RelationalEngine::open(path)?,
-                row_versions: BTreeMap::new(),
-            })),
-        })
+        let identity = database_identity(path.as_ref())?;
+        let registry = OPEN_STATES.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut states = registry.lock().map_err(|_| DbError::Poisoned)?;
+
+        if let Some(inner) = states.get(&identity).and_then(Weak::upgrade) {
+            return Ok(Self { inner });
+        }
+
+        states.retain(|_, state| state.strong_count() > 0);
+        let inner = Arc::new(Mutex::new(VersionedRelationalState {
+            engine: RelationalEngine::open(&identity)?,
+            row_versions: BTreeMap::new(),
+        }));
+        states.insert(identity, Arc::downgrade(&inner));
+        Ok(Self { inner })
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, VersionedRelationalState>> {
@@ -171,6 +192,23 @@ impl OptimisticRelationalEngine {
             }
         }
         Ok(())
+    }
+}
+
+fn database_identity(path: &Path) -> Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(identity) => Ok(identity),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let file_name = path.file_name().ok_or_else(|| {
+                DbError::InvalidInput("database path must name a file".to_owned())
+            })?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            Ok(fs::canonicalize(parent)?.join(file_name))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -363,6 +401,60 @@ mod tests {
             Some(&[Cell::Int64(2), Cell::Int64(21)][..])
         );
         assert_eq!(reopened.next_transaction_id(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn independently_opened_handles_share_one_occ_boundary() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("occ-independent-open.log");
+        seed(&path, &[(1, 0)])?;
+
+        let engines = [
+            OptimisticRelationalEngine::open(&path)?,
+            OptimisticRelationalEngine::open(&path)?,
+        ];
+        let barrier = Arc::new(Barrier::new(2));
+        let read = RowRead::new("accounts", Cell::Int64(1));
+
+        let handles = engines
+            .into_iter()
+            .map(|engine| {
+                let worker_barrier = Arc::clone(&barrier);
+                let worker_read = read.clone();
+                thread::spawn(move || {
+                    engine.transaction(std::slice::from_ref(&worker_read), |snapshot| {
+                        let op = increment_from_snapshot(snapshot, &worker_read)?;
+                        worker_barrier.wait();
+                        Ok(((), vec![op]))
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("worker must not panic"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(
+                    result,
+                    Err(DbError::InvalidInput(message))
+                        if message.starts_with(OPTIMISTIC_CONFLICT_PREFIX)
+                ))
+                .count(),
+            1
+        );
+
+        let reopened = OptimisticRelationalEngine::open(&path)?;
+        assert_eq!(reopened.next_transaction_id()?, 3);
+        assert_eq!(
+            reopened.row("accounts", &Cell::Int64(1))?,
+            Some(vec![Cell::Int64(1), Cell::Int64(1)])
+        );
         Ok(())
     }
 
